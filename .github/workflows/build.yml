@@ -490,6 +490,30 @@ jobs:
             fi
           done
 
+      - name: Ask publish-wheels to put the wheel on the release
+        # The .conda is uploaded above; the wheel stopped at a GitHub
+        # *artifact*, which expires and which no index can link to.
+        # tools/generate_index.py builds both PEP 503 trees out of RELEASE
+        # assets, so a wheel that never lands there is a wheel the index
+        # cannot serve -- which is why pypi-cuda-wheels was still empty.
+        #
+        # Delegated rather than open-coded here, for the same reason the
+        # fragments job asks publish-channel to run: publish-wheels.yml
+        # already gates on the sidecar being present and compares sha256
+        # against the published bytes before refusing a re-upload. A second
+        # copy of that logic in this file would be the one that drifts.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUBDIR: ${{ matrix.cell.platform }}
+          ARTIFACT: wheel-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}-${{ matrix.cell.platform }}
+        run: |
+          set -euo pipefail
+          gh workflow run publish-wheels.yml --ref main \
+            -f subdir="$SUBDIR" \
+            -f artifact="$ARTIFACT" \
+            -f run_id="$GITHUB_RUN_ID"
+          echo "asked publish-wheels to publish $ARTIFACT into $SUBDIR"
+
       - name: Emit repodata fragment
         # Written here (where the artifact is) but COMMITTED once, by the
         # fragments job. 149 link jobs each rebasing and pushing to main is a
