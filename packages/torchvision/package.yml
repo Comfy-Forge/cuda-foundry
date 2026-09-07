@@ -110,6 +110,16 @@ build_env:
   TORCHVISION_INCLUDE: $PREFIX/include
   TORCHVISION_LIBRARY: $PREFIX/lib
 
+# The same search, pointed at where a conda prefix actually keeps these on
+# Windows: the Unix-shaped tree lives under %PREFIX%\Library. With the Linux
+# values, upstream's detection found nothing and did what it always does --
+# warned, built an image extension without the codecs, and left the
+# run_exports claiming them. Measured, not predicted: the win-64 .pyd from
+# run 34169055830 imports libpng16.dll and NOTHING for jpeg, webp or nvjpeg.
+build_env_win:
+  TORCHVISION_INCLUDE: $PREFIX/Library/include
+  TORCHVISION_LIBRARY: $PREFIX/Library/lib
+
 # conda-forge ships a `torchvision`, so carrying any build of this name hides
 # theirs under strict channel priority. Owner decision: carry it completely.
 carry: complete
@@ -127,6 +137,18 @@ verify:
     - libpng
     - libwebp
     - libnvjpeg
+  # The same four libraries under the names Windows gives them, read out of
+  # the conda-forge packages rather than guessed:
+  #   libjpeg-turbo -> jpeg8.dll        libpng  -> libpng16.dll
+  #   libwebp-base  -> libwebp.dll      libnvjpeg -> nvjpeg64_<cuda major>.dll
+  # Prefixes for the same reason as the Linux list: jpeg8 becomes jpeg9 and
+  # nvjpeg64_12 becomes nvjpeg64_13 with the CUDA line, and this has to hold
+  # across every pairing without an edit.
+  expect_linked_win:
+    - jpeg
+    - libpng
+    - libwebp
+    - nvjpeg
   # Three things at once: a CUDA kernel (nms) so a mis-arch'd build fails
   # with cudaErrorNoKernelImageForDevice rather than passing a bare import,
   # and both codec paths, which are what compiling was for.

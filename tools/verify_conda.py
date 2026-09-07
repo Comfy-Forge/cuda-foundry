@@ -347,17 +347,25 @@ def verify(path: Path, ledger: set, expect_arch: str, tmp: Path) -> bool:
             # gate says plainly that it cannot judge -- it does not invent a
             # mapping and then report confidence in it.
             expect_win = _expect_linked(index.get("name", ""), key="expect_linked_win")
-            if not expect_win:
-                print(f"::warning::{index.get('name')} declares verify.expect_linked "
-                      f"but no verify.expect_linked_win, so the codec gate cannot run "
-                      f"on win-64. Imports actually present: {sorted(needed)}")
+            # FAILS when the Windows list is absent, and this was a warning
+            # first -- which is how run 34169055830 published a torchvision
+            # win-64 artifact whose .pyd imports libpng16.dll and NOTHING for
+            # jpeg, webp or nvjpeg. That is the exact trap this gate exists to
+            # catch, and warning about it let it through. A package that states
+            # the expectation on one platform and cannot be checked on another
+            # does not get to publish there.
+            if not rep.check(bool(expect_win),
+                             f"declares verify.expect_linked_win, without which the "
+                             f"codec gate cannot run on win-64. Imports actually "
+                             f"present: {sorted(needed)}"):
+                pass
             else:
                 low = {n.lower() for n in needed}
                 missing = [w for w in expect_win
                            if not any(n.startswith(w.lower()) for n in low)]
                 rep.check(not missing,
                           f"imports every DLL package.yml says it must "
-                          f"(missing {missing}; imports={sorted(needed)[:8]})")
+                          f"(missing {missing}; imports={sorted(needed)[:10]})")
         else:
             missing = [w for w in expect_linked
                        if not any(n.startswith(w) for n in needed)]

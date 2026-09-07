@@ -2,6 +2,12 @@
   "_about": "Published artifacts are immutable: a defective build can never be removed, only superseded by a higher build number and/or neutralised by a metadata patch in patches/. Both of those protect FUTURE solves only -- an existing pixi.lock keeps installing whatever it pinned, silently, forever. This list is the static, self-serve record of every build known to be defective, so anyone holding a lockfile can check it with tools/check_lock.py. Keyed by subdir, then by exact .conda filename; 'fixed_by' names the superseding build to re-lock onto.",
   "linux-64": {},
   "linux-aarch64": {},
-  "win-64": {},
+  "win-64": {
+    "torchvision-0.23.0-cuda128_torch28_py312_h6651153_1.conda": {
+      "reason": "Built without the jpeg, webp and nvjpeg codecs while its run deps claim them. Upstream's detection looks under TORCHVISION_INCLUDE / TORCHVISION_LIBRARY, which pointed at %PREFIX%\\include on win-64 -- a conda prefix keeps that tree under %PREFIX%\\Library. Detection failing is not a build failure upstream: it warns, ships an image extension without the codec, and leaves run_exports declaring it. Measured after the fact from the .pyd's PE import table, which lists libpng16.dll and nothing for jpeg, webp or nvjpeg. torchvision.io.decode_jpeg raises at runtime on this build.",
+      "published_by": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34169055830",
+      "fixed_by": "torchvision-0.23.0-cuda128_torch28_py312_h6651153_2.conda"
+    }
+  },
   "noarch": {}
 }

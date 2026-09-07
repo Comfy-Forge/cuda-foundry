@@ -459,8 +459,8 @@ build:
           :: package.yml `build_env` is substituted here by generate_recipes.py, the same
           :: way build.sh's # CUW_BUILD_ENV_HOOK works. Without it a package that declares
           :: build_env would have it silently applied on Linux and silently dropped here.
-          set "TORCHVISION_INCLUDE=%PREFIX%/include"
-          set "TORCHVISION_LIBRARY=%PREFIX%/lib"
+          set "TORCHVISION_INCLUDE=%PREFIX%/Library/include"
+          set "TORCHVISION_LIBRARY=%PREFIX%/Library/lib"
 
           if not defined PYTHON (
             echo ::error::PYTHON is not set -- rattler-build normally provides it 1>&2
