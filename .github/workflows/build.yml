@@ -39,7 +39,13 @@ permissions:
   actions: write
 
 concurrency:
-  group: build-${{ inputs.package }}-${{ inputs.cuda }}-${{ inputs.pytorch }}-${{ inputs.python }}
+  # The platform is part of the identity. Without it a win-64 and a linux-64
+  # run of the same cell share a group, and since GitHub keeps only ONE pending
+  # run per group, dispatching the second silently CANCELS the first -- which
+  # is what happened to run 34169151895 (torchaudio win-64), evicted by a
+  # linux-64 dispatch of the same package. `cancel-in-progress: false` does not
+  # protect against that: it governs the running job, not the queued one.
+  group: build-${{ inputs.package }}-${{ inputs.cuda }}-${{ inputs.pytorch }}-${{ inputs.python }}-${{ inputs.platform }}
   cancel-in-progress: false
 
 # Every run: block in this file is bash -- `set -euo pipefail`, `shopt`, array
