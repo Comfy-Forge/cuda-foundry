@@ -88,6 +88,35 @@ host_deps:
   # window upstream supports, not a version we happened to test.
   - ffmpeg <7
 
+# gcc 10, below the policy's 13 for CUDA 12.8 (nvcc's ceiling is <15, so this
+# is legal). At 13 the compiler emits
+# _ZSt28__throw_bad_array_new_lengthv@GLIBCXX_3.4.29 into
+# pybind11_prefixctc.so -- GCC 11+ generates it for `new T[n]` -- and
+# manylinux_2_28 permits GLIBCXX only to 3.4.25, so the wheel could not be
+# repaired at any tag (2_31, 2_34 and 2_35 refuse it too). Measured both ways
+# on this cell: gcc 13 fails the repair, gcc 10 passes it, with the same
+# exclude set. The .conda is identical in behaviour either way -- it declares
+# libstdcxx and gets whatever it asks for -- so this costs the conda half
+# nothing.
+gcc_version: "10"
+
+# Libraries the WHEEL must not vendor. auditwheel would otherwise graft
+# ffmpeg and sox in, and with them their own transitive requirements:
+# conda-forge's ffmpeg pulls Abseil and ICU, which need GLIBCXX_3.4.29 and
+# 3.4.30, and the repair then fails on libraries we never compiled.
+#
+# This matches upstream rather than diverging from it. torchaudio's own
+# manylinux_2_28 wheel ships libtorio_ffmpeg4.so with UNRESOLVED DT_NEEDED on
+# libavutil/libavcodec/libavformat/libavfilter, and libtorchaudio_sox.so with
+# unresolved libsox.so, vendors neither, and loads the ffmpeg extension
+# lazily so a machine without ffmpeg simply does not get that backend. The
+# conda package is the one that declares them properly, which is the whole
+# point of building both from one compile.
+wheel_no_vendor:
+  - "libav*"
+  - "libsw*"
+  - "libsox*"
+
 build_deps:
   # torchaudio drives its C++ build through cmake, and it is NOT declared by
   # anything else here. Without it the build silently used whatever cmake was
@@ -131,8 +160,24 @@ verify:
     # missing what upstream's own wheel carries. Exactly the torchvision
     # codec trap, so it is asserted rather than assumed. These are the two
     # libraries that only exist if sox and ffmpeg were really compiled.
-    import os, glob, torchaudio.lib as _lib
+    import os, glob, torio, torchaudio.lib as _lib
     _libs = {os.path.basename(p) for p in glob.glob(os.path.dirname(_lib.__file__) + "/*.so")}
+    _libs |= {os.path.basename(p) for p in glob.glob(os.path.dirname(torio.__file__) + "/lib/*.so")}
+    # What can silently REGRESS is whether the backend was BUILT -- switch
+    # BUILD_SOX or USE_FFMPEG off and these libraries simply do not exist.
+    # Whether one can LOAD is a property of the machine, not the build: the
+    # conda package declares ffmpeg and sox so it always can, while the wheel
+    # deliberately vendors neither (upstream's does not either) and therefore
+    # cannot on a host without them. Asserting existence holds for both.
     assert "libtorchaudio_sox.so" in _libs, sorted(_libs)
+    assert "libtorio_ffmpeg.so" in _libs, sorted(_libs)
+    # And where ffmpeg IS present, the extension must actually work. Note
+    # lazy_import_ffmpeg_ext() returns a _LazyImporter that is NEVER None --
+    # asserting "is not None" passes even when no ffmpeg exists anywhere,
+    # which is how an earlier version of this op reported a working backend
+    # in a venv that had none. is_available() is the real probe.
     from torio._extension import lazy_import_ffmpeg_ext
-    assert lazy_import_ffmpeg_ext() is not None, "torio ffmpeg extension did not load"
+    import ctypes.util
+    if ctypes.util.find_library("avutil"):
+        assert lazy_import_ffmpeg_ext().is_available(), \
+            "ffmpeg is installed but torio's extension will not load"

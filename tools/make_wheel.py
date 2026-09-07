@@ -141,8 +141,28 @@ def conda_spec_to_pep508(spec: str) -> str | None:
     return f"{pypi}{constraint.replace(' ', '')}"
 
 
+def intra_wheel_sonames(wheel: Path) -> list[str]:
+    """Libraries the wheel ALREADY ships, which must never be vendored again.
+
+    A package that bundles its own shared libraries (torchaudio ships
+    torchaudio/lib/libtorchaudio.so and five more) puts them in a directory
+    auditwheel does not search, so it reports them as missing dependencies and
+    refuses the whole repair:
+
+        Cannot repair wheel, because required library "libtorchaudio.so"
+        could not be located
+
+    They are not missing -- they are inside the wheel with $ORIGIN rpaths, and
+    grafting a second copy would be wrong even if it worked. Derived from the
+    wheel rather than declared per package, because "the wheel already has it"
+    is a fact about the artifact, not a policy someone should have to remember.
+    """
+    with zipfile.ZipFile(wheel) as z:
+        return sorted({Path(n).name for n in z.namelist() if n.endswith(".so")})
+
+
 def repair(wheel: Path, out_dir: Path, links_torch: bool,
-           lib_paths: list[str]) -> Path:
+           lib_paths: list[str], no_vendor: list[str] | None = None) -> Path:
     """auditwheel repair -> a manylinux wheel with its libraries vendored."""
     machine = os.uname().machine
     plat = PLAT.get(machine)
@@ -150,6 +170,22 @@ def repair(wheel: Path, out_dir: Path, links_torch: bool,
         sys.exit(f"make_wheel: no manylinux policy mapped for {machine}")
 
     excludes = list(ALWAYS_EXCLUDE)
+    excludes += intra_wheel_sonames(wheel)
+    # package.yml `wheel_no_vendor`: libraries this package loads at RUNTIME
+    # and must not carry. Vendoring them is not merely wasteful -- it drags
+    # their own transitive symbol requirements into the wheel's ABI check, and
+    # conda-forge's C++ libraries are built with a newer libstdc++ than any
+    # manylinux policy allows. Measured on torchaudio: ffmpeg pulls Abseil and
+    # ICU, which need GLIBCXX_3.4.29/3.4.30, and manylinux_2_28 stops at
+    # 3.4.25 -- so the repair fails on libraries we never compiled.
+    #
+    # Excluding them is what upstream does, not a concession: torchaudio's own
+    # manylinux_2_28 wheel ships libtorio_ffmpeg4.so with UNRESOLVED
+    # DT_NEEDED on libavutil/libavcodec/libavformat/libavfilter and
+    # libtorchaudio_sox.so with unresolved libsox.so, vendors neither, and
+    # loads the ffmpeg extension lazily so its absence is tolerated.
+    if no_vendor:
+        excludes += list(no_vendor)
     if links_torch:
         excludes += TORCH_EXCLUDES
     else:
@@ -481,7 +517,8 @@ def main() -> int:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     print(f"== {args.package}: {args.wheel.name}")
-    repaired = repair(args.wheel, args.out_dir, links_torch, args.lib_path)
+    repaired = repair(args.wheel, args.out_dir, links_torch, args.lib_path,
+                      cfg.get("wheel_no_vendor") or [])
 
     vendored = census(repaired)
     unexpected = [v for v in vendored

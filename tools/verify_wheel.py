@@ -209,6 +209,7 @@ def verify(path: Path, args, tmp: Path) -> bool:
     exts = [n for n in names if n.endswith(".so") and ".libs/" not in n]
     rep.check(bool(exts), f"wheel contains extension module(s) ({len(exts)})")
 
+    torch_linked = []
     for n in exts:
         data = z.read(n)
         p = tmp / "ext.so"
@@ -224,8 +225,21 @@ def verify(path: Path, args, tmp: Path) -> bool:
                   f"paths ({absolute[:1]})")
         if args.links_torch:
             needed = re.findall(r"NEEDED\).*?\[(.*?)\]", dyn)
-            rep.check(any(x.startswith(("libtorch", "libc10")) for x in needed),
-                      f"{Path(n).name}: DT_NEEDED proves it links torch")
+            if any(x.startswith(("libtorch", "libc10")) for x in needed):
+                torch_linked.append(Path(n).name)
+
+    # Asserted over the wheel as a WHOLE, not per binary. A package that ships
+    # helper libraries legitimately has some that do not touch torch:
+    # torchaudio's libctc_prefix_decoder.so and pybind11_prefixctc.so are
+    # self-contained CUDA and pybind code with ZERO undefined torch or c10
+    # symbols, so linking libtorch into them would be over-linking (which
+    # upstream does, and which is not a standard to hold ourselves to). What
+    # must be true is that a package declaring links_torch actually links it
+    # somewhere -- otherwise the flavour lock in its dependencies is decorating
+    # a binary that never needed torch at all.
+    if args.links_torch and exts:
+        rep.check(bool(torch_linked),
+                  f"at least one extension links torch ({torch_linked[:3]})")
 
     # ---- the arch list, recorded and real -----------------------------------
     stated = (meta.get("Comfy-Forge-Arch-List") or "").strip()
