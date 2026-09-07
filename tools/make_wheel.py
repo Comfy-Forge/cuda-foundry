@@ -168,8 +168,16 @@ def repair(wheel: Path, out_dir: Path, links_torch: bool,
         env["LD_LIBRARY_PATH"] = os.pathsep.join(
             lib_paths + ([env["LD_LIBRARY_PATH"]] if env.get("LD_LIBRARY_PATH") else []))
 
+    # Repair into a private directory, not straight into --out-dir: the
+    # "exactly one wheel" assertion below has to describe THIS repair, and an
+    # out-dir that already holds a sibling package's wheel would fail it (or,
+    # worse, pick the wrong file).
+    stage = out_dir / f".repair-{wheel.stem}"
+    if stage.exists():
+        shutil.rmtree(stage)
+    stage.mkdir(parents=True)
     cmd = ["auditwheel", "repair", str(wheel), "--plat", plat,
-           "-w", str(out_dir), "--strip"]
+           "-w", str(stage), "--strip"]
     for e in excludes:
         cmd += ["--exclude", e]
     print(f"  $ auditwheel repair --plat {plat} --strip "
@@ -183,10 +191,15 @@ def repair(wheel: Path, out_dir: Path, links_torch: bool,
         if "Grafting" in line or "Setting RPATH" in line or "previous" in line:
             print(f"    {line.strip()}")
 
-    made = sorted(out_dir.glob("*.whl"))
+    made = sorted(stage.glob("*.whl"))
     if len(made) != 1:
         sys.exit(f"make_wheel: expected 1 repaired wheel, found {len(made)}")
-    return made[0]
+    final = out_dir / made[0].name
+    if final.exists():
+        final.unlink()
+    shutil.move(str(made[0]), str(final))
+    shutil.rmtree(stage)
+    return final
 
 
 def census(wheel: Path) -> list[str]:
@@ -287,6 +300,14 @@ def strip_requires(text: str) -> tuple[str, int]:
     return "\n".join(kept) + (sep + body if sep else "\n"), removed
 
 
+def add_requires(text: str, reqs: list[str]) -> str:
+    """Append Requires-Dist lines at the end of the header block."""
+    head, sep, body = text.partition("\n\n")
+    lines = head.rstrip("\n").splitlines()
+    lines += [f"Requires-Dist: {r}" for r in reqs]
+    return "\n".join(lines) + (sep + body if sep else "\n")
+
+
 def set_header(text: str, name: str, value: str) -> str:
     """Insert/replace a header immediately after Metadata-Version.
 
@@ -358,20 +379,22 @@ def finalize(wheel: Path, version_tag: str, arch_list: str,
                 sys.exit("make_wheel: the arch-list header does not parse back "
                          f"cleanly (wrote {arch_list!r}, read {got[:80]!r})")
 
-        # The sidecar is the dependency-bearing view, captured BEFORE the
-        # strip. Its deps come from package.yml's `run_deps` -- the same list
-        # the conda package's `run:` is built from -- so the two formats
-        # cannot drift into declaring different dependencies.
-        sidecar_text = text
-        for spec in run_deps:
-            pep = conda_spec_to_pep508(spec)
-            if pep:
-                sidecar_text = sidecar_text.rstrip("\n").split("\n\n")[0] + \
-                    f"\nRequires-Dist: {pep}\n" + \
-                    ("\n" + sidecar_text.partition("\n\n")[2]
-                     if "\n\n" in sidecar_text else "")
-
+        # Both views start from METADATA with EVERY upstream Requires-Dist
+        # removed, and the sidecar then gets our curated list put back.
+        #
+        # The sidecar deliberately does NOT carry what upstream declared. It
+        # carries package.yml's `run_deps` -- the same list the conda `run:`
+        # section is built from -- so the two formats cannot drift into
+        # declaring different dependencies, which is the whole reason one
+        # repo builds both. Upstream's list is the thing being corrected:
+        # torchvision 0.23.0 declares torch, gdown and scipy here (the last
+        # two are extras), against a curated numpy + pillow>=5.3.0. Keeping
+        # upstream's would reintroduce exactly the build-tools-as-runtime-deps
+        # problem the conda split exists to prevent -- gsplat's `ninja`,
+        # mmcv's `yapf`, flash-attn's `psutil`.
         text, removed = strip_requires(text)
+        sidecar_reqs = [r for r in (conda_spec_to_pep508(d) for d in run_deps) if r]
+        sidecar_text = add_requires(text, sidecar_reqs)
         meta_p.write_text(text, encoding="utf-8")
 
         for line in normalize_rpaths(root):
