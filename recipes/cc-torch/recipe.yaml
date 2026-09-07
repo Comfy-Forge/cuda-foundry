@@ -403,10 +403,30 @@ build:
           # a script that writes exactly "conda" (5 bytes, verified with od at the end
           # of the script) still produces "conda\n" (6 bytes) inside the .conda. So a
           # write here would be dead code that looks load-bearing.
-          for di in "$SITE"/*.dist-info; do
-            [ -d "$di" ] || continue
-            rm -f "$di/direct_url.json" "$di/RECORD"
-          done
+          # Scoped to the dist-info of the wheel THIS build installed, not every
+          # dist-info in the prefix. The glob form deleted direct_url.json and RECORD
+          # from host-environment packages the build does not own -- filelock, fsspec,
+          # jinja2 and markupsafe were all observed losing theirs. It gains the .conda
+          # nothing, because rattler-build packages files that APPEARED in $PREFIX and
+          # those packages were already there; it just corrupts the build environment's
+          # own metadata. Whether it does visible harm depends on which host packages
+          # happen to carry a RECORD, which is not a property to rely on.
+          #
+          # The name comes from the wheel: PEP 427 fixes the first two filename fields
+          # as the escaped name and version, and pip installs that as
+          # "<name>-<version>.dist-info".
+          CUW_WHL_BASE="$(basename "$CUW_WHEEL")"
+          CUW_DI="$SITE/$(echo "$CUW_WHL_BASE" | cut -d- -f1,2).dist-info"
+          if [ -d "$CUW_DI" ]; then
+            rm -f "$CUW_DI/direct_url.json" "$CUW_DI/RECORD"
+            echo "dist-info hygiene: scrubbed $(basename "$CUW_DI")"
+          else
+            # Not a warning to ignore: it means the wheel's own dist-info is not where
+            # its filename says, so direct_url.json would ship with a path from this
+            # machine in it.
+            echo "::error::expected $CUW_DI from $CUW_WHL_BASE, and it is not there -- refusing to ship a dist-info that may still carry direct_url.json" >&2
+            exit 1
+          fi
           if [ -s "$CUW_RSS_LOG" ]; then
             echo "=== nvcc peak RSS per TU (top 10) ==="
             sort -t= -k2 -nr "$CUW_RSS_LOG" | head -10

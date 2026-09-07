@@ -298,8 +298,17 @@ def verify(path: Path, ledger: set, expect_arch: str, tmp: Path) -> bool:
         # entirely from our own source -- so the check was wrong, not the
         # artifact. setuptools-driven builds pass absolute paths and are
         # still covered.
-        foreign = sorted(x for x in ledger
-                         if x.startswith("/") and "/work/" not in x)
+        def _absolute(x):
+            # A Windows TU path is "C:\\...\\work\\..." and starts with a
+            # drive letter, not "/". Testing startswith("/") alone made this
+            # assertion inert on win-64: it judged nothing and still printed
+            # ok, which is worse than not running.
+            return x.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", x) is not None
+
+        def _in_work(x):
+            return "/work/" in x.replace("\\", "/")
+
+        foreign = sorted(x for x in ledger if _absolute(x) and not _in_work(x))
         rep.check(not foreign,
                   f"no compiled TU came from outside the build work tree "
                   f"({len(ledger)} TUs; foreign: {foreign[:2]})")

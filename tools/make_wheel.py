@@ -313,6 +313,10 @@ def normalize_rpaths(root: Path) -> list[str]:
     rpath at all: they are excluded precisely because `import torch` has
     already loaded them, so DT_NEEDED resolves against the running process.
     """
+    # Windows reaches here too and finds nothing: a wheel there contains
+    # .pyd files, DT_RPATH has no counterpart in PE, and patchelf is never
+    # invoked because the glob is empty. That is correct rather than lucky,
+    # but it is worth saying so -- the win branch relies on it.
     changed = []
     for so in sorted(root.rglob("*.so")):
         if ".libs/" in so.as_posix():
@@ -478,7 +482,19 @@ def finalize(wheel: Path, version_tag: str, arch_list: str,
             di.rename(new_di)
         rebuild_record(root, new_di.name)
 
+        # PEP 427 fixes a wheel filename at
+        # name-version(-build)?-python-abi-platform.whl, so the version is
+        # field 2 and there are at least five. Checked rather than assumed:
+        # splitting on "-" and overwriting index 1 silently produced
+        # "fake-0.2+cu128torch2.8" -- no .whl extension at all -- for a file
+        # that did not have the expected shape, and that name would have gone
+        # on to be published.
         stem = wheel.name.split("-")
+        if len(stem) < 5 or not wheel.name.endswith(".whl"):
+            sys.exit(f"make_wheel: {wheel.name!r} is not a PEP 427 wheel "
+                     f"filename (expected name-version-python-abi-platform"
+                     f".whl, got {len(stem)} field(s)). Refusing to rename it "
+                     f"into something that only looks like a wheel.")
         stem[1] = full
         out = wheel.with_name("-".join(stem))
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
@@ -505,6 +521,8 @@ def main() -> int:
     ap.add_argument("--expect-version", default="",
                     help="the cell's version; the wheel's own base version "
                          "must equal it or this refuses to publish")
+    ap.add_argument("--platform", default="linux-64",
+                    help="conda subdir; win-64 skips repair entirely")
     ap.add_argument("--lib-path", action="append", default=[],
                     help="prepended to LD_LIBRARY_PATH so auditwheel can find "
                          "the conda host prefix's libraries (repeatable)")
@@ -517,6 +535,31 @@ def main() -> int:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     print(f"== {args.package}: {args.wheel.name}")
+
+    if args.platform.startswith("win"):
+        # Windows is the same pipeline minus its whole middle, and that is a
+        # property of the platform rather than an unfinished port. A Windows
+        # wheel bundles NO DLL at all: there is no auditwheel, no delvewheel,
+        # no <pkg>.libs directory, and no RPATH -- ELF has no counterpart
+        # here. The .pyd links torch's DLLs and finds them because
+        # `import torch` calls os.add_dll_directory on torch/lib before any
+        # extension of ours is imported, which is the same contract that lets
+        # linux exclude libtorch instead of vendoring it.
+        #
+        # So the glibc floor, the manylinux policy and the vendoring census
+        # are all meaningless, and with them goes the GLIBCXX ceiling that
+        # blocks torchaudio on linux -- there is no libstdc++ in the picture.
+        # What remains is exactly the metadata half: the local version tag,
+        # the dependency strip, and the PEP 658 sidecar.
+        staged = args.out_dir / args.wheel.name
+        shutil.copy2(args.wheel, staged)
+        final, side, n = finalize(staged, local_tag(args.cuda, args.pytorch),
+                                  args.arch_list, run_deps, args.expect_version)
+        print(f"  win-64  : no repair -- Windows wheels vendor nothing")
+        print(f"  wheel   : {final.name}")
+        print(f"  sidecar : {side.name}  ({n} Requires-Dist)")
+        return 0
+
     repaired = repair(args.wheel, args.out_dir, links_torch, args.lib_path,
                       cfg.get("wheel_no_vendor") or [])
 
