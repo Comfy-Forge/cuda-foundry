@@ -6,3 +6,4 @@ __pycache__/
 site/
 .pixi/
 source.tar.gz
+staging/
