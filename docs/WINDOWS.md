@@ -305,3 +305,22 @@ Two ways out, neither taken yet:
 
 The first is the honest one and the second is the cheap one. Deciding is a
 publishing decision, not a build one.
+
+## known_bad.json covers `.conda` only
+
+`known_bad.json` is keyed by subdir and then by exact `.conda` filename, which
+is the right shape for the channel: a published artifact cannot be withdrawn,
+so the list is how someone holding a lockfile discovers that what they pinned
+is defective (`tools/check_lock.py`).
+
+The wheel built from the same compile has no equivalent. When
+`torchvision-0.23.0-cuda128_torch28_py312_h6651153_1.conda` was recorded bad
+for shipping without three of its four codecs, the wheel from that identical
+build — `torchvision-0.23.0+cu128torch2.8-cp312-cp312-win_amd64.whl` — stayed
+on the index with nothing saying so.
+
+Supersession does most of the work now that wheels carry a PEP 427 build tag:
+an absent tag sorts below any present one, so the rebuilt `-2-` wheel wins for
+anyone resolving. What it does not do is tell someone who pinned the old file
+that they should move. Either `known_bad.json` grows a wheel section, or the
+wheel index needs its own way to say it — recorded, not decided.
