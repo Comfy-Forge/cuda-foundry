@@ -27,7 +27,22 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        curl -fsSL https://pixi.sh/install.sh | bash
+        # Retried, because this is a network fetch standing in front of a build
+        # that can run for an hour. Run 34169772235 lost a whole linux-64 cell
+        # to `curl: (35) Recv failure: Connection reset by peer` on this exact
+        # line -- nothing to do with the build, and nothing a rerun of the
+        # compile would have taught us.
+        for attempt in 1 2 3; do
+          if curl -fsSL --retry 3 --retry-connrefused --connect-timeout 15 \
+               https://pixi.sh/install.sh -o "$RUNNER_TEMP/pixi-install.sh"; then
+            break
+          fi
+          echo "pixi installer fetch failed (attempt $attempt/3); retrying"
+          sleep $((attempt * 5))
+        done
+        [ -s "$RUNNER_TEMP/pixi-install.sh" ] || {
+          echo "::error::could not fetch the pixi installer after 3 attempts"; exit 1; }
+        bash "$RUNNER_TEMP/pixi-install.sh"
         echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
         export PATH="$HOME/.pixi/bin:$PATH"
         pixi global install rattler-build
@@ -47,7 +62,15 @@ runs:
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
-        Invoke-RestMethod -Uri https://pixi.sh/install.ps1 | Invoke-Expression
+        # Same reason as the Linux branch: a transient reset here throws away
+        # an entire build.
+        $script = $null
+        foreach ($attempt in 1..3) {
+          try { $script = Invoke-RestMethod -Uri https://pixi.sh/install.ps1; break }
+          catch { Write-Host "pixi installer fetch failed (attempt $attempt/3): $_"; Start-Sleep -Seconds ($attempt * 5) }
+        }
+        if (-not $script) { throw "could not fetch the pixi installer after 3 attempts" }
+        $script | Invoke-Expression
         $pixiBin = Join-Path $env:USERPROFILE ".pixi\bin"
         Add-Content -Path $env:GITHUB_PATH -Value $pixiBin
         $env:PATH = "$pixiBin;$env:PATH"
