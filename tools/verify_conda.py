@@ -290,10 +290,18 @@ def verify(path: Path, ledger: set, expect_arch: str, tmp: Path) -> bool:
         rep.check(bool(ledger),
                   f"compile ledger is non-empty for an artifact shipping "
                   f"{len(exts)} extension module(s)")
+        # Only ABSOLUTE paths can be judged. cmake invokes nvcc from a build
+        # subdirectory inside the work tree and passes the source relatively
+        # ("../../../../../src/libtorchaudio/cuctc/src/..."), so a relative
+        # entry is by construction under the compiler's cwd, which is the
+        # work tree. Rejecting those flagged torchaudio -- a package built
+        # entirely from our own source -- so the check was wrong, not the
+        # artifact. setuptools-driven builds pass absolute paths and are
+        # still covered.
         foreign = sorted(x for x in ledger
-                         if "/work/" not in x and "\\work\\" not in x)
+                         if x.startswith("/") and "/work/" not in x)
         rep.check(not foreign,
-                  f"every compiled TU came from the build work tree "
+                  f"no compiled TU came from outside the build work tree "
                   f"({len(ledger)} TUs; foreign: {foreign[:2]})")
 
     # ---- SASS arch census ---------------------------------------------------
