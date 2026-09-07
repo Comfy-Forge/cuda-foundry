@@ -79,7 +79,14 @@ run_deps: []
 #           rattler-build's run_export carries it to the runtime deps.
 host_deps:
   - sox
-  - ffmpeg
+  # <7 is a hard API bound, not caution. torio's sources use AVFilterLink
+  # members hw_frames_ctx, channel_layout and frame_rate plus
+  # av_get_channel_layout_nb_channels, all REMOVED in ffmpeg 7 -- against
+  # conda-forge's default (9.x today) the compile dies with six errors in
+  # filter_graph.cpp. Upstream's own pre-built download is for ffmpeg 4, 5
+  # and 6 and there is no 7 binding at this release, so <7 is precisely the
+  # window upstream supports, not a version we happened to test.
+  - ffmpeg <7
 
 build_deps:
   # torchaudio drives its C++ build through cmake, and it is NOT declared by
