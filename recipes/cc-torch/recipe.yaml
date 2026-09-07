@@ -27,6 +27,15 @@ build:
       # the recipe must not bake in a single package-level value.
       TORCH_CUDA_ARCH_LIST: ${{ env.get("CUW_ARCH_LIST", default="") }}
       FORCE_CUDA: "1"
+      # The version the cell says this is, handed to the upstreams that ask.
+      # torchvision and torchaudio both read BUILD_VERSION (setup.py) and
+      # otherwise fall back to version.txt plus a git sha -- and there is no
+      # git in the build, because the source arrives as a tarball. So without
+      # this torchvision built "0.23.0a0" while the .conda around it said
+      # "0.23.0": one artifact, two versions, and the wheel's sorts BELOW the
+      # release it claims to be. Upstream's own release process sets exactly
+      # this variable. Packages that do not read it are unaffected.
+      BUILD_VERSION: ${{ version }}
       # package.yml's declared values are the DEFAULT, and on CI they are what
       # runs -- the workflow sets neither override. They are tuned for a 16 GB
       # hosted runner, where peak memory is roughly jobs x nvcc_threads x one

@@ -1,7 +1,12 @@
 name: fused-ssim
 pypi_name: fused_ssim
 import_name: fused_ssim
-version: "0.0.1"
+# Upstream's setup.py declares no version whatsoever, so setuptools falls
+# back to 0.0.0 -- which is what the built wheel carries. This said 0.0.1,
+# a number no upstream artifact has ever had; the dual-output build made it
+# visible by producing fused_ssim-0.0.0-cp312-...whl inside a .conda
+# labelled 0.0.1. make_wheel.py now gates on the two agreeing.
+version: "0.0.0"
 
 # MIT, read from the repo's own LICENSE at the pinned rev.
 license: MIT
