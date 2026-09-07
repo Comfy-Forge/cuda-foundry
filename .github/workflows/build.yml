@@ -291,13 +291,39 @@ jobs:
             echo "::error::recipe $RECIPE does not exist. The matrix cell names a package with no generated recipe -- run scripts/generate_recipes.py and commit, or check the matrix/recipe naming agree."
             exit 1
           fi
+          # No --sandbox: it needs unprivileged namespaces, which hosted
+          # runners do not provide ("sandboxing failure: Operation not
+          # permitted", run 34095721769). The no-network guarantee is imposed
+          # inside the build by scripts/build_snippets/nonet.py instead.
+          # The two platforms disagree on the same variant keys, so the
+          # config is a separate file rather than conditional entries:
+          # c_stdlib is `sysroot` on Linux and `vs` on Windows, and a variant
+          # config has no platform conditionals.
+          #
+          # The host compiler is pinned per cell on BOTH platforms and for the
+          # same reason -- nvcc refuses one outside a window it carries
+          # internally, and nothing in the solve enforces it. On Linux that is
+          # a gcc VERSION (c_compiler_version); on Windows it is a different
+          # compiler PACKAGE (c_compiler -> vs2019/vs2022), because MSVC
+          # versions ship as distinct activation packages. Both tables live in
+          # defaults/policy.yml; host_msvc is read here rather than carried on
+          # the cell so the policy file stays the single source of truth.
+          if [[ "${{ matrix.cell.platform }}" == win-* ]]; then
+            VARIANT_CONFIG=defaults/variants-win.yaml
+            MSVC=$(python -c "import yaml,sys; p=yaml.safe_load(open('defaults/policy.yml'))['host_msvc']; print(p['by_cuda'].get('${{ matrix.cell.cuda }}', p['default']))")
+            echo "win-64: MSVC package $MSVC for CUDA ${{ matrix.cell.cuda }}"
+            COMPILER_ARGS=(--variant c_compiler="$MSVC" --variant cxx_compiler="$MSVC")
+          else
+            VARIANT_CONFIG=defaults/variants.yaml
+            COMPILER_ARGS=(--variant c_compiler_version="${{ matrix.cell.gcc_version }}"
+                           --variant cxx_compiler_version="${{ matrix.cell.gcc_version }}")
+          fi
           rattler-build build --recipe "$RECIPE" \
-            --variant-config defaults/variants.yaml \
+            --variant-config "$VARIANT_CONFIG" \
             --variant cuda_compiler_version="${{ matrix.cell.cuda }}" \
             --variant pytorch="${{ matrix.cell.pytorch }}" \
             --variant python="${{ matrix.cell.python }}" \
-            --variant c_compiler_version="${{ matrix.cell.gcc_version }}" \
-            --variant cxx_compiler_version="${{ matrix.cell.gcc_version }}" \
+            "${COMPILER_ARGS[@]}" \
             --target-platform "${{ matrix.cell.platform }}" \
             --output-dir "$RUNNER_TEMP/out" --test skip --no-build-id \
             --keep-build \
