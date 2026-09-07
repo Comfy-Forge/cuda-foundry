@@ -272,3 +272,36 @@ environment that follows from the measurements above:
   `vs2022_win-64`, `ninja`; **not** `cuda-nvcc`
 - `build.script.env` — `DISTUTILS_USE_SDK=1`
 - `host:` — as linux-64, against `pytorch 2.8.* cuda128_*` from conda-torch
+
+## A wheel filename cannot express a rebuild
+
+Not Windows-specific, but found here and worth writing down where the
+publishing rules live.
+
+A `.conda`'s build string carries the build number — `..._h6651153_0`,
+`..._h6651153_1` — so a rebuild of the same cell publishes under a new name and
+the immutability rule holds without anyone having to think about it. A wheel's
+filename has no such component: `fused_ssim-0.0.0+cu128torch2.8-cp312-cp312-win_amd64.whl`
+is what *every* build of that cell is called, whatever its build number.
+
+`publish-wheels.yml` compares sha256 and hard-errors when the bytes differ,
+which is right — an index anchor carries `#sha256=` and a lockfile pins the
+bytes. But the two facts together mean **a legitimately rebuilt wheel cannot be
+published at all** without first deleting the published asset, which is the one
+thing the immutability rule exists to forbid.
+
+That is currently live: the four linux-64 wheels on the release are dev-box
+builds, and the CI builds of those same cells will produce the same four
+filenames with different bytes. They must be swapped, and the swap is a
+deletion.
+
+Two ways out, neither taken yet:
+
+- put the build number in the local version tag (`+cu128torch2.8.1`), which
+  makes the filename unique but changes the version every consumer sees and
+  what `pip freeze` prints;
+- accept that a wheel is replaceable where a `.conda` is not, and say so
+  explicitly rather than having `publish-wheels.yml` refuse it.
+
+The first is the honest one and the second is the cheap one. Deciding is a
+publishing decision, not a build one.
