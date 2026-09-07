@@ -1,0 +1,247 @@
+<#-
+  The single recipe template. `scripts/generate_recipes.py` renders this once
+  per package into `recipes/<name>/recipe.yaml`, which is COMMITTED and
+  drift-checked in CI. Never hand-edit a generated recipe: fix the template
+  or the package's `package.yml`.
+
+  Two things in here are load-bearing and were established by measurement,
+  not by reading docs (step-0 probe, 2026-09):
+
+  1. rattler-build gives the build script a CLEAN environment — the outer
+     shell's exports do NOT reach it. Anything the script needs must be
+     declared in `build.script.env`, and anything that varies per CI run is
+     read there with `${{ env.get(...) }}`, which is evaluated at render
+     time. This is why every CCACHE_* setting is listed below rather than
+     exported by the workflow.
+  2. CUDA dev packages are NOT pinned to an exact minor. Pinning
+     `cuda-cudart-dev 12.8.*` forces `cuda-version >=12.8,<12.9`, which is
+     UNSAT against a pytorch whose `triton` pin is cuda129-only. The window
+     comes from the pytorch we build against; we just live inside it.
+-#>
+context:
+  name: << conda_name >>
+<%- if family %>
+  # FAMILY package (torchvision/torchaudio): the version is a function of the
+  # torch being built against — torchvision 0.26.0 goes with torch 2.11.0 —
+  # so one committed recipe serves every pairing and the matrix supplies the
+  # cell's version and revision. The defaults are the newest pairing, so a
+  # hand-run without the env still builds something real and reviewable.
+  version: ${{ env.get("CUW_VERSION", default="<< version >>") }}
+<%- else %>
+  version: "<< version >>"
+<%- endif %>
+  cuda_short: ${{ cuda_compiler_version | replace('.', '') }}
+  torch_nodot: ${{ pytorch | replace('.', '') }}
+  py_nodot: ${{ python | replace('.', '') }}
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  # Pre-fetched, patched and tarballed OUTSIDE rattler-build by
+  # scripts/fetch_patched_sources.py. Doing it here instead of with a `git:`
+  # source is what lets the build script run with no network at all: there is
+  # nothing left for it to legitimately download.
+  path: ${{ env.get("CUW_SRC_TARBALL", default="../../source.tar.gz") }}
+
+build:
+  number: ${{ env.get("CUW_BUILD_NUMBER", default="0") }}
+  string: cuda${{ cuda_short }}_torch${{ torch_nodot }}_py${{ py_nodot }}_h${{ hash }}_${{ build_number }}
+  script:
+    env:
+      # ---- what the build is ------------------------------------------
+      # Per-CELL, not per-package: the arch list depends on the CUDA version
+      # (a cu124 build has no sm_100/sm_120), so the matrix supplies it and
+      # the recipe must not bake in a single package-level value.
+      TORCH_CUDA_ARCH_LIST: ${{ env.get("CUW_ARCH_LIST", default="<< arch_list >>") }}
+      FORCE_CUDA: "1"
+      MAX_JOBS: "<< jobs >>"
+      CUW_NVCC_THREADS: "<< nvcc_threads >>"
+<%- if force_source_build %>
+      # ---- L2: force-source flags, declared per package ----------------
+      # Upstream build scripts that will silently download a prebuilt binary
+      # unless told otherwise. Values are the exact strings upstream tests
+      # for; note flash-attn compares against "TRUE", so "1" is a no-op.
+<%- for k, v in force_source_build.items() %>
+      << k >>: << v | tojson >>
+<%- endfor %>
+<%- endif %>
+      # ---- ccache: config must live HERE, not in the outer shell -------
+      CUW_MODE: ${{ env.get("CUW_MODE", default="full") }}
+      CUW_SHARD_INDEX: ${{ env.get("CUW_SHARD_INDEX", default="0") }}
+      CUW_SHARD_COUNT: ${{ env.get("CUW_SHARD_COUNT", default="0") }}
+      CUW_LEDGER: ${{ env.get("CUW_LEDGER", default="/tmp/cuw/ledger.txt") }}
+      CUW_RSS_LOG: ${{ env.get("CUW_RSS_LOG", default="/tmp/cuw/rss.log") }}
+      CUW_CCACHE_BIN: ${{ env.get("CUW_CCACHE_BIN", default="ccache") }}
+      CCACHE_DIR: ${{ env.get("CUW_CCACHE_DIR", default="/tmp/cuw/ccache") }}
+      # BASEDIR must be an ancestor of both the shard and link work dirs, so
+      # ccache rewrites the differing absolute paths out of the hash.
+      CCACHE_BASEDIR: ${{ env.get("CUW_CCACHE_BASEDIR", default="/tmp") }}
+      CCACHE_NOHASHDIR: "1"
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: include_file_ctime,include_file_mtime,time_macros,locale
+      CCACHE_MAXSIZE: "0"
+      # torch >= 2.12 knob: keeps nvcc's dependency generation off the cached
+      # command line. Older torch ignores it; the wrapper writes stub depfiles.
+      TORCH_EXTENSION_SKIP_NVCC_GEN_DEPENDENCIES: "1"
+      CUW_RUN_ID: ${{ env.get("GITHUB_RUN_ID", default="local") }}
+      CUW_RUN_URL: ${{ env.get("CUW_RUN_URL", default="local") }}
+    content:
+      - if: unix
+        then: |
+<< build_sh | indent(10, true) >>
+      - if: win
+        then: |
+          :: NOT WIRED FOR v1 — linux-64 only (see docs/ARCHITECTURE.md#scope).
+          :: Windows needs the .o-restore handoff, MSVC version pinning, and
+          :: the setuptools spawn-rename breakage handled before this is real.
+          echo "win builds are not wired yet" 1>&2
+          exit 1
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ${{ compiler('cxx') }}
+    - ${{ stdlib('c') }}
+    # Without ninja, torch's BuildExtension prints "could not find ninja..
+    # Falling back to using the slow distutils backend" and compiles every
+    # translation unit SERIALLY, ignoring MAX_JOBS entirely -- measured at 12
+    # minutes for one torchvision cell. build.sh already exports PYTORCH_NVCC
+    # for ninja's benefit, so its absence here was an oversight, not a choice.
+    - ninja
+    - if: linux
+      then: patchelf
+    # ---- the CUDA TOOLKIT lives HERE, pinned, and NOT in host: -----------
+    # `cuda_compiler_version` used to name the build string and constrain
+    # NOTHING, so a cell labelled cuda128 compiled against whatever CUDA the
+    # host solve happened to pick. It always picked 12.9: our pytorch pulls
+    # triton, and conda-torch's triton 3.6.0 exists only as cuda129/cuda13x,
+    # so `cuda-version` in host: is pinned to 12.9 by torch itself and a
+    # `cuda-version 12.8.*` there is UNSAT (measured: "triton 3.6.0 would
+    # require cuda-version >=12.9,<13"). torchaudio is the one upstream that
+    # checks: it compiles CUDA_VERSION from <cuda.h> into the extension and
+    # refuses to load beside a torch reporting a different minor --
+    #   "PyTorch has CUDA version 12.8 whereas TorchAudio has CUDA version 12.9"
+    # -- which is how a silent repo-wide mislabel became visible.
+    #
+    # The build environment is solved SEPARATELY and has no torch in it, so it
+    # can be pinned to the cell. cuda.h and cuda_runtime.h ship only in
+    # cuda-cudart-dev, so with the toolkit here and absent from host: there is
+    # exactly one of each on the include path and no ordering to get wrong.
+    # Compiling against the cell's CUDA and running against the >= runtime the
+    # run_export asks for is the safe direction; the reverse is not.
+    - cuda-version ${{ cuda_compiler_version }}.*
+    - cuda-nvcc
+    - cuda-cudart-dev
+    - cuda-cccl
+  host:
+    - python ${{ python }}.*
+    # python_abi's run_export is what puts a real interpreter-ABI bound on the
+    # RUNTIME package. Without it a cp312 extension module declares only an
+    # unbounded `python` and may legally be installed into a py3.10 env. Today
+    # that is masked for torch-linked packages, because pytorch's own
+    # python_abi dep constrains the env transitively — but the mask vanishes
+    # for a links_torch: false package (cumm, spconv), which has no pytorch to
+    # inherit from. Declare it directly rather than depending on a sibling.
+    - python_abi ${{ python }}.* *_cp${{ py_nodot }}
+    - pip
+    - setuptools
+<%- if links_torch %>
+    # The exact torch this compiles against. The build glob is what locks the
+    # CUDA flavour today: a bare minor range would let a cu130 torch satisfy a
+    # cu128 extension.
+    #
+    # An earlier comment here claimed run_exports STRUCTURALLY cannot express
+    # a flavour. That is wrong, and worth correcting rather than deleting: it
+    # is only `pin_subpackage()` that offers version-range or exact-hash and
+    # nothing in between. A run_export is a MatchSpec string, so a producer
+    # can concatenate a build glob onto it, and conda-forge does exactly that
+    # -- see exchcxx-feedstock, whose run_exports is
+    #   {{ pin_subpackage(name, max_pin='x.x') }} cuda{{ ... }}_*
+    # and ~152 conda-forge packages ship a build-carrying three-part spec.
+    #
+    # The reason we still write the glob by hand is narrower and real:
+    # conda-torch's repacked pytorch exports a flavour-BLIND
+    # `pytorch >=2.x,<2.y` today. If it exported the flavour instead, every
+    # recipe here could drop this line and inherit the lock transitively.
+    # That is a one-line change in the producer replacing N in the consumers,
+    # and it belongs in conda-torch, not here.
+    - pytorch ${{ pytorch }}.* cuda${{ cuda_short }}_*
+    # torch's OWN headers include these, so every torch-linked extension needs
+    # them regardless of what its sources reference: ATen/cuda/CUDAContextLight.h
+    # includes <cusparse.h>, and the CUDAContext.h chain pulls the rest.
+    # Measured: without libcusparse-dev the compile dies with
+    # "fatal error: cusparse.h: No such file or directory".
+    # This is the torch-implied floor; anything a package's own sources include
+    # goes in its package.yml host_deps instead of here.
+    - libcusparse-dev
+    - libcublas-dev
+    - libcusolver-dev
+    - libcufft-dev
+    - libcurand-dev
+    # torch 2.4/2.5 link libnvToolsExt, and importing torch is the FIRST thing
+    # a setup.py does -- so without this the build dies before it compiles
+    # anything: "OSError: libnvToolsExt.so.1: cannot open shared object file".
+    # Only the older lines need it (NVTX v3 is header-only), but asking for it
+    # everywhere costs a metapackage and keeps the floor in one place.
+    - cuda-nvtx
+<%- endif %>
+<%- for dep in host_deps %>
+    - << dep >>
+<%- endfor %>
+  run:
+    - python
+    # Every package here ships compiled CUDA kernels, so it states that about
+    # itself rather than leaving it to be inferred. Solving is unaffected --
+    # the requirement already arrives transitively through libtorch -- but a
+    # consumer asking "does this need a GPU?" (comfy-test's accelerator lint,
+    # which runs on a bare checkout with no environment built) can then read
+    # one line of this package's own metadata instead of walking its
+    # dependency closure to find where __cuda enters.
+    - __cuda
+<%- if links_torch %>
+    # Same glob in run:, so an installed extension can never sit beside a
+    # torch of a different flavour.
+    - pytorch ${{ pytorch }}.* cuda${{ cuda_short }}_*
+<%- endif %>
+<%- for dep in run_deps %>
+    - << dep >>
+<%- endfor %>
+
+<%- if import_name %>
+
+tests:
+  - python:
+      imports:
+        - << import_name >>
+<%- endif %>
+
+about:
+  homepage: << homepage | tojson >>
+  license: << license | tojson >>
+  summary: << summary | tojson >>
+
+extra:
+  # Provenance: the from-source guarantee, recorded in the artifact so it is
+  # auditable by someone who was not watching CI.
+  built_from_source: true
+  prebuilt_wheel_used: false
+  # Flat, because that is what tools/verify_conda.py gates on: an artifact
+  # whose source_rev is empty or a branch name cannot be rebuilt identically.
+<%- if family %>
+  source_rev: ${{ env.get("CUW_SOURCE_REV", default="<< source_rev >>") }}
+  source:
+    repo: << source_repo | tojson >>
+    commit: ${{ env.get("CUW_SOURCE_REV", default="<< source_rev >>") }}
+<%- else %>
+  source_rev: << source_rev | tojson >>
+  source:
+    repo: << source_repo | tojson >>
+    commit: << source_rev | tojson >>
+<%- endif %>
+  torch_build: ${{ env.get("CUW_TORCH_BUILD", default="unrecorded") }}
+  cuda_compiler_version: ${{ cuda_compiler_version }}
+  arch_list: ${{ env.get("CUW_ARCH_LIST", default="<< arch_list >>") }}
+  run_id: ${{ env.get("GITHUB_RUN_ID", default="local") }}
+  run_url: ${{ env.get("CUW_RUN_URL", default="local") }}

@@ -1,0 +1,9 @@
+# Overrides of the shared arch policy (defaults/arch_policy.yml)
+# for this package only.
+arch_list_by_cuda:
+  '12.4': 8.0 9.0+PTX
+  '12.6': 8.0 9.0+PTX
+  '12.8': 8.0 9.0 10.0 12.0+PTX
+  '12.9': 8.0 9.0 10.0 12.0+PTX
+  '13.0': 8.0 9.0 10.0 12.0+PTX
+  '13.2': 8.0 9.0 10.0 12.0+PTX

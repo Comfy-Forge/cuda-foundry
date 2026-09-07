@@ -1,0 +1,439 @@
+name: build
+
+# Every workflow_dispatch input is routed through `env:` and referenced as a
+# shell variable. A raw ${{ inputs.x }} inside a `run:` block is substituted as
+# TEXT before bash parses the line, so an input containing `"; cmd; y="` breaks
+# out of the quoting and executes (CWE-78). conda-torch shipped that bug across
+# ~10 call sites before it was found; this repo starts without it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package folder or name (e.g. cc_torch), or "all"'
+        default: "cc_torch"
+      cuda:
+        description: 'CUDA flavour filter, e.g. 12.8 (or "all")'
+        default: "all"
+      pytorch:
+        description: 'torch minor filter, e.g. 2.11 (or "all")'
+        default: "all"
+      python:
+        description: 'python minor filter, e.g. 3.12 (or "all")'
+        default: "all"
+      build_number:
+        description: "build number (bump to republish with fixed metadata)"
+        default: "0"
+
+permissions:
+  # write: the link job uploads each artifact to its subdir release and the
+  # fragments job commits the repodata fragments that publish-channel serves.
+  contents: write
+  # actions: write is what lets the fragments job ASK publish-channel to run.
+  # Without it the dispatch is a 403 "Resource not accessible by integration"
+  # -- measured, run 34137485918: every artifact built, uploaded and
+  # fragmented correctly, and the channel still never rebuilt.
+  actions: write
+
+concurrency:
+  group: build-${{ inputs.package }}-${{ inputs.cuda }}-${{ inputs.pytorch }}-${{ inputs.python }}
+  cancel-in-progress: false
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      compile: ${{ steps.gen.outputs.compile }}
+      link: ${{ steps.gen.outputs.link }}
+      versions: ${{ steps.gen.outputs.versions }}
+    env:
+      IN_PACKAGE: ${{ inputs.package }}
+      IN_CUDA: ${{ inputs.cuda }}
+      IN_PYTORCH: ${{ inputs.pytorch }}
+      IN_PYTHON: ${{ inputs.python }}
+      IN_BUILD_NUMBER: ${{ inputs.build_number }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: pip install -q pyyaml jinja2
+      - name: Recipes must be in sync with package.yml
+        run: python scripts/generate_recipes.py --check
+      - name: Generate matrix from the conda-torch channel
+        id: gen
+        run: |
+          set -euo pipefail
+          # --skip-published always: a published artifact is immutable, so
+          # rebuilding one produces bytes the upload step throws away. The
+          # lever for a deliberate republish is build_number, which changes
+          # the fragment name and so is not skipped.
+          python scripts/generate_matrix.py \
+            --package "$IN_PACKAGE" --cuda "$IN_CUDA" \
+            --pytorch "$IN_PYTORCH" --python "$IN_PYTHON" \
+            --skip-published --build-number "$IN_BUILD_NUMBER" \
+            --output matrix.json
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          m = json.load(open("matrix.json"))
+          compile_jobs = [c for c in m if int(c.get("shard_count", 0)) > 0]
+          link_jobs    = [c for c in m if int(c.get("shard_count", 0)) == 0] + \
+                         [dict(c, shard_index=0) for c in m if int(c.get("shard_count", 0)) > 0
+                          and int(c.get("shard_index", 0)) == 1]
+          print(f"compile={json.dumps(compile_jobs)}")
+          print(f"link={json.dumps(link_jobs)}")
+          # Only the revisions this wave actually builds. A family package has
+          # one revision per torch pairing -- 16 for torchvision -- and
+          # fetching all of them for a filtered run is 16 clones and a ~230 MB
+          # source artifact to build one cell.
+          print("versions=" + ",".join(sorted({str(c["version"]) for c in m})))
+          PY
+
+  source:
+    needs: matrix
+    runs-on: ubuntu-latest
+    env:
+      IN_PACKAGE: ${{ inputs.package }}
+      IN_VERSIONS: ${{ needs.matrix.outputs.versions }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: pip install -q pyyaml
+      - name: Fetch and patch sources (outside the build sandbox)
+        # Doing this here rather than with a `git:` source in the recipe is what
+        # lets the build script run with no network at all: nothing legitimate
+        # remains for it to download, so a prebuilt-wheel fetch has nowhere to
+        # hide behind a real need.
+        run: |
+          python scripts/fetch_patched_sources.py --package "$IN_PACKAGE" \
+            --versions "$IN_VERSIONS" --output-dir staging
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-${{ inputs.package }}
+          path: staging/
+          retention-days: 3
+
+  compile-shard:
+    needs: [matrix, source]
+    if: needs.matrix.outputs.compile != '[]'
+    runs-on: ${{ matrix.cell.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: ${{ fromJson(needs.matrix.outputs.compile) }}
+    name: "shard ${{ matrix.cell.shard_index }}/${{ matrix.cell.shard_count }} ${{ matrix.cell.package }} cu${{ matrix.cell.cuda_short }} torch${{ matrix.cell.pytorch }} py${{ matrix.cell.python }}"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: source-${{ inputs.package }}
+          path: staging
+      - uses: ./.github/actions/setup-conda-build
+      - name: Compile slice
+        env:
+          CUW_MODE: shard
+          CUW_SHARD_INDEX: ${{ matrix.cell.shard_index }}
+          CUW_SHARD_COUNT: ${{ matrix.cell.shard_count }}
+          CUW_SRC_TARBALL: ${{ github.workspace }}/staging/${{ matrix.cell.src_tarball }}
+          # Family packages (torchvision/torchaudio) version with the torch
+          # they build against, so the cell carries both and the recipe reads
+          # them; for everything else these equal the package.yml values.
+          CUW_VERSION: ${{ matrix.cell.version }}
+          CUW_SOURCE_REV: ${{ matrix.cell.source_rev }}
+          # conda-torch's libtorch hard-depends on the __cuda virtual
+          # package, and a GitHub runner has no GPU, so the solve fails with
+          # "__cuda *, for which no candidates were found". Declaring the
+          # driver we are building FOR is the standard override; it affects
+          # dependency resolution only, never the compile.
+          CONDA_OVERRIDE_CUDA: ${{ matrix.cell.cuda }}
+          CUW_TORCH_BUILD: ${{ matrix.cell.torch_build }}
+          CUW_ARCH_LIST: ${{ matrix.cell.arch_list }}
+          CUW_BUILD_NUMBER: ${{ inputs.build_number }}
+          CUW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RECIPE: recipes/${{ matrix.cell.package }}/recipe.yaml
+        run: |
+          set -euo pipefail
+          if [ ! -f "$RECIPE" ]; then
+            echo "::error::recipe $RECIPE does not exist. The matrix cell names a package with no generated recipe -- run scripts/generate_recipes.py and commit, or check the matrix/recipe naming agree."
+            exit 1
+          fi
+          # No --sandbox: it needs unprivileged namespaces, which hosted
+          # runners do not provide ("sandboxing failure: Operation not
+          # permitted", run 34095721769). The no-network guarantee is imposed
+          # inside the build by scripts/build_snippets/nonet.py instead.
+          rattler-build build --recipe "$RECIPE" \
+            --variant-config defaults/variants.yaml \
+            --variant cuda_compiler_version="${{ matrix.cell.cuda }}" \
+            --variant pytorch="${{ matrix.cell.pytorch }}" \
+            --variant python="${{ matrix.cell.python }}" \
+            --variant c_compiler_version="${{ matrix.cell.gcc_version }}" \
+            --variant cxx_compiler_version="${{ matrix.cell.gcc_version }}" \
+            --target-platform "${{ matrix.cell.platform }}" \
+            --output-dir "$RUNNER_TEMP/out" --test skip --no-build-id \
+            -c https://comfy-forge.github.io/conda-torch -c conda-forge
+      - name: Package shard cache
+        run: tar -czf "$RUNNER_TEMP/ccache.tar.gz" -C "$CUW_CCACHE_DIR" .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cache-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}-${{ matrix.cell.shard_index }}
+          path: ${{ runner.temp }}/ccache.tar.gz
+          retention-days: 3
+
+  link:
+    needs: [matrix, source, compile-shard]
+    # `always()` so unsharded cells (which have no compile-shard job) still run.
+    if: always() && needs.matrix.outputs.link != '[]' && needs.source.result == 'success'
+    runs-on: ${{ matrix.cell.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: ${{ fromJson(needs.matrix.outputs.link) }}
+    name: "link ${{ matrix.cell.package }} cu${{ matrix.cell.cuda_short }} torch${{ matrix.cell.pytorch }} py${{ matrix.cell.python }}"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: source-${{ inputs.package }}
+          path: staging
+      - uses: ./.github/actions/setup-conda-build
+      - name: Restore shard caches
+        if: matrix.cell.shard_count != '0'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: cache-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}-*
+          path: shard-caches
+      - name: Merge shard caches
+        if: matrix.cell.shard_count != '0'
+        run: |
+          set -euo pipefail
+          found=0
+          for t in shard-caches/*/ccache.tar.gz; do
+            [ -f "$t" ] || continue
+            found=$((found+1)); tar -xzf "$t" -C "$CUW_CCACHE_DIR"
+          done
+          [ "$found" -gt 0 ] || { echo "::error::no shard caches restored"; exit 1; }
+          echo "merged $found shard cache(s)"
+          # The tarballs carry each shard's stats files, which would pollute the
+          # link job's zero-miss assert with the shards' own compile misses.
+          "${CUW_CCACHE_BIN:-ccache}" -z
+      - name: Build
+        env:
+          CUW_MODE: ${{ matrix.cell.shard_count != '0' && 'link' || 'full' }}
+          CUW_SHARD_COUNT: "0"
+          CUW_SRC_TARBALL: ${{ github.workspace }}/staging/${{ matrix.cell.src_tarball }}
+          # Family packages (torchvision/torchaudio) version with the torch
+          # they build against, so the cell carries both and the recipe reads
+          # them; for everything else these equal the package.yml values.
+          CUW_VERSION: ${{ matrix.cell.version }}
+          CUW_SOURCE_REV: ${{ matrix.cell.source_rev }}
+          # conda-torch's libtorch hard-depends on the __cuda virtual
+          # package, and a GitHub runner has no GPU, so the solve fails with
+          # "__cuda *, for which no candidates were found". Declaring the
+          # driver we are building FOR is the standard override; it affects
+          # dependency resolution only, never the compile.
+          CONDA_OVERRIDE_CUDA: ${{ matrix.cell.cuda }}
+          CUW_TORCH_BUILD: ${{ matrix.cell.torch_build }}
+          CUW_ARCH_LIST: ${{ matrix.cell.arch_list }}
+          CUW_BUILD_NUMBER: ${{ inputs.build_number }}
+          CUW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RECIPE: recipes/${{ matrix.cell.package }}/recipe.yaml
+        run: |
+          set -euo pipefail
+          if [ ! -f "$RECIPE" ]; then
+            echo "::error::recipe $RECIPE does not exist. The matrix cell names a package with no generated recipe -- run scripts/generate_recipes.py and commit, or check the matrix/recipe naming agree."
+            exit 1
+          fi
+          rattler-build build --recipe "$RECIPE" \
+            --variant-config defaults/variants.yaml \
+            --variant cuda_compiler_version="${{ matrix.cell.cuda }}" \
+            --variant pytorch="${{ matrix.cell.pytorch }}" \
+            --variant python="${{ matrix.cell.python }}" \
+            --variant c_compiler_version="${{ matrix.cell.gcc_version }}" \
+            --variant cxx_compiler_version="${{ matrix.cell.gcc_version }}" \
+            --target-platform "${{ matrix.cell.platform }}" \
+            --output-dir "$RUNNER_TEMP/out" --test skip --no-build-id \
+            -c https://comfy-forge.github.io/conda-torch -c conda-forge
+      - name: Provenance report
+        # Printed unconditionally, before verification, because this is the
+        # evidence that the artifact was built from source. If verification
+        # later fails the .conda is not uploaded -- but the provenance still
+        # has to be readable in the log, or diagnosing a failure means
+        # re-running the whole build to see what it produced.
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=("$RUNNER_TEMP"/out/*/*.conda)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::no .conda produced"; exit 1; }
+          python - "${files[@]}" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import io, json, subprocess, sys, tarfile, zipfile
+          for path in sys.argv[1:]:
+              z = zipfile.ZipFile(path)
+              name = [n for n in z.namelist() if n.startswith("info-")][0]
+              # zstd CLI rather than a python module: same choice
+              # tools/verify_conda.py makes, so this step adds no new dependency.
+              raw = subprocess.run(["zstd", "-d", "--stdout"], input=z.read(name),
+                                   stdout=subprocess.PIPE, check=True).stdout
+              t = tarfile.open(fileobj=io.BytesIO(raw))
+              about = json.load(t.extractfile("info/about.json"))
+              print(f"## {path.rsplit('/', 1)[-1]}")
+              print("```json")
+              print(json.dumps(about.get("extra", {}), indent=2, sort_keys=True))
+              print("```")
+          PY
+          echo "## compile ledger"
+          echo '```'
+          cat "$CUW_LEDGER" 2>/dev/null || echo "(no ledger at $CUW_LEDGER)"
+          echo '```'
+
+      - name: Verify artifact
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=("$RUNNER_TEMP"/out/*/*.conda)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::no .conda produced"; exit 1; }
+          if [ -f tools/verify_conda.py ]; then
+            python tools/verify_conda.py "${files[@]}"
+          else
+            echo "::warning::tools/verify_conda.py not present yet — artifact gate skipped"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: conda-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}
+          path: ${{ runner.temp }}/out/*/*.conda
+
+      - name: Upload to release (immutable — never overwrite an asset)
+        # Published artifacts are immutable: repodata fragments carry each
+        # asset's sha256, so replacing the bytes under a published name would
+        # make every existing fragment a lie. Same discipline as conda-torch's
+        # storage releases, including the check-then-upload race, which is
+        # real here: 149 cells of one package upload concurrently.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUBDIR: ${{ matrix.cell.platform }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          gh release create "$SUBDIR" \
+            --title "$SUBDIR packages" \
+            --notes "Storage release for $SUBDIR subdir packages. Do not delete: repodata base_url points here." \
+            || true
+          existing=$(gh release view "$SUBDIR" --json assets -q '.assets[].name')
+          for f in "$RUNNER_TEMP"/out/*/*.conda; do
+            b=$(basename "$f")
+            if echo "$existing" | grep -qxF "$b"; then
+              echo "SKIP already-published $b"
+              # Fragment the PUBLISHED bytes, not ours: a rebuild is not
+              # byte-reproducible (patchelf padding), so our sha256 would not
+              # match what anyone downloads.
+              gh release download "$SUBDIR" --pattern "$b" --output "$f" --clobber
+            elif ! gh release upload "$SUBDIR" "$f"; then
+              sleep 5
+              if gh release view "$SUBDIR" --json assets -q '.assets[].name' | grep -qxF "$b"; then
+                echo "RACE: $b landed from a sibling cell meanwhile; adopting its bytes"
+                gh release download "$SUBDIR" --pattern "$b" --output "$f" --clobber
+              else
+                echo "::error::upload of $b failed and the asset is still absent" >&2
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Emit repodata fragment
+        # Written here (where the artifact is) but COMMITTED once, by the
+        # fragments job. 149 link jobs each rebasing and pushing to main is a
+        # thundering herd that spends most of its time losing races; one
+        # commit at the end is the same result with none of that.
+        env:
+          SUBDIR: ${{ matrix.cell.platform }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in "$RUNNER_TEMP"/out/*/*.conda; do
+            python3 tools/fragment.py "$f" "$SUBDIR"
+          done
+          ls -la "meta/$SUBDIR"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fragment-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}
+          path: meta/*/*.json
+          retention-days: 3
+
+  fragments:
+    # One commit for the whole wave. `always()` so a wave with some failed
+    # cells still publishes the ones that succeeded -- a partial channel is
+    # correct, an empty one is a wasted wave.
+    needs: [matrix, link]
+    if: always() && needs.matrix.outputs.link != '[]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: fragment-*
+          path: fragments
+          merge-multiple: false
+      - name: Collect fragments
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          n=0
+          for d in fragments/*/; do
+            for sub in "$d"*/; do
+              [ -d "$sub" ] || continue
+              mkdir -p "meta/$(basename "$sub")"
+              for j in "$sub"*.json; do cp -n "$j" "meta/$(basename "$sub")/" && n=$((n+1)); done
+            done
+          done
+          echo "collected $n fragment(s)"
+      - name: Commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add meta
+          git diff --cached --quiet && { echo "no new fragments"; exit 0; }
+          git commit -m "Add repodata fragments from run ${GITHUB_RUN_ID}"
+          for i in 1 2 3 4 5 6 7 8; do
+            git push origin HEAD:main && break
+            sleep $((RANDOM % 10))
+            git pull --rebase origin main
+          done
+          # A push made with GITHUB_TOKEN does not fire push-triggered
+          # workflows, so publish-channel has to be asked explicitly.
+          gh workflow run publish-channel.yml --ref main
+
+  canary:
+    # L4. Proves the no-network guarantee is in force, POSITIVELY.
+    #
+    # The first version inferred "network denied" from the canary build
+    # FAILING. That passes whenever the mechanism is broken, and it did
+    # exactly that on run 34095721769: it reported the guarantee in force
+    # while the real cause was rattler-sandbox failing to start. So the
+    # canary now has to SUCCEED and print a proof line, which means any
+    # failure — including infrastructure failure — fails this job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-conda-build
+        with:
+          swapfile-gb: "0"
+      - name: Canary must SUCCEED and prove the guarantee
+        run: |
+          set -uo pipefail
+          rattler-build build --recipe recipes/_canary_prebuilt/recipe.yaml \
+               --output-dir "$RUNNER_TEMP/canary" --test skip --no-build-id \
+               -c conda-forge 2>&1 | tee "$RUNNER_TEMP/canary.log"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::canary build FAILED (exit $rc). Either the no-network guard is broken, or it is too coarse and broke an ordinary build."
+            exit 1
+          fi
+          if ! grep -q 'CANARY_RESULT=GUARANTEE_IN_FORCE' "$RUNNER_TEMP/canary.log"; then
+            echo "::error::canary build succeeded but never printed its proof line -- the assertions did not run."
+            exit 1
+          fi
+          echo "canary: guarantee proven in force (AF_INET refused, fetch refused, AF_UNIX intact)"

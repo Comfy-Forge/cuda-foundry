@@ -1,0 +1,147 @@
+name: torchvision
+pypi_name: torchvision
+import_name: torchvision
+
+# A FAMILY package: its version is a function of the torch it is built
+# against, so there is no single `version`/`source_rev`. Every torchvision
+# release pins exactly one torch release in its own Requires-Dist, and the
+# map below was read from those declarations (PyPI JSON, 2026-09-07), not
+# from a convention -- 0.19.0->2.4.0 through 0.29.0->2.14.0, verified for all
+# 16 releases. A wrong pairing here silently produces an ABI-mismatched
+# extension that imports and then crashes in a kernel, so it is derived data,
+# never hand-edited.
+#
+# Revisions are commit SHAs resolved from the vN.N.N tags (git ls-remote,
+# dereferenced), because a tag can move and two artifacts of one version must
+# come from the same source.
+family_versions:
+  "2.4.0": { version: "0.19.0", source_rev: 48b1edffdc6f34b766e2b4bbf23b78bd4df94181 }
+  "2.4.1": { version: "0.19.1", source_rev: 61943691d3390bd3148a7003b4a501f0e2b7ac6e }
+  "2.5.0": { version: "0.20.0", source_rev: afc54f754c734d903a06194e416495e20d920ff6 }
+  "2.5.1": { version: "0.20.1", source_rev: 3ac97aa9120137381ed1060f37237e44485ac2aa }
+  "2.6.0": { version: "0.21.0", source_rev: 7af698794eded568735f9519593603c1ec889eba }
+  "2.7.0": { version: "0.22.0", source_rev: 9eb57cd5c96be7fe31923eb65399c3819d064587 }
+  "2.7.1": { version: "0.22.1", source_rev: 59a3e1f9f78cfe44cb989877cc6f4ea77c8a75ca }
+  "2.8.0": { version: "0.23.0", source_rev: 824e8c8726b65fd9d5abdc9702f81c2b0c4c0dc8 }
+  "2.9.0": { version: "0.24.0", source_rev: 7a9db90e9aadea3e3e1fec35969601167e9efd4f }
+  "2.9.1": { version: "0.24.1", source_rev: d801a34632023859a0a274803d6abaf0a45d77a5 }
+  "2.10.0": { version: "0.25.0", source_rev: 8ac84ee75afb1c327902156b5336f56ad63b7e2f }
+  "2.11.0": { version: "0.26.0", source_rev: 336d36e8db990a905498c73933e35231876e28bc }
+  "2.12.0": { version: "0.27.0", source_rev: 78839c2b06c83c6cfb5c4da692ffb331bbd4c4cc }
+  "2.12.1": { version: "0.27.1", source_rev: df56172e4d5a8d0cd51384273bc6c5747f5ab931 }
+  "2.13.0": { version: "0.28.0", source_rev: 8fb87713a24951e639c494b0f2a8a81b5f8e33a6 }
+  "2.14.0": { version: "0.29.0", source_rev: fc73f5a8567734ffa4c988b24d5432f0d3005974 }
+
+source_repo: pytorch/vision
+# Neither repo has submodules (no .gitmodules at any tagged release
+# checked), so the source fetch is a plain shallow clone at the rev.
+clone_recursive: false
+
+# Read from the repo's own LICENSE file at the pinned rev, not assumed:
+# torchvision is BSD-3-Clause and torchaudio BSD-2-Clause -- they differ.
+license: BSD-3-Clause
+homepage: https://github.com/pytorch/vision
+summary: Datasets, transforms and models for computer vision, compiled against the conda-torch channel
+
+links_torch: true
+
+# torchvision compiles ~6 .cu (nms, roi_align, roi_pool, ps_roi_*,
+# deform_conv2d) plus the CPU image codecs. Measured end to end at 8m11s on a
+# 4-vCPU runner, compile-dominated (28 CPU-minutes, peak RSS 1.67 GB), so the
+# farm's standard pair is comfortable here.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies, read from setup.py rather than assumed ───────────────────
+# get_requirements() returns ["numpy", <torch>, "pillow >= 5.3.0, !=8.3.*"].
+# torch is deliberately NOT repeated here: the recipe adds
+# `pytorch <minor>.* cuda<NNN>_*`, which is both the runtime dep and the
+# flavour lock, and a second bare `pytorch` would give the solver a looser
+# spec it could satisfy with a different flavour.
+run_deps:
+  - numpy
+  - pillow >=5.3.0
+build_deps: []
+
+# The whole point of compiling rather than repacking. The PyPI wheel vendors
+# its own codecs into torchvision.libs/ -- hash-renamed so they can never
+# dedupe -- including libjpeg-turbo 2.0.0, a 2018 release, in the path that
+# parses attacker-supplied images. Building against these means the codecs
+# are ordinary conda packages that `conda update` can patch.
+#
+# Every entry is a header the sources actually #include:
+#   jpeglib.h      decode_jpeg.cpp / encode_jpeg.cpp   -> libjpeg-turbo
+#   png.h          decode_png.cpp / encode_png.cpp     -> libpng (needs zlib)
+#   webp/decode.h  decode_webp.cpp                     -> libwebp-base
+#   nvjpeg.h       decode_jpegs_cuda.cpp (USE_NVJPEG)  -> libnvjpeg-dev
+# setup.py finds them via CONDA_PREFIX/BUILD_PREFIX (its find_library() walks
+# those explicitly), so a conda host env is the supported discovery path.
+host_deps:
+  # torchvision <= 0.26.0 imports pkg_resources in setup.py; setuptools 82.0.0
+  # removed it, and CI resolved 84.0.0, so every cell whose pairing is older
+  # than 0.27.0 died with "ModuleNotFoundError: No module named
+  # 'pkg_resources'" -- torch 2.7 through 2.10 across four pythons, while
+  # 2.11+ passed. Bound checked against upstream: 0.22-0.26 reference it,
+  # 0.27.0 does not. <82 rather than <81 because 81.0.0 still ships it (it
+  # only warns), and it is the bound conda-forge's own torchvision recipe
+  # uses. Harmless for the newer pairings, which simply get an older
+  # setuptools they do not care about.
+  - setuptools <82
+  - libjpeg-turbo
+  - libpng
+  - libwebp-base
+  - libzlib
+  - libnvjpeg-dev
+
+# torchvision's setup.py does not ASK the compiler whether a codec is
+# available -- it stats a header, in TORCHVISION_INCLUDE, then $BUILD_PREFIX,
+# then $CONDA_PREFIX, then /usr/include. Under rattler-build the host prefix is
+# $PREFIX, which is none of those, so the first pilot build printed "Building
+# torchvision without JPEG support" / "without WEBP support" with
+# libjpeg-turbo and libwebp-base sitting installed in host:, and shipped an
+# image extension linking libpng alone. (PNG survived only because upstream
+# finds it through `libpng-config` on PATH instead.) The failure is silent:
+# the package still builds, still imports, and still carries the codec
+# run_exports -- decode_jpeg just raises at runtime. Point upstream's own
+# search at the host prefix. nvjpeg is NOT covered by these: it is found via
+# $CUDA_HOME/include, which build.sh bridges for conda-forge's targets/
+# layout.
+build_env:
+  TORCHVISION_INCLUDE: $PREFIX/include
+  TORCHVISION_LIBRARY: $PREFIX/lib
+
+# conda-forge ships a `torchvision`, so carrying any build of this name hides
+# theirs under strict channel priority. Owner decision: carry it completely.
+carry: complete
+
+verify:
+  import: torchvision
+  # Fail closed on the silent-codec trap. Detection failing is not a build
+  # failure upstream -- it warns, ships an image extension without the codec,
+  # and leaves the run_export on the package claiming otherwise -- so the only
+  # thing that catches it is asserting the binary's DT_NEEDED. Prefixes, not
+  # full sonames: libjpeg.so.8 today is not libjpeg.so.9 tomorrow, and this
+  # has to hold across 16 torch pairings.
+  expect_linked:
+    - libjpeg
+    - libpng
+    - libwebp
+    - libnvjpeg
+  # Three things at once: a CUDA kernel (nms) so a mis-arch'd build fails
+  # with cudaErrorNoKernelImageForDevice rather than passing a bare import,
+  # and both codec paths, which are what compiling was for.
+  op: |
+    import torch, torchvision, io
+    from torchvision.ops import nms
+    boxes = torch.tensor([[0., 0., 10., 10.], [1., 1., 11., 11.], [50., 50., 60., 60.]],
+                         device="cuda")
+    scores = torch.tensor([0.9, 0.8, 0.7], device="cuda")
+    keep = nms(boxes, scores, 0.5)
+    assert keep.numel() == 2, keep
+    from torchvision.io import decode_jpeg, encode_jpeg, decode_png, encode_png
+    img = (torch.rand(3, 32, 32) * 255).to(torch.uint8)
+    assert decode_jpeg(encode_jpeg(img)).shape == img.shape
+    assert decode_png(encode_png(img)).shape == img.shape
+    # nvjpeg path: the reason libnvjpeg-dev is a host dep
+    d = decode_jpeg(encode_jpeg(img), device="cuda")
+    assert d.is_cuda and d.shape == img.shape, d.shape

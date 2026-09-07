@@ -1,0 +1,323 @@
+"""Single loader for this repo's package layout.
+
+Ported from cuda-wheels' package_loader.py. Its hard errors are a written
+record of real failures and every one still applies here, so they are kept
+verbatim in spirit: parallelism must be declared, source refs must not float,
+`links_torch` must be explicit, and any override needs a README saying why.
+
+What changed for conda:
+
+  * `requires_dist` is no longer a hard error but its INVERSE is. The wheel
+    farm stripped all dependency metadata and made declaring it an error;
+    a conda package that declares nothing is a lie the solver believes, so
+    here `run_deps` is required (write `run_deps: []` to state "none", which
+    is a claim someone reviewed, not an omission).
+  * `force_source_build` guards the no-prebuilt-wheel rule: an upstream whose
+    build can fetch a binary must say how it is turned off.
+  * `host_deps`, `pypi_name`, `import_name`, `carry` are new and owned here.
+
+Layout:
+    defaults/policy.yml              owned axes (cudas, python floor, platforms)
+    defaults/arch_policy.yml         owned arch policy
+    packages/<name>/package.yml      source, build knobs, dependencies
+    packages/<name>/arch_override.yml   optional, needs README
+    packages/<name>/patches/*.py     optional source patches
+"""
+import re
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent
+POLICY_FILE = ROOT / "defaults" / "policy.yml"
+ARCH_POLICY_FILE = ROOT / "defaults" / "arch_policy.yml"
+PACKAGES_DIR = ROOT / "packages"
+
+# Upstreams whose build downloads a prebuilt binary unless explicitly told
+# not to. Keyed by source_repo. The value is the env var that forces a source
+# build and the ONLY value upstream accepts — flash-attention compares
+# `os.getenv("FLASH_ATTENTION_FORCE_BUILD", "FALSE") == "TRUE"`, so "1" is
+# silently permissive, which is exactly how the earlier experiment shipped
+# Dao-AILab's binary while believing it had compiled it.
+PREBUILT_FETCHING_UPSTREAMS = {
+    "Dao-AILab/flash-attention": {"FLASH_ATTENTION_FORCE_BUILD": "TRUE"},
+}
+
+CARRY_VALUES = {"complete", "distinct-name"}
+
+
+def load_policy() -> dict:
+    """Owned axes: supported_cudas, python_min, platforms, runners, defaults."""
+    return yaml.safe_load(POLICY_FILE.read_text())
+
+
+def load_arch_policy() -> dict:
+    """arch_policy[_aarch64] and arch_exceptions."""
+    return yaml.safe_load(ARCH_POLICY_FILE.read_text())
+
+
+_CREDENTIAL_WORDS = ("Authorization", "Bearer", "GH_TOKEN", "GITHUB_TOKEN",
+                     "authorization", "api_key", "apikey", "password")
+
+
+def _check_pre_build_not_redactable(cfg: dict, pkg_dir: Path) -> None:
+    """GitHub redacts a job output that looks credential-bearing.
+
+    generate_matrix embeds pre_build_script verbatim into the matrix output,
+    so a package whose inline pre-build mentions a token vanishes from its own
+    build: every job sees a null matrix, skips, and the run reports success
+    having produced nothing (spconv, cuda-wheels, 2026-08-24).
+    """
+    script = cfg.get("pre_build_script") or ""
+    if "\n" not in script.strip():
+        return
+    hits = sorted({w for w in _CREDENTIAL_WORDS if w in script})
+    if hits:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: inline pre_build_script "
+            f"mentions {hits} -- GitHub will redact the matrix output and the "
+            f"package will silently build NOTHING. Move it to "
+            f"packages/{pkg_dir.name}/pre_build.sh and reference that file.")
+
+
+def _check_parallelism_declared(cfg: dict, pkg_dir: Path) -> None:
+    """`jobs` and `nvcc_threads` are mandatory. No defaults, deliberately.
+
+    In cuda-wheels these fell back to a shared default, and the result was
+    that 30 of 42 packages never stated a job count and NOT ONE stated a
+    thread count -- while those two numbers multiply into peak compile memory
+    (jobs x nvcc_threads x one cicc), which on a 16GB runner with CUTLASS
+    sources decides whether the compile swaps or dies. "Unset" is also not
+    neutral: several upstreams pick their own MAX_JOBS when the env is empty,
+    and some pick 10.
+    """
+    missing = [k for k in ("jobs", "nvcc_threads") if cfg.get(k) is None]
+    if missing:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml does not declare "
+            f"{' and '.join(missing)}. Both are required in every package, "
+            f"with no default -- they decide peak compile memory together. "
+            f"Start from jobs: 3, nvcc_threads: 1 and lower `jobs` if the "
+            f"build swaps.")
+    for k in ("jobs", "nvcc_threads"):
+        v = cfg[k]
+        if not isinstance(v, int) or v < 1:
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}/package.yml has {k}: {v!r} -- must be "
+                f"an integer >= 1; the value is used verbatim.")
+
+
+def _check_dependencies_declared(cfg: dict, pkg_dir: Path) -> None:
+    """`run_deps` is mandatory -- the inverse of the wheel farm's rule.
+
+    cuda-wheels strips every Requires-Dist from every wheel and installs with
+    --no-deps, so declaring dependencies there was a hard error. A conda
+    channel is the opposite: an artifact with an empty `run:` is a lie the
+    solver believes. So the list is required, and `run_deps: []` is a
+    reviewed claim that this package genuinely needs nothing at runtime
+    beyond python and its torch -- not an omission.
+
+    Build-only tools do NOT belong here. The wheel farm shipped `ninja` as a
+    runtime dep of gsplat and `yapf` (a code formatter) as one of mmcv; both
+    are setup_requires. Put those in `build_deps`.
+    """
+    if "run_deps" not in cfg:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml does not declare run_deps. "
+            f"Every package must state its runtime dependencies as conda "
+            f"names; write `run_deps: []` if it genuinely has none. Do not "
+            f"list build tools (ninja, packaging, psutil, setuptools) -- "
+            f"those go in build_deps.")
+    for key in ("run_deps", "host_deps", "build_deps"):
+        v = cfg.get(key)
+        if v is not None and not isinstance(v, list):
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}/package.yml: {key} must be a list, "
+                f"got {type(v).__name__}.")
+
+
+def _check_force_source_build(cfg: dict, pkg_dir: Path) -> None:
+    """An upstream that can download a binary must say how that is disabled.
+
+    This is layer L2 of the from-source guarantee (ARCHITECTURE.md). L1 (no
+    network in the build script) is the real mechanism; this exists because
+    one mechanism will not stay true across 42 packages and a year, and
+    because the failure is silent: the build succeeds, the package installs,
+    the kernels run -- they are just not ours.
+    """
+    repo = str(cfg.get("source_repo") or "").strip()
+    required = PREBUILT_FETCHING_UPSTREAMS.get(repo)
+    declared = cfg.get("force_source_build") or {}
+    if not isinstance(declared, dict):
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: force_source_build must be a "
+            f"mapping of env var -> value, got {type(declared).__name__}.")
+    if not required:
+        return
+    for var, value in required.items():
+        if var not in declared:
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}: {repo} downloads a prebuilt wheel "
+                f"unless {var} is set, and package.yml does not declare it. "
+                f"Add `force_source_build: {{{var}: \"{value}\"}}`.")
+        if str(declared[var]) != value:
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}: force_source_build sets "
+                f"{var}={declared[var]!r}, but upstream only accepts the "
+                f"exact string {value!r} -- any other value silently permits "
+                f"the prebuilt wheel. This is the defect that shipped "
+                f"upstream's flash-attn binary from the earlier experiment.")
+
+
+def _check_carry(cfg: dict, pkg_dir: Path) -> None:
+    """Names conda-forge also ships need an explicit coverage decision.
+
+    Under strict channel priority, carrying ANY build of a name hides
+    conda-forge's builds of that name entirely, so a partial flavour set
+    removes their coverage rather than adding to ours.
+    """
+    carry = cfg.get("carry")
+    if carry is None:
+        return
+    if carry not in CARRY_VALUES:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: carry: {carry!r} is not one "
+            f"of {sorted(CARRY_VALUES)}.")
+
+
+def _all_source_revs(cfg: dict) -> list:
+    """Every revision this package can be built from, family map included."""
+    revs = []
+    if cfg.get("source_rev"):
+        revs.append(str(cfg["source_rev"]).strip())
+    for entry in (cfg.get("family_versions") or {}).values():
+        if isinstance(entry, dict) and entry.get("source_rev"):
+            revs.append(str(entry["source_rev"]).strip())
+    return revs
+
+
+def _check_family_versions(cfg: dict, pkg_dir: Path) -> None:
+    """`family_versions` maps a TORCH version to this package's own version.
+
+    torchvision and torchaudio version independently of torch (torchvision
+    0.26.0 goes with torch 2.11.0), so a family package cannot state one
+    `version`. The map is derived data -- torchvision's from each release's
+    own `Requires-Dist: torch==X`, torchaudio's from upstream's release
+    convention because it declares no torch dependency at all -- and a wrong
+    entry silently produces an extension whose ABI does not match the torch it
+    will be installed beside. So every entry must be complete and pinned.
+    """
+    fv = cfg.get("family_versions")
+    if fv is None:
+        return
+    if not isinstance(fv, dict) or not fv:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: family_versions must be a "
+            f"non-empty mapping of torch version -> {{version, source_rev}}.")
+    for torch_version, entry in fv.items():
+        where = f"{pkg_dir.name}/package.yml: family_versions[{torch_version!r}]"
+        if not isinstance(entry, dict):
+            raise SystemExit(f"ERROR: {where} must be a mapping, got "
+                             f"{type(entry).__name__}.")
+        for field in ("version", "source_rev"):
+            if not str(entry.get(field) or "").strip():
+                raise SystemExit(f"ERROR: {where} is missing {field!r}.")
+        if not re.fullmatch(r"\d+(\.\d+)+", str(torch_version)):
+            raise SystemExit(
+                f"ERROR: {where}: the KEY must be a torch version like "
+                f"'2.11.0'; the package's own version goes in `version`.")
+
+
+def _check_build_env(cfg: dict, pkg_dir: Path) -> None:
+    """`build_env` is rendered into the build script as `export K="V"`.
+
+    It exists for values that must be computed from $PREFIX, which the
+    recipe's own `build.script.env` cannot express (rattler-build sets those
+    literally, no shell expansion). Because the value lands inside double
+    quotes in a generated shell script, a quote or a backtick in it would end
+    the string and run whatever follows -- so the value is constrained here
+    rather than trusted.
+    """
+    env = cfg.get("build_env")
+    if env is None:
+        return
+    if not isinstance(env, dict) or not env:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: build_env must be a non-empty "
+            f"mapping of NAME -> value.")
+    for k, v in env.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k)):
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}/package.yml: build_env key {k!r} is not "
+                f"a shell variable name.")
+        if re.search(r'["`$][({]|["`]|\\', str(v)):
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}/package.yml: build_env[{k!r}] value "
+                f"{v!r} contains a quote, backtick, backslash or command "
+                f"substitution -- it is rendered into a shell script inside "
+                f'double quotes. Plain text and $VAR references only.')
+
+
+def load_package(pkg_dir: Path) -> dict:
+    """One package's flat config dict, overrides merged in."""
+    cfg = yaml.safe_load((pkg_dir / "package.yml").read_text()) or {}
+    _check_pre_build_not_redactable(cfg, pkg_dir)
+    _check_parallelism_declared(cfg, pkg_dir)
+    _check_dependencies_declared(cfg, pkg_dir)
+    _check_force_source_build(cfg, pkg_dir)
+    _check_carry(cfg, pkg_dir)
+
+    for extra in ("arch_override.yml",):
+        p = pkg_dir / extra
+        if p.exists():
+            cfg.update(yaml.safe_load(p.read_text()) or {})
+    overrides = [e for e in ("arch_override.yml",) if (pkg_dir / e).exists()]
+    if overrides:
+        readme = pkg_dir / "README.md"
+        if not readme.exists() or "verride" not in readme.read_text():
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}: has {', '.join(overrides)} but no "
+                f"README.md explaining the override -- every deviation from "
+                f"defaults/ must say why (add an '## Overrides' section).")
+
+    _check_family_versions(cfg, pkg_dir)
+    _check_build_env(cfg, pkg_dir)
+
+    # A family package (torchvision, torchaudio) has no single version: its
+    # version is a function of the torch it builds against, so the matrix
+    # resolves both from `family_versions` per cell.
+    required = ["name", "source_repo", "pypi_name", "import_name"]
+    if not cfg.get("family_versions"):
+        required += ["version", "source_rev"]
+    for req in required:
+        if not str(cfg.get(req) or "").strip():
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}: '{req}' is required in package.yml.")
+
+    for rev in _all_source_revs(cfg):
+        if rev.lower() in ("main", "master", "head"):
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}: source_rev is a floating ref ({rev!r}) "
+                f"-- pin a tag or commit SHA, or two artifacts of one version "
+                f"need not come from the same source.")
+
+    if "links_torch" not in cfg:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}: no links_torch declared -- state it "
+            f"explicitly (true: one build per (cuda x torch); false: "
+            f"torch-free, one build per cuda, and no torch axis at all).")
+
+    if cfg["name"] != cfg["name"].lower() or "_" in cfg["name"]:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}: conda name {cfg['name']!r} must be the "
+            f"lowercase hyphenated PyPI name (flash-attn, not flash_attn) so "
+            f"the purl maps and pixi's conda->pypi recognition works. The "
+            f"underscore import name goes in import_name.")
+    return cfg
+
+
+def iter_packages():
+    """Yield (folder, config) for every package folder, sorted."""
+    for d in sorted(PACKAGES_DIR.iterdir()):
+        if d.is_dir() and (d / "package.yml").exists():
+            yield d.name, load_package(d)

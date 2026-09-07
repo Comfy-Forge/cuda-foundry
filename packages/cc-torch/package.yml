@@ -1,0 +1,58 @@
+name: cc-torch            # conda name: hyphenated PyPI name
+pypi_name: cc_torch       # what the purl points at
+import_name: cc_torch     # what the smoke test imports
+version: "0.1.0"
+
+source_repo: ronghanghu/cc_torch
+source_rev: 446e9360ed10d3c8d03925ccb5f220ccb62009de
+
+links_torch: true   # compiled against libtorch: one build per (cuda x torch)
+
+# Compile parallelism. BOTH are mandatory in every package.yml -- there is no
+# default to fall back on, by design (see scripts/package_loader.py).
+#
+#   jobs          how many compiler processes run at once. The actual number,
+#                 not a ceiling: exported as MAX_JOBS and
+#                 CMAKE_BUILD_PARALLEL_LEVEL. An explicit value also preempts
+#                 packages whose setup.py picks its own when the env is unset
+#                 -- some choose 10, which on a 4-vCPU runner is -j10.
+#   nvcc_threads  nvcc --threads: parallel device compiles WITHIN one TU, one
+#                 per gencode target. Appended as a TRAILING --threads so it
+#                 beats any setup.py hardcode.
+#
+# They multiply: peak memory is roughly jobs x nvcc_threads x one cicc.
+# Ported verbatim from cuda-wheels; one small .cu, so this is comfortable.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies (authored here; the wheel farm declares none) ─────────────
+# setup.py says `requirements = ["torch"]` and nothing else. torch is NOT
+# listed here: the recipe adds `pytorch <minor>.* cuda<NNN>_*` itself, which
+# is both the runtime dep and the flavour lock, and duplicating it as a bare
+# `pytorch` would let the solver satisfy the loose one with a different
+# flavour.
+run_deps: []
+
+# Only what the source actually #includes. connected_components.cu includes
+# <cuda_runtime.h> and torch/extension.h; nothing else. Everything else torch
+# needs arrives through pytorch's own run_exports.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+# conda-forge does not ship a package by this name, so there is no coverage
+# to shadow and no completeness obligation.
+carry: complete
+
+verify:
+  import: cc_torch
+  # connected_components on a tiny binary image: exercises the CUDA kernel,
+  # so a mis-arch'd build fails here with cudaErrorNoKernelImageForDevice
+  # rather than passing a bare import.
+  op: |
+    import torch, cc_torch
+    x = torch.zeros(8, 8, dtype=torch.uint8, device="cuda")
+    x[2:5, 2:5] = 255
+    out = cc_torch.connected_components_labeling(x)
+    assert out.max().item() > 0, out

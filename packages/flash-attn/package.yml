@@ -1,0 +1,95 @@
+name: flash-attn
+pypi_name: flash_attn
+import_name: flash_attn
+version: "2.8.3"
+
+source_repo: Dao-AILab/flash-attention
+source_rev: v2.8.3
+clone_recursive: false          # the patch inits only csrc/cutlass; see README
+patch_script: packages/flash-attn/patches/flash_attn.py
+free_disk_space: true
+
+links_torch: true
+
+# ── THE from-source guarantee for this package ────────────────────────────
+# flash-attention's setup.py downloads a prebuilt wheel from its GitHub
+# releases unless forced otherwise:
+#
+#   FORCE_BUILD = os.getenv("FLASH_ATTENTION_FORCE_BUILD", "FALSE") == "TRUE"
+#   ...
+#   if FORCE_BUILD: <compile>
+#   wheel_url, wheel_filename = get_wheel_url()
+#   urllib.request.urlretrieve(wheel_url, wheel_filename)
+#
+# The comparison is against the literal string "TRUE", so "1" is silently
+# permissive. The earlier PozzettiAndrea/conda-cuda-packages experiment set
+# "0" with a comment saying "set to 1 to force-build from source" -- neither
+# value would have compiled anything, and it published 26 artifacts of
+# Dao-AILab's binary. package_loader.py hard-errors if this is missing or not
+# exactly "TRUE". The real guarantee is still L1: the build script has no
+# network, so the urlretrieve above cannot succeed regardless.
+force_source_build:
+  FLASH_ATTENTION_FORCE_BUILD: "TRUE"
+
+# ── parallelism: ported verbatim from cuda-wheels, comments included ───────
+# max_jobs 1 (was 2): at sharding 20 a shard holds ~4 TUs, so in-job
+# parallelism buys nothing while two simultaneous ~6-7GB cicc peaks
+# tripped the swap gate on ARM (1.28GB swapped). Serial slice ~30min.
+# Explicit jobs bypasses upstream's free-RAM estimator, which under
+# the farm's 4-arch list computes 18GB/job and lands on jobs=1 (serial).
+jobs: 1
+# nvcc_threads 1 (owner call 2026-08-26). Tried 3, then 2; both trip the swap
+# gate. At 3, 5 of 40 shards failed (peak swap 5.46GB, MemAvailable low-water
+# 0.99GB). At 2, an ARM shard still failed with peak swap 1.55GB and
+# MemAvailable 1.77GB -- scraping BOTH gate thresholds, not comfortably under
+# them. flash_attn compiles ~72 CUTLASS TUs against a 4-5 arch row; one cicc
+# is simply most of what a 16GB runner has. Wall clock is bought with SHARD
+# COUNT instead -- shards are memory-neutral (each still runs 1 job x 1
+# thread), so raising `sharding` shortens the critical path without touching
+# peak memory.
+nvcc_threads: 1
+sharding: 25  # owner call 2026-08-26 -- down from 40
+
+nvcc_flags: -diag-suppress=221
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py:
+#   install_requires = ["torch", "einops"]
+#   setup_requires   = ["packaging", "psutil", "ninja"]
+# torch is supplied by the recipe's flavour-locked pytorch dep. einops is a
+# genuine runtime import (flash_attn.flash_attn_interface uses it) and is on
+# conda-forge.
+#
+# NOTE the correction against cuda-wheels: its package.yml carries
+# `extra_deps: psutil`, which is setup_requires -- a BUILD dependency. The
+# wheel farm had nowhere to say that, so build tools leaked into the same
+# field as runtime ones (the same class as gsplat's `ninja` and mmcv's
+# `yapf`). Here they are separate fields.
+run_deps:
+  - einops
+
+# csrc/flash_attn includes no CUDA library headers beyond the runtime;
+# cutlass is a header-only vendored submodule.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps:
+  - packaging
+  - psutil
+  - ninja
+
+# conda-forge ships flash-attn. Under strict channel priority our builds hide
+# theirs entirely, so a partial flavour set would REMOVE coverage rather than
+# add it (the trap that produced a 64-entry UNSAT in conda-torch when one
+# partial triton repack shadowed conda-forge's whole triton line).
+# DECIDED (ARCHITECTURE.md): carry it completely.
+carry: complete
+
+verify:
+  import: flash_attn
+  op: |
+    import torch
+    from flash_attn import flash_attn_func
+    q = torch.randn(1, 8, 4, 32, dtype=torch.float16, device="cuda")
+    out = flash_attn_func(q, q, q)
+    assert out.shape == q.shape, out.shape

@@ -1,0 +1,39 @@
+name: fused-ssim
+pypi_name: fused_ssim
+import_name: fused_ssim
+version: "0.0.1"
+
+source_repo: rahul-goel/fused-ssim
+source_rev: 328dc9836f513d00c4b5bc38fe30478b4435cbb5
+
+links_torch: true
+
+# See scripts/package_loader.py for why both are mandatory and have no
+# default. Ported verbatim from cuda-wheels: one small ssim.cu.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py declares no install_requires at all (only `packages=['fused_ssim']`
+# and a CUDAExtension). It imports torch at build time to probe the local GPU
+# arch, which the recipe overrides with TORCH_CUDA_ARCH_LIST -- a build-time
+# concern, not a runtime dependency.
+run_deps: []
+
+# ssim.cu / ssim.h / ext.cpp include only torch headers; no CUDA library
+# headers beyond the runtime.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: fused_ssim
+  op: |
+    import torch, fused_ssim
+    a = torch.rand(1, 3, 32, 32, device="cuda")
+    b = torch.rand(1, 3, 32, 32, device="cuda")
+    v = fused_ssim.fused_ssim(a, b)
+    assert torch.isfinite(v).all(), v

@@ -1,0 +1,97 @@
+name: setup-conda-build
+description: >
+  rattler-build + the sandbox binary + a pinned ccache, plus the swap headroom
+  the heavy CUTLASS packages need. Everything a compile job requires before it
+  touches a recipe.
+
+inputs:
+  ccache-dir:
+    description: Shared ccache directory (shard jobs populate it, link jobs replay it)
+    required: false
+    default: ""
+  swapfile-gb:
+    description: >
+      Swap to add. Not a performance knob — a parachute. Peak memory is roughly
+      jobs x nvcc_threads x one cicc, and a CUTLASS TU puts one cicc near the
+      ceiling of a 16 GB runner; swap turns an OOM kill into a slow build.
+      Deploying swap is a signal to lower `jobs`, so the build script reports
+      the high-water mark rather than hiding it.
+    required: false
+    default: "6"
+
+runs:
+  using: composite
+  steps:
+    - name: Install rattler-build, rattler-sandbox and pixi
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl -fsSL https://pixi.sh/install.sh | bash
+        echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
+        export PATH="$HOME/.pixi/bin:$PATH"
+        pixi global install rattler-build
+        # The sandbox is a SEPARATE binary and rattler-build only reports its
+        # absence when --sandbox is actually passed. Installing it here means a
+        # missing sandbox fails setup, not the build's integrity guarantee.
+        pixi global install rattler-sandbox
+        rattler-build --version
+        rattler-sandbox --version || true
+
+    - name: Install ccache (pinned, static)
+      shell: bash
+      run: |
+        set -euo pipefail
+        # ccache >= 4 is MANDATORY. 3.x has no "cu" entry in its source-language
+        # table, so every TU compiled as `-x cu` is passed through UNCACHED --
+        # not a slow cache, no cache, and the shard lane would silently void
+        # itself while still reporting success.
+        CC_VER=4.14
+        case "$(uname -m)" in
+          x86_64)  CC_ARCH=x86_64;  CC_SHA=888eaf9697919d6eba77be797e9d9c9e40e734d11d67d25a79b075c3f79f6c77 ;;
+          aarch64) CC_ARCH=aarch64; CC_SHA=40623f11012a97d60c7d90058d7e3c8c70a3802af53a34067b89e6345c89db69 ;;
+          *) echo "::error::unsupported arch $(uname -m) for the ccache pin"; exit 1 ;;
+        esac
+        CC_TAR="ccache-${CC_VER}-linux-${CC_ARCH}-musl-static.tar.xz"
+        curl -fsSL -o "$RUNNER_TEMP/$CC_TAR" \
+          "https://github.com/ccache/ccache/releases/download/v${CC_VER}/${CC_TAR}"
+        echo "${CC_SHA}  $RUNNER_TEMP/$CC_TAR" | sha256sum -c - >/dev/null
+        tar -xf "$RUNNER_TEMP/$CC_TAR" -C "$RUNNER_TEMP"
+        mkdir -p "$RUNNER_TEMP/ccache-bin"
+        cp "$RUNNER_TEMP/ccache-${CC_VER}-linux-${CC_ARCH}-musl-static/ccache" "$RUNNER_TEMP/ccache-bin/ccache"
+        chmod +x "$RUNNER_TEMP/ccache-bin/ccache"
+        echo "$RUNNER_TEMP/ccache-bin" >> "$GITHUB_PATH"
+        echo "CUW_CCACHE_BIN=$RUNNER_TEMP/ccache-bin/ccache" >> "$GITHUB_ENV"
+
+    - name: Prepare ccache dir
+      shell: bash
+      env:
+        CCACHE_DIR_IN: ${{ inputs.ccache-dir }}
+      run: |
+        set -euo pipefail
+        DIR="${CCACHE_DIR_IN:-$RUNNER_TEMP/ccache}"
+        mkdir -p "$DIR"
+        # CUW_* names, not CCACHE_*: rattler-build gives the build script a
+        # clean environment, so these are read by the recipe's build.script.env
+        # via env.get() at render time. Exporting CCACHE_* here would reach
+        # nothing (measured, step-0 probe).
+        echo "CUW_CCACHE_DIR=$DIR" >> "$GITHUB_ENV"
+        echo "CUW_CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+        echo "CUW_LEDGER=$RUNNER_TEMP/cuw-ledger.txt" >> "$GITHUB_ENV"
+        echo "CUW_RSS_LOG=$RUNNER_TEMP/cuw-rss.log" >> "$GITHUB_ENV"
+
+    - name: Free disk and add swap
+      shell: bash
+      env:
+        SWAP_GB: ${{ inputs.swapfile-gb }}
+      run: |
+        set -euo pipefail
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+                    /opt/hostedtoolcache/CodeQL /usr/share/swift 2>/dev/null || true
+        if [ "${SWAP_GB}" != "0" ]; then
+          sudo fallocate -l "${SWAP_GB}G" /swapfile-cuw
+          sudo chmod 600 /swapfile-cuw
+          sudo mkswap /swapfile-cuw >/dev/null
+          sudo swapon /swapfile-cuw
+        fi
+        df -h /
+        free -g

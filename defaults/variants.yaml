@@ -1,0 +1,32 @@
+# Variant config for rattler-build.
+#
+# Deliberately minimal: the build MATRIX (which cuda/torch/python cells exist)
+# comes from scripts/generate_matrix.py reading the conda-torch channel, not
+# from here. This file only supplies what rattler-build itself needs to render
+# a recipe — the compiler/stdlib identities it cannot infer.
+#
+# cuda_compiler_version is intentionally absent: it is supplied per invocation
+# with --variant cuda_compiler_version=<x>, because it varies per cell and a
+# value here would silently win over the matrix.
+
+c_stdlib:
+  - sysroot
+c_stdlib_version:
+  - "2.28"
+
+cuda_compiler:
+  - cuda
+
+# nvcc refuses a host compiler newer than its supported ceiling, and
+# conda-forge's default is far ahead of it: an unpinned build resolved gcc
+# 16.2.0 and torch's cpp_extension aborted with "greater than the maximum
+# required version by CUDA 12.9 ... (>=6.0.0, <14.0)".
+#
+# These are the FALLBACK for a hand-run only. The ceiling moves with the CUDA
+# line -- cu12.4's nvcc constrains gcc < 13 -- so the matrix sends the real
+# value per cell with --variant c_compiler_version. See defaults/policy.yml
+# host_gcc for the derivation and the wave that proved it.
+c_compiler_version:
+  - "13"
+cxx_compiler_version:
+  - "13"
