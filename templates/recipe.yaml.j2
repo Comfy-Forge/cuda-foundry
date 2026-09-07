@@ -74,6 +74,11 @@ build:
       CUW_LEDGER: ${{ env.get("CUW_LEDGER", default="/tmp/cuw/ledger.txt") }}
       CUW_RSS_LOG: ${{ env.get("CUW_RSS_LOG", default="/tmp/cuw/rss.log") }}
       CUW_CCACHE_BIN: ${{ env.get("CUW_CCACHE_BIN", default="ccache") }}
+      # Where the ONE compile leaves its wheel. Outside the work dir and
+      # outside $PREFIX, because rattler-build deletes the first and packages
+      # the second -- the caller collects the wheel here after the build and
+      # feeds it to tools/make_wheel.py. See scripts/build_snippets/build.sh.
+      CUW_WHEELHOUSE: ${{ env.get("CUW_WHEELHOUSE", default="/tmp/cuw/wheelhouse") }}
       CCACHE_DIR: ${{ env.get("CUW_CCACHE_DIR", default="/tmp/cuw/ccache") }}
       # BASEDIR must be an ancestor of both the shard and link work dirs, so
       # ccache rewrites the differing absolute paths out of the hash.

@@ -336,10 +336,24 @@ def main() -> int:
                     "gcc_version": gcc,
                     "build_string": bstr,
                     "family": bool(family),
-                    # A family package has one tarball per version, so the
-                    # cell names the one it needs; everything else has one.
-                    "src_tarball": (f"{cfg['name']}-{cell_version}-source.tar.gz"
-                                    if family else f"{cfg['name']}-source.tar.gz"),
+                    # The tarball scripts/fetch_patched_sources.py wrote for
+                    # this cell. Its stem is ALWAYS "<name>-<version>": a
+                    # family package needs that because its revisions differ
+                    # per pairing, and everything else gets it because
+                    # fetch_one() builds the stem the same way for both --
+                    # `stem = f"{name}-{version}" if version else name`, and a
+                    # non-family package always has a version, so the `else`
+                    # branch is unreachable for anything this repo builds.
+                    #
+                    # This used to emit a bare "<name>-source.tar.gz" for
+                    # non-family packages, which no run ever produced. The
+                    # build job passes the name as CUW_SRC_TARBALL and
+                    # rattler-build resolves it as `source: path:`, so every
+                    # non-family cell died on a missing source -- which is why
+                    # the predecessor's meta/ holds torchvision and torchaudio
+                    # (both family) and not one cc-torch, fused-ssim or
+                    # flash-attn artifact. Found by porting, not by CI.
+                    "src_tarball": f"{cfg['name']}-{cell_version}-source.tar.gz",
                 })
         if holes["no_pairing"]:
             pairs = sorted({t for t, _, _ in holes["no_pairing"]})

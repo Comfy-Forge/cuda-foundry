@@ -41,6 +41,11 @@ build:
       CUW_LEDGER: ${{ env.get("CUW_LEDGER", default="/tmp/cuw/ledger.txt") }}
       CUW_RSS_LOG: ${{ env.get("CUW_RSS_LOG", default="/tmp/cuw/rss.log") }}
       CUW_CCACHE_BIN: ${{ env.get("CUW_CCACHE_BIN", default="ccache") }}
+      # Where the ONE compile leaves its wheel. Outside the work dir and
+      # outside $PREFIX, because rattler-build deletes the first and packages
+      # the second -- the caller collects the wheel here after the build and
+      # feeds it to tools/make_wheel.py. See scripts/build_snippets/build.sh.
+      CUW_WHEELHOUSE: ${{ env.get("CUW_WHEELHOUSE", default="/tmp/cuw/wheelhouse") }}
       CCACHE_DIR: ${{ env.get("CUW_CCACHE_DIR", default="/tmp/cuw/ccache") }}
       # BASEDIR must be an ancestor of both the shard and link work dirs, so
       # ccache rewrites the differing absolute paths out of the hash.
@@ -242,8 +247,30 @@ build:
           # GitHub-hosted runners (measured: "sandboxing failure: Operation not
           # permitted"). The seccomp filter needs no privileges, is inherited by every
           # child (setup.py, pip, cmake, nvcc), and cannot be removed once installed.
+          #
+          # ---- ONE compile, and it produces a WHEEL --------------------------------
+          # This was `pip install .`, which builds a wheel internally and then throws it
+          # away. Building it explicitly changes nothing about what is compiled -- pip
+          # takes the same PEP 517 path either way -- and it is what makes the second
+          # and third outputs possible: the .conda comes from installing this wheel into
+          # $PREFIX, the published manylinux wheel comes from `auditwheel repair` on the
+          # very same file. There is no second compile anywhere, so the two artifacts
+          # cannot disagree about what they contain.
+          #
+          # The wheelhouse is OUTSIDE the work dir on purpose. rattler-build deletes its
+          # work directory, and $PREFIX is packaged -- a wheel left in either would be
+          # gone or shipped. This is the same handoff shape as CCACHE_DIR: a CUW_* path
+          # the caller owns.
+          : "${CUW_WHEELHOUSE:=/tmp/cuw/wheelhouse}"
+          mkdir -p "$CUW_WHEELHOUSE"
+          # Only the .whl files, never `rm -rf` on the directory itself: this path
+          # arrives from the environment, and an unset or misspelled variable must not
+          # be able to delete a tree.
+          rm -f "$CUW_WHEELHOUSE"/*.whl
+
           BUILD_RC=0
-          $PYTHON "$RECIPE_DIR/nonet.py" -- $PYTHON -m pip install . --no-deps --no-build-isolation -vv || BUILD_RC=$?
+          $PYTHON "$RECIPE_DIR/nonet.py" -- $PYTHON -m pip wheel . --no-deps --no-build-isolation \
+              --wheel-dir "$CUW_WHEELHOUSE" -vv || BUILD_RC=$?
 
           STATS="$("$CCACHE_BIN" --print-stats 2>/dev/null || true)"
           HITS=$(printf '%s\n' "$STATS" | awk -F'\t' '$1 ~ /^(direct_cache_hit|preprocessed_cache_hit)$/ {n+=$2} END{print n+0}')
@@ -297,6 +324,29 @@ build:
               ;;
           esac
 
+          # ---- install THAT wheel into $PREFIX ------------------------------------
+          # Everything above this line is shared with the wheel output; everything below
+          # is conda packaging. Shard mode has already exited, so this runs exactly once
+          # per artifact.
+          #
+          # --no-index as well as --no-deps: --no-deps stops pip resolving dependencies,
+          # but a missing one would still send it to PyPI for the wheel itself if the
+          # glob below ever produced nothing. With --no-index there is no index to fall
+          # back to, so a broken handoff fails loudly here instead of quietly installing
+          # somebody else's build. (The seccomp filter would also refuse it -- this is
+          # the same belt-and-braces as declaring force_source_build alongside L1.)
+          shopt -s nullglob
+          CUW_WHEELS=("$CUW_WHEELHOUSE"/*.whl)
+          shopt -u nullglob
+          if [ "${#CUW_WHEELS[@]}" -ne 1 ]; then
+            echo "::error::expected exactly 1 wheel in $CUW_WHEELHOUSE, found ${#CUW_WHEELS[@]}: ${CUW_WHEELS[*]:-none}. The .conda and the published wheel must come from ONE file; anything else means the compile produced nothing or the wheelhouse was not cleared." >&2
+            exit 1
+          fi
+          CUW_WHEEL="${CUW_WHEELS[0]}"
+          echo "=== installing $(basename "$CUW_WHEEL") into \$PREFIX"
+          $PYTHON "$RECIPE_DIR/nonet.py" -- $PYTHON -m pip install "$CUW_WHEEL" \
+              --no-deps --no-index --no-build-isolation --force-reinstall -vv
+
           # ---- L3: the compile ledger --------------------------------------------
           # Every extension module we are about to ship must correspond to at least one
           # translation unit this run actually compiled. Catches what the network denial
@@ -311,10 +361,11 @@ build:
           echo "ledger: $COMPILED compile(s) recorded for $MODULES installed module(s)"
 
           # ---- dist-info hygiene --------------------------------------------------
-          # pip install . records where it installed FROM in direct_url.json, which is
-          # this runner's $SRC_DIR. That path is meaningless to anyone who installs the
-          # package and makes `pip freeze` emit a file:// URL instead of a version, so
-          # it must not ship. RECORD goes for the same reason conda-forge drops it: with
+          # pip records where it installed FROM in direct_url.json -- a file:// URL to
+          # this runner's wheelhouse now that the install is `pip install <wheel>`
+          # rather than `pip install .` (it was $SRC_DIR before; either way it is a path
+          # on a machine nobody else has). It makes `pip freeze` emit that URL instead
+          # of a version, so it must not ship. RECORD goes for the same reason conda-forge drops it: with
           # it present, `pip uninstall` will happily delete files conda owns.
           #
           # INSTALLER is deliberately NOT written here. rattler-build 0.75.0 rewrites it
