@@ -4,11 +4,16 @@ Compiles the CUDA extensions ComfyUI node packs depend on — `flash-attn`,
 `natten`, `spconv`, `gsplat`, `torchvision`, `torchaudio` and ~40 more —
 **once per cell**, and pours that one build into three publishing moulds:
 
-| output | what it is | who consumes it |
+| output | served at | who consumes it |
 |---|---|---|
-| **conda channel** | `.conda` packages, dependencies declared, shared libraries dynamically linked | pixi / conda, comfy-env's solver |
-| **PyPI index** | manylinux wheels, no `Requires-Dist` advertised | comfy-env's direct-URL installs, which must not let a resolver chase dependencies |
-| **PyPI index, `/deps/`** | the *same* wheels, advertising their PEP 658 `.metadata` sidecars | anyone doing a plain `pip install` who needs the dependencies resolved |
+| **conda channel** — `.conda` packages, dependencies declared, shared libraries dynamically linked | `comfy-forge.github.io/cuda-foundry` | pixi / conda, comfy-env's solver |
+| **PyPI index** — manylinux wheels, no `Requires-Dist` advertised | `comfy-forge.github.io/pypi-cuda-wheels` | direct-URL installs, which must not let a resolver chase dependencies |
+| **PyPI index, `/deps/`** — the *same* wheels, advertising their PEP 658 `.metadata` sidecars | `comfy-forge.github.io/pypi-cuda-wheels/deps` | a plain `pip install` that needs dependencies resolved |
+
+The existing `cuda-wheels` index is untouched and keeps serving: comfy-env
+points at it today, and nothing here breaks that. `pypi-cuda-wheels` is this
+repo's own publishing target, and a cutover — if it happens — is a one-line
+change in comfy-env made deliberately, not a side effect of building.
 
 The two PyPI trees are the same files. They differ only in whether the index
 advertises `data-core-metadata`, which is what decides if pip fetches the
