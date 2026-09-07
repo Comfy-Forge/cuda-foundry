@@ -361,6 +361,12 @@ jobs:
           echo '```'
 
       - name: Verify artifact
+        env:
+          # Routed through env:, never referenced as ${{ }} inside run:. A raw
+          # expression is substituted as TEXT before bash parses the line, so a
+          # value containing `"; cmd; x="` would execute (CWE-78) -- the rule
+          # this workflow's header sets out, and which the arch list broke.
+          CELL_ARCH: ${{ matrix.cell.arch_list }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -372,7 +378,7 @@ jobs:
             # entirely, which is how a documented publish gate sat dead.
             python tools/verify_conda.py "${files[@]}" \
               --ledger "$CUW_LEDGER" \
-              --expect-arch "${{ matrix.cell.arch_list }}"
+              --expect-arch "$CELL_ARCH"
           else
             echo "::warning::tools/verify_conda.py not present yet — artifact gate skipped"
           fi
