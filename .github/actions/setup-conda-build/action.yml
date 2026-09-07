@@ -113,6 +113,11 @@ runs:
         set -euo pipefail
         mkdir -p "$RUNNER_TEMP/wheelhouse"
         echo "CUW_WHEELHOUSE=$RUNNER_TEMP/wheelhouse" >> "$GITHUB_ENV"
+        # The build step reads defaults/policy.yml host_msvc to pick this
+        # cell's MSVC package, so the policy file stays the single source of
+        # truth rather than the value being duplicated onto the matrix cell.
+        # The Linux runner image ships pyyaml; the Windows one does not.
+        python -m pip install --quiet --disable-pip-version-check pyyaml
         echo "CUW_LEDGER=$RUNNER_TEMP/cuw-ledger.txt" >> "$GITHUB_ENV"
         echo "CUW_RSS_LOG=$RUNNER_TEMP/cuw-rss.log" >> "$GITHUB_ENV"
 
