@@ -1,0 +1,8 @@
+output/
+work/
+dist/
+__pycache__/
+*.pyc
+site/
+.pixi/
+source.tar.gz
