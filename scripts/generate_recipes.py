@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import re
 import sys
 from pathlib import Path
 
@@ -25,6 +26,8 @@ TEMPLATE = REPO / "templates" / "recipe.yaml.j2"
 BUILD_SH = REPO / "scripts" / "build_snippets" / "build.sh"
 NVCC_WRAP = REPO / "scripts" / "build_snippets" / "nvcc-wrap.sh"
 NONET = REPO / "scripts" / "build_snippets" / "nonet.py"
+BUILD_BAT = REPO / "scripts" / "build_snippets" / "build.bat"
+BUILD_WIN = REPO / "scripts" / "build_snippets" / "build_win.py"
 
 
 def load_packages(only: str | None) -> list[tuple[str, dict]]:
@@ -110,6 +113,56 @@ def _build_sh(cfg: dict) -> str:
     return text.replace(hook, build_env_block(cfg))
 
 
+def _build_bat(cfg: dict) -> str:
+    """The win-64 entry point with this package's build_env substituted in.
+
+    Deliberately parallel to _build_sh: a package declaring `build_env` must get
+    it on both platforms or neither. The two hooks render different syntax --
+    `export K="V"` against `set "K=V"` -- so the substitution cannot be shared,
+    but the failure mode if one is forgotten is identical and silent, which is
+    why both are checked.
+    """
+    text = BUILD_BAT.read_text().rstrip("\n")
+    hook = ":: CUW_BUILD_ENV_HOOK"
+    if hook not in text:
+        sys.exit("scripts/build_snippets/build.bat lost its :: CUW_BUILD_ENV_HOOK "
+                 "marker -- package.yml build_env would be silently dropped on win-64")
+    env = cfg.get("build_env") or {}
+    block = "\n".join(f'set "{k}={_bat_value(v)}"' for k, v in env.items()) \
+        or ":: (no build_env declared)"
+    return text.replace(hook, block)
+
+
+_SHELL_VAR = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+
+
+def _bat_value(value) -> str:
+    """Translate a build_env value's shell variable references to batch syntax.
+
+    package.yml is written once for both platforms, and its values reference the
+    build environment the way build.sh does -- `$PREFIX`, `${SRC_DIR}`. Copied
+    verbatim into a .bat that sets the LITERAL string "$PREFIX", silently, and a
+    build configured against a path that does not exist is a far worse failure
+    than one that stops here. torchaudio's `FFMPEG_ROOT: $PREFIX` is the case
+    that surfaced it.
+
+    Only simple `$VAR` and `${VAR}` are handled, which is all that can appear:
+    package_loader rejects quotes, backticks, backslashes and command
+    substitution in build_env values before this ever runs. Anything with a
+    dollar still in it afterwards is refused rather than guessed at.
+
+    Path separators are deliberately NOT rewritten. Windows accepts forward
+    slashes in paths, and blanket-converting them would corrupt any value that
+    is not a path.
+    """
+    out = _SHELL_VAR.sub(lambda m: f"%{m.group(1) or m.group(2)}%", str(value))
+    if "$" in out:
+        sys.exit(f"package.yml build_env value {value!r} still contains '$' after "
+                 f"translating to batch syntax -- it cannot be rendered for win-64. "
+                 f"Use a plain $VAR or ${{VAR}} reference.")
+    return out
+
+
 def render(folder: str, cfg: dict, env) -> str:
     tmpl = env.get_template(TEMPLATE.name)
     family = bool(cfg.get("family_versions"))
@@ -131,11 +184,13 @@ def render(folder: str, cfg: dict, env) -> str:
         force_source_build=cfg.get("force_source_build") or {},
         host_deps=cfg.get("host_deps") or [],
         run_deps=cfg.get("run_deps") or [],
+        build_deps=cfg.get("build_deps") or [],
         import_name=cfg.get("import_name") or cfg["name"],
         homepage=cfg.get("homepage", f"https://github.com/{cfg.get('source_repo','')}"),
         license=_license(cfg),
         summary=cfg.get("summary", cfg["name"]),
         build_sh=_build_sh(cfg),
+        build_bat=_build_bat(cfg),
     ) + "\n"
 
 
@@ -184,6 +239,11 @@ def main() -> int:
         # path the build script can rely on inside the build.
         (out.parent / "nonet.py").write_text(NONET.read_text())
         (out.parent / "nonet.py").chmod(0o755)
+        # Same reason as nonet.py: $RECIPE_DIR is the only path build.bat can
+        # rely on inside the build. Kept a sibling file rather than embedded
+        # because rattler-build renders the embedded script through minijinja,
+        # and brace-hash / brace-brace / brace-percent would break the render.
+        (out.parent / "build_win.py").write_text(BUILD_WIN.read_text())
         print(out.relative_to(REPO))
 
     if stale:

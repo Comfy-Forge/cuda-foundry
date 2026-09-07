@@ -1,0 +1,25 @@
+# Variant config for win-64, layered on top of defaults/variants.yaml the same
+# way: only what rattler-build cannot infer.
+#
+# It is a SEPARATE file rather than extra keys in variants.yaml because the two
+# platforms disagree on the same keys -- `c_stdlib` is `sysroot` on Linux and
+# `vs` here -- and a variant config has no platform conditionals. Passing the
+# wrong one is then a loud render error rather than a silent Linux value used
+# on Windows.
+#
+# c_compiler / cxx_compiler are the FALLBACK for a hand-run only, exactly like
+# c_compiler_version on Linux. The real value is per cell and comes from
+# defaults/policy.yml host_msvc via --variant c_compiler=<vsNNNN>, because
+# nvcc's accepted MSVC window moves with the CUDA line (tools/msvc_ceiling.py).
+# vs2022 is correct for CUDA >= 12.4 and WRONG for CUDA <= 12.3.
+
+c_stdlib:
+  - vs
+
+c_compiler:
+  - vs2022
+cxx_compiler:
+  - vs2022
+
+cuda_compiler:
+  - cuda

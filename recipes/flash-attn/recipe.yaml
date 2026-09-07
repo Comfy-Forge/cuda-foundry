@@ -409,11 +409,41 @@ build:
           fi
       - if: win
         then: |
-          :: NOT WIRED FOR v1 — linux-64 only (see docs/ARCHITECTURE.md#scope).
-          :: Windows needs the .o-restore handoff, MSVC version pinning, and
-          :: the setuptools spawn-rename breakage handled before this is real.
-          echo "win builds are not wired yet" 1>&2
-          exit 1
+          :: win-64 build entry point. Deliberately thin: everything of substance lives in
+          :: scripts/build_snippets/build_win.py, which generate_recipes.py copies next to
+          :: the recipe the same way it copies nonet.py.
+          ::
+          :: The split is not stylistic. rattler-build renders THIS text through minijinja
+          :: before running it, and minijinja opens a comment on brace-hash, an expression
+          :: on brace-brace and a statement on brace-percent. When the render fails it
+          :: reports only "Script failed to execute" -- no script output, no "Running build
+          :: script" header, because the script never existed to be run. A sibling .py file
+          :: is copied verbatim and never rendered, so it is free of that hazard; keeping
+          :: this file short enough to eyeball for those three digraphs is the whole point.
+          ::
+          :: Batch's own percent-variables are fine here -- it is brace-percent that opens
+          :: a minijinja statement, not percent alone.
+          @echo on
+          setlocal
+
+          :: package.yml `build_env` is substituted here by generate_recipes.py, the same
+          :: way build.sh's # CUW_BUILD_ENV_HOOK works. Without it a package that declares
+          :: build_env would have it silently applied on Linux and silently dropped here.
+          :: (no build_env declared)
+
+          if not defined PYTHON (
+            echo ::error::PYTHON is not set -- rattler-build normally provides it 1>&2
+            exit /b 1
+          )
+
+          "%PYTHON%" "%RECIPE_DIR%\build_win.py"
+          if errorlevel 1 (
+            echo ::error::win-64 build script failed 1>&2
+            exit /b 1
+          )
+
+          endlocal
+          exit /b 0
 
 requirements:
   build:
@@ -448,9 +478,42 @@ requirements:
     # Compiling against the cell's CUDA and running against the >= runtime the
     # run_export asks for is the safe direction; the reverse is not.
     - cuda-version ${{ cuda_compiler_version }}.*
-    - cuda-nvcc
+    # NOT the `cuda-nvcc` metapackage on win-64: it hard-depends on
+    # `vs2019_win-64`, unversioned (measured in cuda-nvcc-12.8.93-h8f04d04_2's
+    # index.json), so asking for the toolkit silently selects MSVC 19.29 while
+    # upstream's torch is built with the VS2022 toolset. Asking for vs2022 as
+    # well does not replace it -- both activation scripts land in one prefix and
+    # vs2022 wins only because activate.d runs in filename order and 2022 sorts
+    # after 2019. `cuda-nvcc_win-64` plus an explicit MSVC yields exactly one.
+    # build_win.py re-checks both facts against what actually got installed.
+    # The MSVC package itself is NOT named here: `compiler('c')` above already
+    # resolves to <c_compiler>_win-64, and the cell picks which one by setting
+    # the `c_compiler` variant -- exactly how `c_compiler_version` carries the
+    # gcc ceiling on Linux. Naming it again here would be a second source of
+    # truth that can disagree with the first. See defaults/policy.yml
+    # host_msvc for the per-CUDA table and defaults/variants-win.yaml.
+    - if: win
+      then: cuda-nvcc_win-64
+      else: cuda-nvcc
     - cuda-cudart-dev
     - cuda-cccl
+    # package.yml `build_deps`. These were declared by every package and
+    # rendered by NOTHING -- the template iterated host_deps and run_deps and
+    # simply dropped this list, so flash-attn's `packaging`/`psutil`/`ninja`
+    # and torchaudio's `cmake` were never installed. torchaudio's build then
+    # used whatever cmake was on PATH, which on a workstation was a
+    # uv-installed one from the developer's home directory: precisely the
+    # host leak the from-source guarantee is meant to make impossible.
+    #
+    # They land in build:, which is the right env for an EXECUTABLE (cmake,
+    # ninja) because rattler-build puts $BUILD_PREFIX/bin on PATH. A build
+    # dependency that setup.py must `import` is a different case -- the host
+    # python cannot import from the build prefix -- so anything import-time
+    # belongs in host_deps instead. Worth stating because the two read alike
+    # in package.yml and only one of them works from here.
+    - packaging
+    - psutil
+    - ninja
   host:
     - python ${{ python }}.*
     # python_abi's run_export is what puts a real interpreter-ABI bound on the
@@ -462,7 +525,18 @@ requirements:
     # inherit from. Declare it directly rather than depending on a sibling.
     - python_abi ${{ python }}.* *_cp${{ py_nodot }}
     - pip
-    - setuptools
+    # The Windows window is narrow at BOTH ends, and both ends were measured in
+    # cuda-wheels: 65.5.0 emits RELATIVE -I include dirs, which fails ninja
+    # compiles with C1083; and 84.0.0 renamed the hook torch monkeypatches --
+    # _distutils/compilers/C/msvc.py::compile() ends in self.call(args) where
+    # every version through 83.0.0 ended in self.spawn(args). torch's
+    # BuildExtension (win_wrap_single_compile, the use_ninja=False path) still
+    # assigns self.compiler.spawn successfully under 84 because spawn survives
+    # as a deprecated shim -- and it is then never called, so .cu goes straight
+    # to cl.exe and dies with C3861 'atomicCAS': identifier not found.
+    - if: win
+      then: setuptools >=78,<84
+      else: setuptools
     # The exact torch this compiles against. The build glob is what locks the
     # CUDA flavour today: a bare minor range would let a cu130 torch satisfy a
     # cu128 extension.
@@ -500,7 +574,14 @@ requirements:
     # anything: "OSError: libnvToolsExt.so.1: cannot open shared object file".
     # Only the older lines need it (NVTX v3 is header-only), but asking for it
     # everywhere costs a metapackage and keeps the floor in one place.
-    - cuda-nvtx
+    #
+    # linux only: conda-forge ships `cuda-nvtx` for linux-64/aarch64/ppc64le and
+    # NOT for win-64, which gets only `cuda-nvtx-dev`. That is consistent with
+    # why the dep is here at all -- torch 2.4/2.5 link libnvToolsExt.so.1, an
+    # ELF soname with no Windows counterpart. Unconditional, it made every
+    # win-64 cell UNSAT with "No candidates were found for cuda-nvtx".
+    - if: linux
+      then: cuda-nvtx
     - cuda-cudart-dev
   run:
     - python

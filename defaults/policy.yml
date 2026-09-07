@@ -40,6 +40,25 @@ host_gcc:
     "12.3": "12"
     "12.4": "12"
 
+# The Windows counterpart, and it exists for the same reason: nvcc refuses a
+# host compiler outside a window it carries in crt/host_config.h, and nothing
+# in the solve enforces it -- conda-forge's CUDA packages declare only
+# `vc >=14.2,<15`, spanning MSVC 19.2x to 19.5x.
+#
+# vs2022_win-64 is _MSC_VER 1944, which is inside the window for CUDA >= 12.4
+# and OUTSIDE it for CUDA <= 12.3, whose ceiling is 1940. So this is a table,
+# not a constant: one MSVC across the matrix is wrong at both ends.
+#
+# Recompute with `python tools/msvc_ceiling.py`, which reads the guard out of
+# the shipped headers rather than trusting the values pasted here.
+host_msvc:
+  default: "vs2022"
+  by_cuda:
+    "12.0": "vs2019"
+    "12.1": "vs2019"
+    "12.2": "vs2019"
+    "12.3": "vs2019"
+
 # Python floor is ours (dropping an old python is a decision). There is no
 # ceiling on purpose: whatever pythons conda-torch actually carries is what
 # we build for.

@@ -32,6 +32,7 @@ family_versions:
   "2.11.0": { version: "2.11.0", source_rev: 34c52a67e8941bbd8e6adaca0eb0b9eabec11d78 }
 
 source_repo: pytorch/audio
+patch_script: packages/torchaudio/patches/torchaudio.py
 # Neither repo has submodules (no .gitmodules at any tagged release
 # checked), so the source fetch is a plain shallow clone at the rev.
 clone_recursive: false
@@ -50,22 +51,57 @@ jobs: 3
 nvcc_threads: 1
 
 # ── dependencies ──────────────────────────────────────────────────────────
-# setup.py declares install_requires=[] literally. Audio I/O moved out to the
-# separate `torchcodec` package, so there is no ffmpeg/sox/libsndfile
-# dependency to translate -- and nothing is vendored either, which is why
-# torchaudio needs no unvendoring surgery in any packaging scheme.
+# setup.py declares install_requires=[] literally, so there is no Python
+# runtime dependency to translate.
+#
+# CORRECTION (2026-09-07). This block used to claim "Audio I/O moved out to
+# the separate torchcodec package, so there is no ffmpeg/sox/libsndfile
+# dependency to translate". That is false at 2.8.0 and the build proved it:
+# tools/setup_helpers/extension.py:37-40 defaults BUILD_SOX and USE_FFMPEG to
+# True on Linux, and upstream's own manylinux wheel ships _torchaudio_sox.so,
+# libtorchaudio_sox.so and torio/lib/libtorio_ffmpeg{4,5,6}.so. The claim was
+# read from the Python metadata alone; the C++ build system says otherwise.
+# Both backends reach the network during the compile, which is how L1 found
+# it -- see packages/torchaudio/patches/torchaudio.py.
 run_deps: []
 
-# No external library headers at all: grepping src/ for sox/ffmpeg/FLAC/opus
-# includes returns nothing. Only torch's own headers, which the template
-# supplies.
-host_deps: []
+# sox and ffmpeg are here because upstream's optional backends are ON by
+# default and we build them rather than quietly dropping them.
+#
+#   sox     ONLY the header, for third_party/sox/stub.c. Upstream downloads
+#           the sox tarball and compiles none of it -- CONFIGURE_COMMAND and
+#           BUILD_COMMAND are both empty -- so this replaces a SourceForge
+#           fetch with a conda package, and nothing of sox is shipped.
+#   ffmpeg  torio links it directly on upstream's FFMPEG_ROOT path. This
+#           replaces three PRE-BUILT ffmpeg binaries downloaded from
+#           pytorch.s3.amazonaws.com with one conda package that `conda
+#           update` can patch -- the same argument as torchvision's codecs.
+#           rattler-build's run_export carries it to the runtime deps.
+host_deps:
+  - sox
+  - ffmpeg
 
-build_deps: []
+build_deps:
+  # torchaudio drives its C++ build through cmake, and it is NOT declared by
+  # anything else here. Without it the build silently used whatever cmake was
+  # on PATH -- on this workstation a uv-installed one from the developer's
+  # home directory, which is exactly the kind of host leak the from-source
+  # guarantee is supposed to make impossible.
+  - cmake
 
 # conda-forge does not ship a `torchaudio` for linux-64 in the flavours we
 # target, but the name exists there, so state the obligation explicitly.
 carry: complete
+
+# Upstream's escape hatches, used instead of disabling the backends.
+# FFMPEG_ROOT selects third_party/ffmpeg/single ("searching existing FFmpeg
+# installation") over the pre-built multi-version download; SOX_INCLUDE_DIR
+# is read by the patched sox CMakeLists. Both are computed from $PREFIX, so
+# they must live here rather than in the recipe's build.script.env, which
+# rattler-build sets literally with no shell expansion.
+build_env:
+  FFMPEG_ROOT: $PREFIX
+  SOX_INCLUDE_DIR: $PREFIX/include
 
 verify:
   import: torchaudio
