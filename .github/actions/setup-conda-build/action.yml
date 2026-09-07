@@ -106,6 +106,13 @@ runs:
         echo "CUW_CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         echo "CUW_LEDGER=$RUNNER_TEMP/cuw-ledger.txt" >> "$GITHUB_ENV"
         echo "CUW_RSS_LOG=$RUNNER_TEMP/cuw-rss.log" >> "$GITHUB_ENV"
+        # Where the one compile leaves its wheel, on this lane too. The win
+        # branch below already exported it and linux did not, so the link
+        # job's wheel step read an unset variable -- it would have run
+        # `ls /*.whl` and failed on every linux cell. Same reasoning as
+        # there: outside the work dir (rattler-build deletes it) and outside
+        # $PREFIX (rattler-build packages it).
+        echo "CUW_WHEELHOUSE=$RUNNER_TEMP/wheelhouse" >> "$GITHUB_ENV"
 
     # The same CUW_* handoff paths, minus everything ccache. build_win.py reads
     # CUW_WHEELHOUSE for the one wheel that becomes both published outputs; it
