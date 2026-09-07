@@ -32,8 +32,20 @@ build:
       # the recipe must not bake in a single package-level value.
       TORCH_CUDA_ARCH_LIST: ${{ env.get("CUW_ARCH_LIST", default="") }}
       FORCE_CUDA: "1"
-      MAX_JOBS: "3"
-      CUW_NVCC_THREADS: "1"
+      # package.yml's declared values are the DEFAULT, and on CI they are what
+      # runs -- the workflow sets neither override. They are tuned for a 16 GB
+      # hosted runner, where peak memory is roughly jobs x nvcc_threads x one
+      # cicc and a CUTLASS TU puts one cicc near the ceiling.
+      #
+      # The override exists because that ceiling is a property of the MACHINE,
+      # not of the package: the same flash-attn cell that must run serially on
+      # a 16 GB runner has 31 GB and 12 cores to use on a workstation, and
+      # jobs=1 there leaves eleven cores idle for hours. Neither value can
+      # change WHAT is compiled -- they are scheduling only, the arch list and
+      # every compiler flag are unaffected -- so a machine with more memory
+      # raising them cannot produce a different artifact.
+      MAX_JOBS: ${{ env.get("CUW_MAX_JOBS", default="3") }}
+      CUW_NVCC_THREADS: ${{ env.get("CUW_NVCC_THREADS", default="1") }}
       # ---- ccache: config must live HERE, not in the outer shell -------
       CUW_MODE: ${{ env.get("CUW_MODE", default="full") }}
       CUW_SHARD_INDEX: ${{ env.get("CUW_SHARD_INDEX", default="0") }}
