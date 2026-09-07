@@ -183,15 +183,61 @@ def ninja_log_entries(src_dir: Path) -> list[str]:
     return outputs
 
 
-def check_ledger(src_dir: Path, site: Path) -> None:
+def dist_info_dir(site: Path, wheel: Path) -> Path:
+    """OUR .dist-info, derived from the wheel filename.
+
+    Everything downstream must be scoped to the package we just built. The host
+    environment is a full conda prefix -- torch alone brings dozens of extension
+    modules and its dependencies bring their own dist-info directories -- so a
+    bare glob over site-packages answers questions about torch, not about us.
+    """
+    name, version = wheel.name.split("-")[:2]
+    # PEP 503/427: the dist-info directory uses the escaped name, which for a
+    # wheel filename component is already the normalized form.
+    d = site / f"{name}-{version}.dist-info"
+    if not d.is_dir():
+        die(f"expected {d.name} in {site} after installing {wheel.name}, "
+            f"but it is not there -- the install did not land where this script "
+            f"is looking.")
+    return d
+
+
+def installed_files(dist_info: Path) -> list[Path]:
+    """Paths this package installed, from its own RECORD.
+
+    Read BEFORE scrub_dist_info removes RECORD, which is why the order in main()
+    matters. RECORD is the only authoritative statement of what belongs to this
+    package rather than to the host environment around it.
+    """
+    record = dist_info / "RECORD"
+    if not record.is_file():
+        die(f"{dist_info.name}/RECORD is missing; cannot tell which installed "
+            f"files belong to this package.")
+    out = []
+    for line in record.read_text(encoding="utf8", errors="replace").splitlines():
+        rel = line.split(",")[0].strip()
+        if rel:
+            out.append((dist_info.parent / rel).resolve())
+    return out
+
+
+def check_ledger(src_dir: Path, own_files: list[Path]) -> None:
+    """L3: every extension module we ship must have been compiled by this run.
+
+    Scoped to THIS package's own files. An earlier version globbed
+    site-packages for *.pyd and reported "24 installed extension module(s)" for
+    a package that ships exactly one -- it was counting torch's. A check whose
+    denominator is dominated by somebody else's binaries cannot fail for the
+    reason it exists, so it was passing vacuously.
+    """
     compiled = ninja_log_entries(src_dir)
     objects = [o for o in compiled if o.lower().endswith((".obj", ".o", ".lib"))]
-    modules = [p for p in site.glob("**/*.pyd")]
+    modules = [f for f in own_files if f.suffix.lower() == ".pyd"]
     log(f"ledger: ninja recorded {len(compiled)} output(s), {len(objects)} object(s), "
-        f"for {len(modules)} installed extension module(s)")
+        f"for {len(modules)} extension module(s) shipped by this package")
     if modules and not objects:
-        die(f"installed {len(modules)} extension module(s) "
-            f"({', '.join(p.name for p in modules[:4])}) but ninja compiled no "
+        die(f"shipping {len(modules)} extension module(s) "
+            f"({', '.join(f.name for f in modules[:4])}) but ninja compiled no "
             f"object files -- this build did not compile what it is shipping. "
             f"Either a prebuilt binary reached the source tree, or the build did "
             f"not use ninja and this ledger cannot see it.")
@@ -208,23 +254,29 @@ def one_wheel(wheelhouse: Path) -> Path:
     return wheels[0]
 
 
-def scrub_dist_info(site: Path) -> None:
+def scrub_dist_info(dist_info: Path) -> None:
     """pip records where it installed FROM; that path exists on no other machine.
 
     direct_url.json makes `pip freeze` emit a file:// URL instead of a version.
     RECORD goes for the reason conda-forge drops it: with it present `pip
     uninstall` will cheerfully delete files conda owns.
 
+    OUR dist-info only. An earlier version looped over every *.dist-info in
+    site-packages and duly deleted RECORD and direct_url.json from filelock,
+    fsspec, jinja2, markupsafe and the rest of the host environment -- packages
+    this build does not own and must not modify. They are not ours to tidy, and
+    the .conda gets no benefit: rattler-build packages files that APPEARED in
+    $PREFIX, so deleting somebody else's does nothing but corrupt the prefix.
+
     INSTALLER is deliberately not written -- rattler-build rewrites it during
     packaging regardless, so a write here would be dead code that looks
     load-bearing.
     """
-    for di in site.glob("*.dist-info"):
-        for name in ("direct_url.json", "RECORD"):
-            target = di / name
-            if target.exists():
-                target.unlink()
-                log(f"=== removed {di.name}/{name}")
+    for name in ("direct_url.json", "RECORD"):
+        target = dist_info / name
+        if target.exists():
+            target.unlink()
+            log(f"=== removed {dist_info.name}/{name}")
 
 
 def main() -> int:
@@ -280,8 +332,11 @@ def main() -> int:
     site = Path(sysconfig.get_paths()["purelib"])
     if not site.is_dir():
         die(f"site-packages not found at {site}")
-    check_ledger(src_dir, site)
-    scrub_dist_info(site)
+    dist_info = dist_info_dir(site, wheel)
+    # RECORD is read here and deleted below, in that order.
+    own_files = installed_files(dist_info)
+    check_ledger(src_dir, own_files)
+    scrub_dist_info(dist_info)
     log("=== win-64 build complete")
     return 0
 
