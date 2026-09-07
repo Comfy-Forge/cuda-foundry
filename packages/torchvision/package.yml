@@ -61,7 +61,21 @@ nvcc_threads: 1
 run_deps:
   - numpy
   - pillow >=5.3.0
-build_deps: []
+build_deps:
+  # ALSO in build:, while the import library stays in host:. torchvision does
+  # not ask the compiler whether nvjpeg exists -- it stats
+  # "$CUDA_HOME/include/nvjpeg.h" (setup.py:350) -- and CUDA_HOME is inside
+  # BUILD_PREFIX, where a host-only dependency never puts anything. So with
+  # libnvjpeg-dev in host: alone, the header sits in $PREFIX, the probe finds
+  # nothing, and upstream warns "Building torchvision without NVJPEG support"
+  # and carries on. Measured on win-64 run 34170472611, whose .pyd then failed
+  # the codec gate with exactly one library missing: nvjpeg.
+  #
+  # Declared here rather than bridged into CUDA_HOME because putting a header
+  # in the environment that probes for it is what build: is FOR. Linux reaches
+  # the same place through build.sh's targets/ symlink bridge; this makes the
+  # dependency explicit on both platforms instead of relying on that bridge.
+  - libnvjpeg-dev
 
 # The whole point of compiling rather than repacking. The PyPI wheel vendors
 # its own codecs into torchvision.libs/ -- hash-renamed so they can never

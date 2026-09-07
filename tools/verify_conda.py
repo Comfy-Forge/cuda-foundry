@@ -363,9 +363,21 @@ def verify(path: Path, ledger: set, expect_arch: str, tmp: Path) -> bool:
                 low = {n.lower() for n in needed}
                 missing = [w for w in expect_win
                            if not any(n.startswith(w.lower()) for n in low)]
+                # The interesting imports, with the platform's own runtime
+                # dropped. Every PE imports KERNEL32, the CRT and the
+                # api-ms-win-* apisets, and they sort to the front -- so a
+                # truncated list showed ten of those and none of the libraries
+                # the check is actually about, which is the opposite of what a
+                # failure message is for.
+                interesting = sorted(
+                    n for n in needed
+                    if not n.lower().startswith(("kernel32", "msvcp", "vcruntime",
+                                                 "api-ms-win-", "ucrtbase",
+                                                 "advapi32", "user32"))
+                )
                 rep.check(not missing,
                           f"imports every DLL package.yml says it must "
-                          f"(missing {missing}; imports={sorted(needed)[:10]})")
+                          f"(missing {missing}; non-system imports={interesting})")
         else:
             missing = [w for w in expect_linked
                        if not any(n.startswith(w) for n in needed)]
