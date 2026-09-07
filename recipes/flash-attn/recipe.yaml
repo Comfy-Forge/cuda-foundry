@@ -512,8 +512,8 @@ tests:
 
 about:
   homepage: "https://github.com/Dao-AILab/flash-attention"
-  license: "LicenseRef-Unspecified"
-  summary: "flash-attn"
+  license: "BSD-3-Clause"
+  summary: "Fast and memory-efficient exact attention, compiled against the conda-torch channel"
 
 extra:
   # Provenance: the from-source guarantee, recorded in the artifact so it is

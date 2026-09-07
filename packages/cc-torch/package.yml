@@ -1,7 +1,18 @@
 name: cc-torch            # conda name: hyphenated PyPI name
 pypi_name: cc_torch       # what the purl points at
 import_name: cc_torch     # what the smoke test imports
-version: "0.1.0"
+# Read from upstream's own setup.py at the pinned rev, which says
+# version="0.2". This said 0.1.0, which no upstream artifact has ever
+# carried: the repo has no tags and no release, so setup.py IS the version.
+# The mismatch was visible the moment the build produced a wheel --
+# cc_torch-0.2-cp312-...whl installed into a .conda labelled 0.1.0 -- and
+# cuda-wheels already publishes it as cc_torch-0.2+cu130torch2.11.
+version: "0.2"
+
+# BSD-3-Clause, read from the repo's own LICENSE at the pinned rev.
+license: BSD-3-Clause
+homepage: https://github.com/ronghanghu/cc_torch
+summary: CUDA connected-components labeling for PyTorch, compiled against the conda-torch channel
 
 source_repo: ronghanghu/cc_torch
 source_rev: 446e9360ed10d3c8d03925ccb5f220ccb62009de

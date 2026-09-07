@@ -1,6 +1,6 @@
 context:
   name: cc-torch
-  version: "0.1.0"
+  version: "0.2"
   cuda_short: ${{ cuda_compiler_version | replace('.', '') }}
   torch_nodot: ${{ pytorch | replace('.', '') }}
   py_nodot: ${{ python | replace('.', '') }}
@@ -506,8 +506,8 @@ tests:
 
 about:
   homepage: "https://github.com/ronghanghu/cc_torch"
-  license: "LicenseRef-Unspecified"
-  summary: "cc-torch"
+  license: "BSD-3-Clause"
+  summary: "CUDA connected-components labeling for PyTorch, compiled against the conda-torch channel"
 
 extra:
   # Provenance: the from-source guarantee, recorded in the artifact so it is

@@ -506,8 +506,8 @@ tests:
 
 about:
   homepage: "https://github.com/rahul-goel/fused-ssim"
-  license: "LicenseRef-Unspecified"
-  summary: "fused-ssim"
+  license: "MIT"
+  summary: "Fused differentiable SSIM for PyTorch, compiled against the conda-torch channel"
 
 extra:
   # Provenance: the from-source guarantee, recorded in the artifact so it is

@@ -3,6 +3,11 @@ pypi_name: fused_ssim
 import_name: fused_ssim
 version: "0.0.1"
 
+# MIT, read from the repo's own LICENSE at the pinned rev.
+license: MIT
+homepage: https://github.com/rahul-goel/fused-ssim
+summary: Fused differentiable SSIM for PyTorch, compiled against the conda-torch channel
+
 source_repo: rahul-goel/fused-ssim
 source_rev: 328dc9836f513d00c4b5bc38fe30478b4435cbb5
 patch_script: packages/fused-ssim/patches/fused_ssim.py

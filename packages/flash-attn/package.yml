@@ -3,6 +3,11 @@ pypi_name: flash_attn
 import_name: flash_attn
 version: "2.8.3"
 
+# BSD-3-Clause, read from the repo's own LICENSE at the pinned tag.
+license: BSD-3-Clause
+homepage: https://github.com/Dao-AILab/flash-attention
+summary: Fast and memory-efficient exact attention, compiled against the conda-torch channel
+
 source_repo: Dao-AILab/flash-attention
 source_rev: v2.8.3
 clone_recursive: false          # the patch inits only csrc/cutlass; see README
