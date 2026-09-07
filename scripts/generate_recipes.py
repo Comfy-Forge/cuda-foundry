@@ -127,7 +127,17 @@ def _build_bat(cfg: dict) -> str:
     if hook not in text:
         sys.exit("scripts/build_snippets/build.bat lost its :: CUW_BUILD_ENV_HOOK "
                  "marker -- package.yml build_env would be silently dropped on win-64")
-    env = cfg.get("build_env") or {}
+    # build_env_win OVERRIDES build_env per variable, rather than replacing the
+    # block. The two platforms need the same variables pointing at different
+    # places: conda's Unix-shaped tree lives under %PREFIX%\Library on Windows,
+    # so `FFMPEG_ROOT: $PREFIX` is right on Linux and points at a directory
+    # with no include/ on win-64. torchaudio's CMake found no libavutil/avutil.h
+    # there and the whole build died at configure -- which is the good failure;
+    # the bad one is a package that silently builds without a backend it
+    # declares. The loader refuses a win override for a variable Linux does not
+    # set, so this cannot become a place to hide a Windows-only variable.
+    env = dict(cfg.get("build_env") or {})
+    env.update(cfg.get("build_env_win") or {})
     block = "\n".join(f'set "{k}={_bat_value(v)}"' for k, v in env.items()) \
         or ":: (no build_env declared)"
     return text.replace(hook, block)

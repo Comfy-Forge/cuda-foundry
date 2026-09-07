@@ -139,6 +139,19 @@ build_env:
   FFMPEG_ROOT: $PREFIX
   SOX_INCLUDE_DIR: $PREFIX/include
 
+# Same variables, different place. A conda prefix on Windows keeps the
+# Unix-shaped tree under %PREFIX%\Library, so the headers upstream's CMake
+# looks for are at %PREFIX%\Library\include, not %PREFIX%\include. With the
+# Linux values, torchaudio's configure step failed outright:
+#   FFMPEG_ROOT=%PREFIX%
+#   CMake Error: Could not find avutil_header using libavutil/avutil.h
+# That is the good failure. The one to fear is the torchvision-codec shape --
+# a backend quietly detected as absent, built without, and still declared in
+# the run deps.
+build_env_win:
+  FFMPEG_ROOT: $PREFIX/Library
+  SOX_INCLUDE_DIR: $PREFIX/Library/include
+
 verify:
   import: torchaudio
   # resample exercises the C++ extension's kernel path; lfilter is the other

@@ -238,24 +238,39 @@ def _check_build_env(cfg: dict, pkg_dir: Path) -> None:
     the string and run whatever follows -- so the value is constrained here
     rather than trusted.
     """
-    env = cfg.get("build_env")
-    if env is None:
-        return
-    if not isinstance(env, dict) or not env:
+    for field in ("build_env", "build_env_win"):
+        env = cfg.get(field)
+        if env is None:
+            continue
+        if not isinstance(env, dict) or not env:
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}/package.yml: {field} must be a non-empty "
+                f"mapping of NAME -> value.")
+        for k, v in env.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k)):
+                raise SystemExit(
+                    f"ERROR: {pkg_dir.name}/package.yml: {field} key {k!r} is not "
+                    f"a shell variable name.")
+            if re.search(r'["`$][({]|["`]|\\', str(v)):
+                raise SystemExit(
+                    f"ERROR: {pkg_dir.name}/package.yml: {field}[{k!r}] value "
+                    f"{v!r} contains a quote, backtick, backslash or command "
+                    f"substitution -- it is rendered into a shell script inside "
+                    f'double quotes. Plain text and $VAR references only.')
+
+    # A win-only override for a variable the Linux block never set is almost
+    # always a mistake -- the two platforms need the same variable pointing at
+    # different places, not different variables.
+    win = cfg.get("build_env_win") or {}
+    base = cfg.get("build_env") or {}
+    orphan = sorted(set(win) - set(base))
+    if orphan:
         raise SystemExit(
-            f"ERROR: {pkg_dir.name}/package.yml: build_env must be a non-empty "
-            f"mapping of NAME -> value.")
-    for k, v in env.items():
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k)):
-            raise SystemExit(
-                f"ERROR: {pkg_dir.name}/package.yml: build_env key {k!r} is not "
-                f"a shell variable name.")
-        if re.search(r'["`$][({]|["`]|\\', str(v)):
-            raise SystemExit(
-                f"ERROR: {pkg_dir.name}/package.yml: build_env[{k!r}] value "
-                f"{v!r} contains a quote, backtick, backslash or command "
-                f"substitution -- it is rendered into a shell script inside "
-                f'double quotes. Plain text and $VAR references only.')
+            f"ERROR: {pkg_dir.name}/package.yml: build_env_win sets {orphan} "
+            f"which build_env does not. build_env_win OVERRIDES the Linux value "
+            f"for win-64; a variable only Windows needs belongs in build_env "
+            f"with a value valid on both, or the Linux build is silently "
+            f"missing it.")
 
 
 def load_package(pkg_dir: Path) -> dict:
