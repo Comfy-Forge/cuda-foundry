@@ -61,9 +61,20 @@ verify:
   # connected_components on a tiny binary image: exercises the CUDA kernel,
   # so a mis-arch'd build fails here with cudaErrorNoKernelImageForDevice
   # rather than passing a bare import.
+  # Written against upstream's ACTUAL api. The previous version called
+  # cc_torch.connected_components_labeling() on an 8x8 2-D tensor; neither
+  # exists. __init__.py sets __all__ = ["get_connected_components"], and the
+  # kernel asserts `inputs.ndimension() == 4 ... inputs must be [N, 1, H, W]`.
+  # So this op could never have passed on any artifact -- it would have
+  # raised AttributeError before reaching a single CUDA instruction, which
+  # is the one failure mode a smoke test must not have.
   op: |
     import torch, cc_torch
-    x = torch.zeros(8, 8, dtype=torch.uint8, device="cuda")
-    x[2:5, 2:5] = 255
-    out = cc_torch.connected_components_labeling(x)
-    assert out.max().item() > 0, out
+    x = torch.zeros(1, 1, 16, 16, dtype=torch.uint8, device="cuda")
+    x[0, 0, 2:6, 2:6] = 255
+    labels, counts = cc_torch.get_connected_components(x)
+    assert labels.shape == x.shape, labels.shape
+    # background plus exactly one blob: proves the kernel actually labelled
+    # rather than returning zeros, so a mis-arch'd build fails here with
+    # cudaErrorNoKernelImageForDevice instead of passing a bare import.
+    assert labels.unique().numel() == 2, labels.unique()
