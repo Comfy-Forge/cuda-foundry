@@ -22,6 +22,7 @@ import argparse
 import io
 import json
 import re
+import struct
 import subprocess
 import sys
 import tarfile
@@ -85,12 +86,98 @@ def elf_dynamic(data: bytes, tmp: Path, name: str):
                           text=True).stdout
 
 
-def _expect_linked(pkg_name: str) -> list:
-    """`verify.expect_linked` from the package's own package.yml, if present.
+def pe_imports(data: bytes) -> set[str] | None:
+    """DLL names in a PE's import and delay-import directories.
+
+    None when the bytes are not a PE, so callers can tell "not applicable" from
+    "applicable and empty" -- the distinction the ELF path gets for free by
+    checking the \\x7fELF magic.
+    """
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        return None
+    (e_lfanew,) = struct.unpack_from("<I", data, 0x3C)
+    if len(data) < e_lfanew + 24 or data[e_lfanew:e_lfanew + 4] != b"PE\0\0":
+        return None
+
+    coff = e_lfanew + 4
+    n_sections, = struct.unpack_from("<H", data, coff + 2)
+    size_opt, = struct.unpack_from("<H", data, coff + 16)
+    opt = coff + 20
+    magic, = struct.unpack_from("<H", data, opt)
+    if magic == 0x20B:      # PE32+
+        dd = opt + 112
+    elif magic == 0x10B:    # PE32
+        dd = opt + 96
+    else:
+        return None
+    n_dd, = struct.unpack_from("<I", data, dd - 4)
+
+    sections = []
+    sec = opt + size_opt
+    for i in range(n_sections):
+        off = sec + i * 40
+        if off + 40 > len(data):
+            break
+        vsize, vaddr, rawsize, rawptr = struct.unpack_from("<IIII", data, off + 8)
+        sections.append((vaddr, max(vsize, rawsize), rawptr))
+
+    def to_off(rva):
+        for vaddr, span, rawptr in sections:
+            if vaddr <= rva < vaddr + span:
+                return rawptr + (rva - vaddr)
+        return None
+
+    def cstr(rva):
+        off = to_off(rva)
+        if off is None or off >= len(data):
+            return None
+        end = data.find(b"\0", off)
+        return data[off:end if end != -1 else len(data)].decode("ascii", "replace")
+
+    names: set[str] = set()
+
+    # Directory 1: the ordinary import table. 20-byte descriptors, DLL name RVA
+    # at +12, terminated by an all-zero entry.
+    for index, name_off, stride in ((1, 12, 20), (13, 4, 32)):
+        if index >= n_dd:
+            continue
+        rva, size = struct.unpack_from("<II", data, dd + index * 8)
+        if not rva:
+            continue
+        base = to_off(rva)
+        if base is None:
+            continue
+        for i in range(1024):
+            ent = base + i * stride
+            if ent + stride > len(data):
+                break
+            if data[ent:ent + stride] == b"\0" * stride:
+                break
+            name_rva, = struct.unpack_from("<I", data, ent + name_off)
+            if not name_rva:
+                continue
+            # Delay-load descriptors written by older linkers store a virtual
+            # ADDRESS rather than an RVA; a name that does not resolve inside a
+            # section is that case, and is skipped rather than guessed at.
+            nm = cstr(name_rva)
+            if nm:
+                names.add(nm)
+    return names
+
+
+def _expect_linked(pkg_name: str, key: str = "expect_linked") -> list:
+    """`verify.<key>` from the package's own package.yml, if present.
 
     Read from packages/ rather than passed on the command line so the
     expectation lives beside the host_deps that are supposed to satisfy it,
     and so no caller can forget to pass it.
+
+    `key` selects the platform's list: `expect_linked` names ELF sonames,
+    `expect_linked_win` names DLLs. They are separate lists rather than one
+    list plus a translation because there is no reliable mapping -- libjpeg
+    is jpeg8.dll, libpng is libpng16.dll, nvjpeg is nvjpeg64_12.dll -- and a
+    guessed mapping that silently matched nothing would turn this gate into
+    decoration.
     """
     if not pkg_name:
         return []
@@ -102,7 +189,7 @@ def _expect_linked(pkg_name: str) -> list:
     except ImportError:
         return []
     data = yaml.safe_load(cfg.read_text()) or {}
-    return list((data.get("verify") or {}).get("expect_linked") or [])
+    return list((data.get("verify") or {}).get(key) or [])
 
 
 def verify(path: Path, ledger: set, expect_arch: str, tmp: Path) -> bool:
@@ -232,20 +319,51 @@ def verify(path: Path, ledger: set, expect_arch: str, tmp: Path) -> bool:
     # runs on a CI box with no GPU, which is where the fan-out happens.
     expect_linked = _expect_linked(index.get("name", ""))
     if expect_linked and exts:
-        needed = set()
+        needed, is_pe = set(), False
         for mem in ptf.getmembers():
-            if not mem.isfile() or not re.search(r"\.(so|so\.\d+|pyd)$", mem.name):
+            if not mem.isfile() or not re.search(r"\.(so|so\.\d+|pyd|dll)$", mem.name):
                 continue
-            dyn = elf_dynamic(ptf.extractfile(mem).read(), tmp, mem.name)
+            blob = ptf.extractfile(mem).read()
+            # DT_NEEDED is an ELF concept. On win-64 the equivalent statement
+            # lives in the PE import directory, and asking readelf about a .pyd
+            # returns nothing -- which this gate previously read as "links
+            # none of them" and failed on, reporting NEEDED=[] for a binary
+            # whose imports it had never looked at.
+            imports = pe_imports(blob)
+            if imports is not None:
+                is_pe, _ = True, needed.update(imports)
+                continue
+            dyn = elf_dynamic(blob, tmp, mem.name)
             for line in (dyn or "").splitlines():
                 m2 = re.search(r"Shared library: \[([^\]]+)\]", line)
                 if m2:
                     needed.add(m2.group(1))
-        missing = [w for w in expect_linked
-                   if not any(n.startswith(w) for n in needed)]
-        rep.check(not missing,
-                  f"links every library package.yml says it must "
-                  f"(missing {missing}; NEEDED={sorted(needed)[:8]})")
+
+        if is_pe:
+            # The expectation itself is platform-specific: `libjpeg` is an ELF
+            # soname and the same library is `jpeg8.dll` here, so matching the
+            # Linux list against PE imports would be a guess at a naming
+            # convention. A package states the Windows names itself, or this
+            # gate says plainly that it cannot judge -- it does not invent a
+            # mapping and then report confidence in it.
+            expect_win = _expect_linked(index.get("name", ""), key="expect_linked_win")
+            if not expect_win:
+                print(f"::warning::{index.get('name')} declares verify.expect_linked "
+                      f"but no verify.expect_linked_win, so the codec gate cannot run "
+                      f"on win-64. Imports actually present: {sorted(needed)}")
+            else:
+                low = {n.lower() for n in needed}
+                missing = [w for w in expect_win
+                           if not any(n.startswith(w.lower()) for n in low)]
+                rep.check(not missing,
+                          f"imports every DLL package.yml says it must "
+                          f"(missing {missing}; imports={sorted(needed)[:8]})")
+        else:
+            missing = [w for w in expect_linked
+                       if not any(n.startswith(w) for n in needed)]
+            rep.check(not missing,
+                      f"links every library package.yml says it must "
+                      f"(missing {missing}; NEEDED={sorted(needed)[:8]})")
 
     # ---- provenance: the from-source guarantee, recorded --------------------
     extra = about.get("extra") or {}
