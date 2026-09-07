@@ -32,7 +32,11 @@ Exit: 0 all pass, 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import base64
+import csv
 import email
+import hashlib
+import io
 import re
 import subprocess
 import sys
@@ -155,6 +159,39 @@ def verify(path: Path, args, tmp: Path) -> bool:
             rep.check(not missing,
                       f"every sidecar dependency is also a conda run dep "
                       f"(orphans: {missing})")
+
+    # ---- RECORD integrity ---------------------------------------------------
+    # make_wheel.py rewrites RECORD, because it renames the dist-info, edits
+    # METADATA and rewrites RPATHs -- every one of which invalidates the
+    # hashes upstream wrote. Nothing else checks the result, and a wrong
+    # RECORD is quiet: the wheel installs, and it is `pip uninstall` and any
+    # hash-checking install that break later. So the hashes are recomputed
+    # here rather than trusted.
+    rec_name = [n for n in names if n.endswith(".dist-info/RECORD")]
+    if rep.check(len(rec_name) == 1, "exactly one dist-info/RECORD"):
+        rows = list(csv.reader(io.StringIO(z.read(rec_name[0]).decode("utf-8"))))
+        listed, bad = set(), []
+        for row in rows:
+            if not row:
+                continue
+            name, digest, size = (list(row) + ["", ""])[:3]
+            listed.add(name)
+            if name == rec_name[0]:
+                # RECORD cannot hash itself; PEP 376 leaves both fields empty.
+                if digest or size:
+                    bad.append(f"{name}: RECORD must carry no hash or size")
+                continue
+            data = z.read(name)
+            want = "sha256=" + base64.urlsafe_b64encode(
+                hashlib.sha256(data).digest()).rstrip(b"=").decode()
+            if digest != want:
+                bad.append(f"{name}: hash mismatch")
+            elif size and int(size) != len(data):
+                bad.append(f"{name}: size mismatch")
+        rep.check(not bad, f"every RECORD hash matches the payload ({bad[:2]})")
+        unlisted = [n for n in names if n not in listed and not n.endswith("/")]
+        rep.check(not unlisted,
+                  f"every file in the wheel appears in RECORD ({unlisted[:2]})")
 
     # ---- vendoring: the inverse of the conda contract -----------------------
     libs = [n for n in names if re.search(r"\.libs/lib.*\.so", n)]
