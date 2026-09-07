@@ -258,19 +258,15 @@ def _check_build_env(cfg: dict, pkg_dir: Path) -> None:
                     f"substitution -- it is rendered into a shell script inside "
                     f'double quotes. Plain text and $VAR references only.')
 
-    # A win-only override for a variable the Linux block never set is almost
-    # always a mistake -- the two platforms need the same variable pointing at
-    # different places, not different variables.
-    win = cfg.get("build_env_win") or {}
-    base = cfg.get("build_env") or {}
-    orphan = sorted(set(win) - set(base))
-    if orphan:
-        raise SystemExit(
-            f"ERROR: {pkg_dir.name}/package.yml: build_env_win sets {orphan} "
-            f"which build_env does not. build_env_win OVERRIDES the Linux value "
-            f"for win-64; a variable only Windows needs belongs in build_env "
-            f"with a value valid on both, or the Linux build is silently "
-            f"missing it.")
+    # There was a check here refusing a build_env_win key that build_env does
+    # not also set, on the theory that the two platforms need the same variables
+    # pointing at different places rather than different variables. That theory
+    # was wrong within the hour: torchaudio needs CMAKE_LIBRARY_PATH on win-64
+    # and only there, because the win-64 pytorch package keeps its one import
+    # library somewhere upstream's find_library does not look, and no Linux
+    # value for that variable would be correct or useful. A rule that forbids a
+    # legitimate case in order to catch a hypothetical typo is the wrong trade,
+    # and the typo it was guarding against fails the build loudly anyway.
 
 
 def load_package(pkg_dir: Path) -> dict:

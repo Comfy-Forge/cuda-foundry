@@ -159,6 +159,20 @@ build_env:
 build_env_win:
   FFMPEG_ROOT: $PREFIX/Library
   SOX_INCLUDE_DIR: $PREFIX/Library/include
+  # TorchAudioHelper.cmake does
+  #   find_library(TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib")
+  # and TORCH_INSTALL_PREFIX is %PREFIX%/Library, where there is no such file:
+  # the win-64 pytorch package keeps its ONLY import library at
+  # Lib/site-packages/torch/lib/torch_python.lib (read out of the package's own
+  # paths.json, not inferred). Configure then completed and generation failed
+  # with TORCH_PYTHON_LIBRARY set to NOTFOUND for three targets.
+  #
+  # CMAKE_LIBRARY_PATH rather than a patch, because CMake consults this
+  # environment variable BEFORE a find_library call's own PATHS -- so upstream's
+  # search finds the right file without its source being edited. torchaudio
+  # builds its cmake argument list from scratch and ignores CMAKE_ARGS, so the
+  # usual conda injection point is not available here.
+  CMAKE_LIBRARY_PATH: $PREFIX/Lib/site-packages/torch/lib
 
 verify:
   import: torchaudio
