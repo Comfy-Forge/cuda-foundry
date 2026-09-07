@@ -395,8 +395,8 @@ jobs:
       # libraries it vendors out of the conda HOST prefix, which exists only
       # here and only because the build ran with --keep-build.
       - name: Build the published wheel from the same artifact
-        if: matrix.cell.platform == 'linux-64'
         env:
+          CELL_PLATFORM: ${{ matrix.cell.platform }}
           CELL_PKG: ${{ matrix.cell.package }}
           CELL_CUDA: ${{ matrix.cell.cuda }}
           CELL_TORCH: ${{ matrix.cell.pytorch }}
@@ -404,37 +404,48 @@ jobs:
           CELL_VERSION: ${{ matrix.cell.version }}
         run: |
           set -euo pipefail
-          python -m pip install -q auditwheel patchelf
-          host_env=$(find "$RUNNER_TEMP/out/bld" -maxdepth 2 -type d \
-                       -name 'host_env_*' | head -1)
-          [ -n "$host_env" ] || { echo "::error::no host env kept -- --keep-build did not take, and auditwheel cannot resolve the libraries it must vendor"; exit 1; }
+          # A Windows wheel vendors nothing -- the .pyd resolves torch's DLLs
+          # through os.add_dll_directory -- so there is no repair step, and
+          # therefore no auditwheel, no patchelf and no host env to resolve
+          # libraries out of. make_wheel.py --platform win-64 skips all of it
+          # and --lib-path is ignored there.
+          EXTRA=()
+          if [[ "$CELL_PLATFORM" != win-* ]]; then
+            python -m pip install -q auditwheel patchelf
+            host_env=$(find "$RUNNER_TEMP/out/bld" -maxdepth 2 -type d \
+                         -name 'host_env_*' | head -1)
+            [ -n "$host_env" ] || { echo "::error::no host env kept -- --keep-build did not take, and auditwheel cannot resolve the libraries it must vendor"; exit 1; }
+            EXTRA=(--lib-path "$host_env/lib")
+          fi
           python tools/make_wheel.py \
             --package "$CELL_PKG" \
             --wheel "$(ls "$CUW_WHEELHOUSE"/*.whl)" \
             --out-dir "$RUNNER_TEMP/wheels" \
+            --platform "$CELL_PLATFORM" \
             --cuda "$CELL_CUDA" --pytorch "$CELL_TORCH" \
             --arch-list "$CELL_ARCH" --expect-version "$CELL_VERSION" \
-            --lib-path "$host_env/lib"
+            "${EXTRA[@]}"
 
       - name: Verify the wheel against its .conda
-        if: matrix.cell.platform == 'linux-64'
         env:
           CELL_PKG: ${{ matrix.cell.package }}
           CELL_ARCH: ${{ matrix.cell.arch_list }}
           CELL_VERSION: ${{ matrix.cell.version }}
+          CELL_PLATFORM: ${{ matrix.cell.platform }}
         run: |
           set -euo pipefail
           shopt -s nullglob
           conda_file=("$RUNNER_TEMP"/out/*/*.conda)
           python tools/verify_wheel.py "$RUNNER_TEMP"/wheels/*.whl \
             --conda "${conda_file[0]}" \
+            --platform "$CELL_PLATFORM" \
             --expect-arch "$CELL_ARCH" --expect-version "$CELL_VERSION" \
-            --package "$CELL_PKG"
+            --package "$CELL_PKG" \
+            --tmp "$RUNNER_TEMP/verify-wheel"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: matrix.cell.platform == 'linux-64'
         with:
-          name: wheel-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}
+          name: wheel-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}-${{ matrix.cell.platform }}
           # The sidecar rides with the wheel: the deps index is built from it,
           # and a wheel published without one silently becomes a no-dependency
           # wheel on both indices.

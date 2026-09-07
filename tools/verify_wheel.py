@@ -79,8 +79,8 @@ def conda_run_deps(path: Path) -> list[str]:
     return list(index.get("depends") or [])
 
 
-def sass_archs(data: bytes, tmp: Path) -> set[str]:
-    p = tmp / "sass.so"
+def sass_archs(data: bytes, tmp: Path, is_win: bool = False) -> set[str]:
+    p = tmp / ("sass.pyd" if is_win else "sass.so")
     p.write_bytes(data)
     out = subprocess.run(["cuobjdump", "--list-elf", str(p)],
                          capture_output=True, text=True).stdout
@@ -99,12 +99,19 @@ def verify(path: Path, args, tmp: Path) -> bool:
     ver, abi, plat = m["ver"], m["abi"], m["plat"]
     rep.check("+cu" in ver and "torch" in ver,
               f"version carries the (cuda, torch) local tag: {ver}")
-    # manylinux, not linux_x86_64: an unrepaired wheel installs and then fails
-    # to find the libraries it was linked against.
-    rep.check("manylinux" in plat,
-              f"platform tag is manylinux (auditwheel ran): {plat}")
-    rep.check("manylinux_2_28" in plat,
-              f"platform tag includes PyTorch's 2.28 baseline: {plat}")
+    is_win = args.platform.startswith("win")
+    if is_win:
+        # There is no repair step to have run, so there is no repaired tag to
+        # assert. A Windows wheel vendors nothing (see below), which is why
+        # win_amd64 here is correct rather than under-repaired.
+        rep.check("win_amd64" in plat, f"platform tag is win_amd64: {plat}")
+    else:
+        # manylinux, not linux_x86_64: an unrepaired wheel installs and then
+        # fails to find the libraries it was linked against.
+        rep.check("manylinux" in plat,
+                  f"platform tag is manylinux (auditwheel ran): {plat}")
+        rep.check("manylinux_2_28" in plat,
+                  f"platform tag includes PyTorch's 2.28 baseline: {plat}")
 
     z = zipfile.ZipFile(path)
     names = z.namelist()
@@ -194,6 +201,47 @@ def verify(path: Path, args, tmp: Path) -> bool:
                   f"every file in the wheel appears in RECORD ({unlisted[:2]})")
 
     # ---- vendoring: the inverse of the conda contract -----------------------
+    if is_win:
+        # On Windows the inverse is that there is nothing to invert: the wheel
+        # bundles NO DLL at all. The .pyd links torch's DLLs and finds them
+        # because `import torch` calls os.add_dll_directory on torch/lib before
+        # any extension loads. Measured in cuda-wheels, whose verify_wheel says
+        # so outright. So this asserts the absence rather than auditing the
+        # contents -- a vendored DLL here would mean a repair step ran that
+        # should not have, or that a build copied one in.
+        dlls = sorted(Path(n).name for n in names if n.lower().endswith(".dll"))
+        rep.check(not dlls,
+                  f"no DLL is vendored ({dlls[:3]}) -- a Windows wheel resolves "
+                  f"torch's DLLs through os.add_dll_directory, and bundling one "
+                  f"would load a second copy of it")
+        exts = [n for n in names if n.lower().endswith(".pyd")]
+        rep.check(bool(exts), f"wheel contains extension module(s) ({len(exts)})")
+
+        # Torch linkage from the PE import table. PE stores imported DLL names
+        # as plain ASCII, so a byte scan finds them without a PE parser; this is
+        # evidence rather than proof, and cuda-wheels labels the same technique
+        # "PE evidence" for that reason. The assertion is over the wheel as a
+        # WHOLE for the same reason as the ELF branch below: a package may ship
+        # helper modules that legitimately do not touch torch.
+        if args.links_torch and exts:
+            torch_linked = [Path(n).name for n in exts
+                            if re.search(rb"(torch_cpu|torch_python|torch_cuda|c10)\.dll",
+                                         z.read(n), re.I)]
+            rep.check(bool(torch_linked),
+                      f"at least one extension imports a torch DLL, by PE evidence "
+                      f"({torch_linked[:3]})")
+    else:
+        _verify_elf_binaries(rep, z, names, args, tmp)
+
+    # ---- the arch list, recorded and real -----------------------------------
+    stated = (meta.get("Comfy-Forge-Arch-List") or "").strip()
+    if args.expect_arch:
+        rep.check(stated == args.expect_arch.strip(),
+                  f"METADATA records the cell's arch list ({stated!r})")
+    return _finish(rep, z, names, meta, args, tmp, is_win)
+
+
+def _verify_elf_binaries(rep, z, names, args, tmp: Path) -> None:
     libs = [n for n in names if re.search(r"\.libs/lib.*\.so", n)]
     vendored = sorted({re.sub(r"-[0-9a-f]{8}(?=\.so)", "", Path(n).name) for n in libs})
     torch_vendored = [v for v in vendored
@@ -241,21 +289,31 @@ def verify(path: Path, args, tmp: Path) -> bool:
         rep.check(bool(torch_linked),
                   f"at least one extension links torch ({torch_linked[:3]})")
 
-    # ---- the arch list, recorded and real -----------------------------------
-    stated = (meta.get("Comfy-Forge-Arch-List") or "").strip()
+
+def _finish(rep, z, names, meta, args, tmp: Path, is_win: bool) -> bool:
+    """The SASS census and the verdict, shared by both platform branches.
+
+    cuobjdump reads the fatbin sections of a PE the same way it reads an ELF's,
+    so the census itself is platform-neutral; only the file extension it is
+    handed differs, and that matters because cuobjdump dispatches on content,
+    not name -- the suffix here is for legibility when the temp file is
+    inspected after a failure.
+    """
+    exts = [n for n in names
+            if n.lower().endswith(".pyd")] if is_win else [
+            n for n in names if n.endswith(".so") and ".libs/" not in n]
+
     if args.expect_arch:
-        rep.check(stated == args.expect_arch.strip(),
-                  f"METADATA records the cell's arch list ({stated!r})")
         want = {a.replace(".", "").replace("+PTX", "")
                 for a in args.expect_arch.split()}
         if exts:
             biggest = max(exts, key=lambda n: z.getinfo(n).file_size)
-            got = sass_archs(z.read(biggest), tmp)
+            got = sass_archs(z.read(biggest), tmp, is_win)
             rep.check(want <= got or not got,
                       f"SASS covers the cell's arch list "
                       f"(want {sorted(want)}, got {sorted(got)})")
 
-    print(f"--- {path.name}: {'FAIL' if rep.failed else 'PASS'}")
+    print(f"--- {rep.artifact}: {'FAIL' if rep.failed else 'PASS'}")
     return not rep.failed
 
 
@@ -267,6 +325,8 @@ def main() -> int:
     ap.add_argument("--expect-version", default="")
     ap.add_argument("--package", default="",
                     help="packages/<folder>, to read links_torch")
+    ap.add_argument("--platform", default="linux-64",
+                    help="target platform of the wheel: linux-64 or win-64")
     ap.add_argument("--tmp", type=Path, default=Path("/tmp/verify-wheel"))
     args = ap.parse_args()
     args.tmp.mkdir(parents=True, exist_ok=True)
