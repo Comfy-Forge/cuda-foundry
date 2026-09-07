@@ -217,6 +217,51 @@ stale tree. Both need the script's own hash to ride in the build command.
   kernel shows up as `cudaErrorNoKernelImageForDevice` and nowhere else, and
   the disabled-codec bug above showed up nowhere but a real `decode_jpeg`.
 
+## Defective builds: reachability, not policy
+
+A published artifact is immutable, so a build discovered to be defective can
+never be withdrawn — only made unreachable. `known_bad.json` records every such
+build, in both formats, and three tools act on it: `make_repodata.py` for the
+channel, `generate_index.py` for the wheel index, `check_lock.py` for someone
+holding a lockfile that already pinned one.
+
+The rule for the channel is **reachability**, and stating it that way is what
+makes two channels that look like they disagree follow one rule. A known-bad
+build stays listed in repodata if and only if something already prevents a
+fresh solve choosing it:
+
+- **superseded** — a build of the same name and version with a higher build
+  number exists, so conda's own ranking never reaches this one;
+- **neutralised** — an unsatisfiable constrain (`<0.0a0` on a package that must
+  be present) makes the solver refuse it outright.
+
+Otherwise it is dropped, because listed and reachable is an offer.
+
+conda-torch keeps its known-bad builds listed and is right to: they are
+superseded or carry `libcudnn <0.0a0`. This repo dropped the no-jpeg
+torchvision and was right to: it had neither a higher build nor a patch, so a
+fresh solve would have chosen it. One rule, opposite outcomes, because the
+facts differed — and it un-drops itself once the superseding build publishes.
+
+Staying listed is the better end state wherever it applies: the release asset
+is immutable either way, so a lockfile that already pinned a bad build keeps
+resolving, and leaving the entry means the channel and `known_bad.json` agree
+about what exists. Dropping is what you do when nothing else stops the build
+being chosen.
+
+**Supersession only counts a build that is not itself known-bad.** Not a
+detail: a build superseded only by another defective build is not protected,
+the solver simply moves from one bad artifact to another. Running this rule
+against conda-torch's live channel found exactly that —
+`libtorch-2.8.0-cuda129_repack_h327d83bf_0` is superseded by `_1`, and `_1` is
+itself in `known_bad.json`.
+
+Wheels cannot be dropped the same way, because a wheel index has a better
+mechanism: PEP 592 yanking. `data-yanked` keeps the file downloadable for
+anyone who pinned that exact filename while stopping any resolver selecting it,
+and the reason string reaches the user. Verified live: unpinned, pip reports
+`Ignored the following yanked versions`; pinned exactly, it still installs.
+
 ## Scope
 
 linux-64 first, for the same reason as before: prove the machinery where the

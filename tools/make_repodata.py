@@ -48,28 +48,84 @@ def write_json(path: Path, payload: dict) -> None:
     path.with_suffix(path.suffix + ".zst").write_bytes(zst)
 
 
+def _build_number(build: str) -> int:
+    """The trailing _N of a build string, which is what conda ranks builds by."""
+    tail = str(build).rsplit("_", 1)[-1]
+    return int(tail) if tail.isdigit() else -1
+
+
+def superseded_by(entry: dict, packages_conda: dict, bad: set) -> str | None:
+    """A GOOD same-cell build with a higher build number, if one is published.
+
+    Conda's own selection rule: among candidates of the same name and version,
+    the highest build number wins. A bad build with a higher sibling is
+    therefore unreachable by a fresh solve without anyone doing anything.
+
+    `bad` is excluded, and that exclusion is the whole point rather than a
+    detail. A build superseded only by another DEFECTIVE build is not
+    protected -- the solver moves off one bad artifact onto another. Checking
+    conda-torch's live channel with this function found exactly that:
+    libtorch-2.8.0-cuda129_repack_h327d83bf_0 is listed as superseded by _1,
+    and _1 is itself in known_bad.json. Counting it would have reported the
+    pair as safe.
+    """
+    for other_fn, other in packages_conda.items():
+        if other_fn in bad:
+            continue
+        if (other.get("name") == entry.get("name")
+                and other.get("version") == entry.get("version")
+                and _build_number(other.get("build", ""))
+                > _build_number(entry.get("build", ""))):
+            return other_fn
+    return None
+
+
+def neutralised_by(entry: dict) -> str | None:
+    """An unsatisfiable constrain, which makes the solver refuse the build.
+
+    The idiom is an upper bound below every real version of a package that must
+    be present -- conda-torch patches `libcudnn <0.0a0` onto its dual-cudnn
+    builds for exactly this. Such a build cannot be selected even though it is
+    listed.
+    """
+    for c in entry.get("constrains") or []:
+        if "<0.0a0" in str(c).replace(" ", ""):
+            return str(c)
+    return None
+
+
 def drop_known_bad(known_bad: dict, subdir: str, packages_conda: dict) -> list:
-    """Remove defective builds from repodata so no solver can select them.
+    """Remove defective builds that a fresh solve can still REACH.
 
-    known_bad.json was, until now, read only by tools/check_lock.py -- a tool
-    someone runs against a lockfile they already have. That protects a person
-    who thinks to ask. It does nothing for the solve that has not happened yet,
-    and win-64/repodata.json was serving
-    torchvision-0.23.0-cuda128_torch28_py312_h6651153_1.conda -- built without
-    jpeg, webp or nvjpeg -- to anyone who resolved against this channel, while
-    the repo held a file saying we knew it was broken. A record that does not
-    change what the system does is the worst of both.
+    The test is reachability, not policy, and that is why two channels can look
+    like they disagree while following one rule. A known-bad build stays listed
+    if and only if something already stops a new solve choosing it:
 
-    Conda has no yank: an entry is either in repodata or it is not. Dropping it
-    is therefore the strongest available statement, and it costs nothing that
-    matters -- the release asset stays exactly where it was, byte for byte, so
-    an existing lockfile pinning that URL keeps resolving and immutability
-    holds. What changes is that no NEW solve can arrive at it.
+      superseded   a same-cell build with a higher build number exists, so
+                   conda's own ranking never reaches this one;
+      neutralised  an unsatisfiable constrain (`<0.0a0` on a package that must
+                   be present) makes the solver refuse it outright.
+
+    Otherwise it is dropped, because listed and reachable is an offer.
+
+    conda-torch keeps all six of its known-bad builds listed and is right to:
+    four are superseded and two carry `libcudnn <0.0a0`. cuda-foundry dropped
+    the no-jpeg torchvision and was right to: at that moment it had neither a
+    higher build nor a patch, so a fresh solve would have chosen it. One rule,
+    opposite outcomes, because the facts differed -- and this function will
+    stop dropping that torchvision by itself once build 2 publishes.
+
+    Staying listed is the better end state wherever it applies. The release
+    asset is immutable either way, so a lockfile already pinning a bad build
+    keeps resolving; leaving the entry in repodata means the channel and
+    known_bad.json agree about what exists, and check_lock.py can still explain
+    it to whoever is holding that lock. Dropping is what you do when nothing
+    else stops the build being chosen.
 
     A key naming nothing is a hard error rather than a shrug. These entries are
-    written by hand at the worst possible moment, and a typo'd filename in a
+    written by hand at the worst possible moment, and a typo'd filename in the
     file whose entire job is to neutralise a bad build would protect nobody
-    while looking exactly like it had.
+    while looking exactly as though it had.
     """
     # .conda keys only. The same file also records defective WHEELS, which
     # tools/generate_index.py yanks per PEP 592 -- one list of "this artifact is
@@ -83,9 +139,19 @@ def drop_known_bad(known_bad: dict, subdir: str, packages_conda: dict) -> list:
             f"such artifact exists in meta/{subdir}/. A known-bad entry that "
             f"matches no filename neutralises nothing. Fix the key to match "
             f"the .conda filename exactly, or remove it.")
-    for fn in entries:
-        del packages_conda[fn]
-    return sorted(entries)
+
+    dropped = []
+    for fn in sorted(entries):
+        entry = packages_conda[fn]
+        newer = superseded_by(entry, packages_conda, set(entries))
+        constrain = None if newer else neutralised_by(entry)
+        if newer or constrain:
+            why = f"superseded by {newer}" if newer else f"neutralised by {constrain!r}"
+            print(f"{subdir}: known-bad {fn} KEPT LISTED -- {why}")
+        else:
+            del packages_conda[fn]
+            dropped.append(fn)
+    return dropped
 
 
 def load_patches(patches_dir: Path, subdir: str, packages_conda: dict) -> int:
