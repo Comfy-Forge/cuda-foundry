@@ -200,6 +200,55 @@ def census(wheel: Path) -> list[str]:
     return sorted(names)
 
 
+def normalize_rpaths(root: Path) -> list[str]:
+    """Strip build-machine RPATH entries from the wheel's own extensions.
+
+    Found by verify_wheel.py on the very first wheel built here. pip links the
+    extension against the conda HOST prefix, so setuptools writes that
+    absolute path into DT_RPATH:
+
+        Library rpath: [/tmp/.../host_env_placehold_.../lib:/tmp/.../build_env/lib]
+
+    rattler-build rewrites RPATHs to $ORIGIN-relative when it packages the
+    prefix, which is why the .conda is clean and verify_conda's RPATH lint
+    passes -- but the wheel is taken BEFORE that step and keeps the raw path.
+    So this is a defect the conda half structurally cannot have and the wheel
+    half structurally always has, and it is exactly the sort of asymmetry the
+    one-compile-two-outputs design has to handle explicitly rather than
+    inherit.
+
+    auditwheel only rewrites the RPATH of binaries it grafts libraries into,
+    so a package that vendors nothing (cc-torch) keeps the path untouched.
+    Left in, a published wheel names a directory on the build machine; if
+    anything ever existed there on a user's box it would be searched first.
+
+    $ORIGIN entries are kept -- those are auditwheel's own, pointing at the
+    vendored <pkg>.libs. Everything absolute goes. Torch's libraries need no
+    rpath at all: they are excluded precisely because `import torch` has
+    already loaded them, so DT_NEEDED resolves against the running process.
+    """
+    changed = []
+    for so in sorted(root.rglob("*.so")):
+        if ".libs/" in so.as_posix():
+            continue
+        cur = subprocess.run(["patchelf", "--print-rpath", str(so)],
+                             capture_output=True, text=True).stdout.strip()
+        if not cur:
+            continue
+        keep = [e for e in cur.split(":") if e.startswith("$ORIGIN")]
+        dropped = [e for e in cur.split(":") if not e.startswith("$ORIGIN")]
+        if not dropped:
+            continue
+        if keep:
+            subprocess.run(["patchelf", "--set-rpath", ":".join(keep), str(so)],
+                           check=True)
+        else:
+            subprocess.run(["patchelf", "--remove-rpath", str(so)], check=True)
+        changed.append(f"{so.relative_to(root)}: dropped {dropped}"
+                       + (f", kept {keep}" if keep else ", now has none"))
+    return changed
+
+
 def _hash(data: bytes) -> tuple[str, int]:
     d = hashlib.sha256(data).digest()
     return "sha256=" + base64.urlsafe_b64encode(d).rstrip(b"=").decode(), len(data)
@@ -324,6 +373,9 @@ def finalize(wheel: Path, version_tag: str, arch_list: str,
 
         text, removed = strip_requires(text)
         meta_p.write_text(text, encoding="utf-8")
+
+        for line in normalize_rpaths(root):
+            print(f"  rpath   : {line}")
 
         new_di = root / f"{di.name.split('-')[0]}-{full}.dist-info"
         if new_di != di:
