@@ -48,6 +48,46 @@ def write_json(path: Path, payload: dict) -> None:
     path.with_suffix(path.suffix + ".zst").write_bytes(zst)
 
 
+def drop_known_bad(known_bad: dict, subdir: str, packages_conda: dict) -> list:
+    """Remove defective builds from repodata so no solver can select them.
+
+    known_bad.json was, until now, read only by tools/check_lock.py -- a tool
+    someone runs against a lockfile they already have. That protects a person
+    who thinks to ask. It does nothing for the solve that has not happened yet,
+    and win-64/repodata.json was serving
+    torchvision-0.23.0-cuda128_torch28_py312_h6651153_1.conda -- built without
+    jpeg, webp or nvjpeg -- to anyone who resolved against this channel, while
+    the repo held a file saying we knew it was broken. A record that does not
+    change what the system does is the worst of both.
+
+    Conda has no yank: an entry is either in repodata or it is not. Dropping it
+    is therefore the strongest available statement, and it costs nothing that
+    matters -- the release asset stays exactly where it was, byte for byte, so
+    an existing lockfile pinning that URL keeps resolving and immutability
+    holds. What changes is that no NEW solve can arrive at it.
+
+    A key naming nothing is a hard error rather than a shrug. These entries are
+    written by hand at the worst possible moment, and a typo'd filename in a
+    file whose entire job is to neutralise a bad build would protect nobody
+    while looking exactly like it had.
+    """
+    # .conda keys only. The same file also records defective WHEELS, which
+    # tools/generate_index.py yanks per PEP 592 -- one list of "this artifact is
+    # defective" for both formats rather than two that drift apart.
+    entries = {fn: v for fn, v in (known_bad.get(subdir) or {}).items()
+               if fn.endswith(".conda")}
+    unknown = [fn for fn in entries if fn not in packages_conda]
+    if unknown:
+        sys.exit(
+            f"ERROR: known_bad.json lists {unknown} under {subdir!r}, and no "
+            f"such artifact exists in meta/{subdir}/. A known-bad entry that "
+            f"matches no filename neutralises nothing. Fix the key to match "
+            f"the .conda filename exactly, or remove it.")
+    for fn in entries:
+        del packages_conda[fn]
+    return sorted(entries)
+
+
 def load_patches(patches_dir: Path, subdir: str, packages_conda: dict) -> int:
     pfile = patches_dir / subdir / "patches.json"
     if not pfile.is_file():
@@ -72,7 +112,12 @@ def main() -> None:
     ap.add_argument("--meta-dir", type=Path, default=Path("meta"))
     ap.add_argument("--site-dir", type=Path, default=Path("site"))
     ap.add_argument("--patches-dir", type=Path, default=Path("patches"))
+    ap.add_argument("--known-bad", type=Path,
+                    default=Path(__file__).resolve().parent.parent / "known_bad.json",
+                    help="builds to exclude from repodata (see known_bad.json)")
     args = ap.parse_args()
+
+    known_bad = json.loads(args.known_bad.read_text()) if args.known_bad.is_file() else {}
 
     subdirs = {p.name for p in args.meta_dir.iterdir() if p.is_dir()} | ALWAYS_SUBDIRS
     summary = []
@@ -81,6 +126,9 @@ def main() -> None:
         for frag in sorted((args.meta_dir / subdir).glob("*.json")) if (args.meta_dir / subdir).is_dir() else []:
             filename = frag.name[: -len(".json")]
             packages_conda[filename] = json.loads(frag.read_text())
+        dropped = drop_known_bad(known_bad, subdir, packages_conda)
+        for fn in dropped:
+            print(f"{subdir}: EXCLUDED known-bad {fn}")
         patched = load_patches(args.patches_dir, subdir, packages_conda)
 
         # run_exports lives in the fragments (and is patchable), but ships in

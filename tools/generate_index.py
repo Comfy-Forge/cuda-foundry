@@ -52,6 +52,7 @@ Usage: generate_index.py [--out _site] [--repo OWNER/NAME] [--baseline URL|PATH]
 
 import argparse
 import datetime as _dt
+import html
 import json
 import os
 import re
@@ -167,6 +168,18 @@ def parse_wheel(filename: str) -> dict | None:
     }
 
 
+def load_known_bad(path: Path) -> dict:
+    """{subdir: {filename: entry}} -- the same file make_repodata.py reads.
+
+    One record of "this artifact is defective" for both formats. Conda has no
+    yank, so a bad .conda is dropped from repodata entirely; a wheel index does
+    have one, so a bad wheel is yanked rather than removed. Two lists would
+    drift, and the drift would be silent in exactly the situation where someone
+    is trying to find out whether what they installed is the broken one.
+    """
+    return json.loads(path.read_text()) if path.is_file() else {}
+
+
 def anchor(wheel: dict, with_metadata: bool) -> str:
     """One PEP 503 anchor, optionally advertising its PEP 658 sidecar.
 
@@ -177,6 +190,12 @@ def anchor(wheel: dict, with_metadata: bool) -> str:
     artifact and lets a lockfile record a real hash.
     """
     attrs = _PEP658_ATTRS if (with_metadata and wheel["has_sidecar"]) else ""
+    # PEP 592. A yanked file stays downloadable, so nobody who pinned this exact
+    # filename breaks, but no resolver will SELECT it unless given that exact
+    # pin -- which is the wheel analogue of dropping a .conda from repodata,
+    # with the additional property that the reason reaches the user.
+    if wheel.get("yanked"):
+        attrs += f' data-yanked="{html.escape(wheel["yanked"], quote=True)}"'
     url = wheel["url"]
     if wheel.get("sha256"):
         url += f'#sha256={wheel["sha256"]}'
@@ -208,6 +227,10 @@ def main() -> None:
                     help="OWNER/NAME whose releases hold the wheels")
     ap.add_argument("--baseline", default=f"{INDEX_URL}/packages.json",
                     help="URL or path of the live packages.json (shrinkage guard)")
+    ap.add_argument("--known-bad", type=Path,
+                    default=Path(__file__).resolve().parent.parent / "known_bad.json",
+                    help="defective artifacts; wheels listed here are yanked "
+                         "per PEP 592 (the same file make_repodata.py reads)")
     args = ap.parse_args()
 
     releases = get_releases(args.repo, os.environ.get("GITHUB_TOKEN"))
@@ -216,9 +239,13 @@ def main() -> None:
     # A sidecar is an asset named exactly <wheel>.metadata, so its URL is
     # exactly the wheel URL + ".metadata" -- which is where PEP 658 says a
     # resolver looks. Nothing rewrites URLs; the naming IS the contract.
+    known_bad = load_known_bad(args.known_bad)
+    yanked_count = 0
+
     packages: dict[str, list] = {}
     for release in releases:
         assets = release.get("assets", [])
+        bad_here = known_bad.get(release.get("tag_name", "")) or {}
         sidecars = {a["name"] for a in assets if a["name"].endswith(".whl.metadata")}
         for asset in assets:
             name = asset["name"]
@@ -228,7 +255,11 @@ def main() -> None:
             if not parsed:
                 print(f"WARNING: unparseable wheel name, skipped: {name}")
                 continue
+            bad = bad_here.get(name)
+            if bad:
+                yanked_count += 1
             packages.setdefault(parsed["name"], []).append({
+                "yanked": (bad or {}).get("reason", "") if bad else "",
                 "filename": name,
                 "url": asset["browser_download_url"],
                 # The releases API serves a digest per asset: free hash
@@ -284,7 +315,8 @@ def main() -> None:
     n_wheels = sum(len(v) for v in packages.values())
     n_sidecars = sum(1 for v in packages.values() for w in v if w["has_sidecar"])
     print(f"{len(packages)} package(s), {n_wheels} wheel(s), "
-          f"{n_sidecars} with a PEP 658 sidecar")
+          f"{n_sidecars} with a PEP 658 sidecar, "
+          f"{yanked_count} yanked (PEP 592)")
 
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
