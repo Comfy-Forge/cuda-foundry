@@ -295,6 +295,23 @@ def main() -> int:
                 continue  # a CUDA line absent from the arch table is not built
             gcc = (policy.get("host_gcc", {}).get("by_cuda", {}).get(cuda)
                    or policy.get("host_gcc", {}).get("default", "13"))
+            # A package may pin its own compiler BELOW the policy's, and only
+            # below: the policy value tracks the CUDA line's ceiling (nvcc
+            # refuses a host compiler newer than it supports), so raising it
+            # per package would break the build the ceiling exists to protect.
+            # Lowering is a different question, and a real one -- the wheel
+            # half is what asks for it. conda-forge's gcc 13 emits
+            # __throw_bad_array_new_length@GLIBCXX_3.4.29, which no manylinux
+            # policy permits, so a package whose sources use array new cannot
+            # be repaired into a publishable wheel at all. Which packages trip
+            # it is luck; four of the first five did not.
+            pkg_gcc = cfg.get("gcc_version")
+            if pkg_gcc:
+                if int(str(pkg_gcc)) > int(str(gcc)):
+                    sys.exit(f"{cfg['name']}: gcc_version {pkg_gcc} is ABOVE the "
+                             f"policy's {gcc} for CUDA {cuda}. The policy value is "
+                             f"nvcc's ceiling, not a default to argue with.")
+                gcc = str(pkg_gcc)
             shards = int(cfg.get("sharding") or 1)
             bstr = build_string(cfg, cuda, torch_version, python,
                                 args.build_number)
