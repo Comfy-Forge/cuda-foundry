@@ -236,17 +236,48 @@ def ninja_translation_units(src_dir: Path) -> list[str]:
         for line in ninja.read_text(encoding="utf8", errors="replace").splitlines():
             if not line.startswith("build "):
                 continue
-            head, _, rest = line[len("build "):].partition(":")
+            head, rest = _split_edge(line[len("build "):])
+            if head is None:
+                continue
             parts = rest.split()
             if len(parts) >= 2:
                 # parts[0] is the rule name; the first input follows it.
-                edges[head.strip()] = parts[1]
+                edges[_norm(_unescape(head))] = _unescape(parts[1])
     units = []
     for out in ninja_log_entries(src_dir):
-        src = edges.get(out)
+        src = edges.get(_norm(out))
         if src:
             units.append(src)
     return units
+
+
+def _split_edge(text: str) -> tuple[str | None, str]:
+    r"""Split a ninja edge at its separator colon.
+
+    Ninja escapes a literal colon in a path as `$:`, which every Windows path
+    with a drive letter has -- `build D$:/a/work/ext.obj: compile D$:/...`.
+    Splitting on the first colon therefore lands inside `D$:` and yields
+    nonsense. The separator is the first colon NOT preceded by a dollar.
+
+    This is why the first version of this function mapped zero outputs to
+    sources and wrote an empty ledger (run 34166741643).
+    """
+    i = 0
+    while i < len(text):
+        if text[i] == ":" and (i == 0 or text[i - 1] != "$"):
+            return text[:i].strip(), text[i + 1:]
+        i += 1
+    return None, ""
+
+
+def _unescape(token: str) -> str:
+    """Ninja's path escaping, reversed: `$:` -> `:`, `$ ` -> ' ', `$$` -> '$'."""
+    return token.replace("$:", ":").replace("$ ", " ").replace("$$", "$")
+
+
+def _norm(path: str) -> str:
+    """Compare Windows paths without tripping on separator or case differences."""
+    return path.replace("\\", "/").lower()
 
 
 def write_ledger(src_dir: Path) -> int:
