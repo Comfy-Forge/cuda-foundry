@@ -613,6 +613,7 @@ requirements:
       then: cuda-nvtx
     - sox
     - ffmpeg <7
+    - cuda-nvrtc-dev
   run:
     - python
     # Every package here ships compiled CUDA kernels, so it states that about

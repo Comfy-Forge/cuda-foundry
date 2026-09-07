@@ -46,11 +46,19 @@ runs:
         echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
         export PATH="$HOME/.pixi/bin:$PATH"
         pixi global install rattler-build
+        # cuobjdump reads the SASS architectures out of a built binary, and the
+        # publish gate fails closed without it -- run 34169766672 died with
+        # FileNotFoundError: 'cuobjdump' on a linux-64 cell that had built and
+        # verified everything else. It was only ever present on a developer box
+        # with a system CUDA; a hosted runner has none. Its own package, so this
+        # does not drag a toolkit in.
+        pixi global install cuda-cuobjdump
         # The sandbox is a SEPARATE binary and rattler-build only reports its
         # absence when --sandbox is actually passed. Installing it here means a
         # missing sandbox fails setup, not the build's integrity guarantee.
         pixi global install rattler-sandbox
         rattler-build --version
+        cuobjdump --version
         rattler-sandbox --version || true
 
     # Windows gets pixi from its own installer -- pixi.sh/install.sh is a POSIX

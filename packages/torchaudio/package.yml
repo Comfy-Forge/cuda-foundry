@@ -87,6 +87,14 @@ host_deps:
   # and 6 and there is no 7 binding at this release, so <7 is precisely the
   # window upstream supports, not a version we happened to test.
   - ffmpeg <7
+  # Caffe2's cuda.cmake does get_target_property() on CUDA::nvrtc, a target
+  # FindCUDAToolkit creates only when it finds nvrtc's HEADERS and import
+  # library -- not from the runtime package alone. The win-64 host env already
+  # had cuda-nvrtc (55 MiB of runtime) and configure still died with
+  #   get_target_property() called with non-existent target "CUDA::nvrtc"
+  # because the -dev half was absent. torchaudio is the only CMake-driven
+  # package of the five, which is why nothing else needed it.
+  - cuda-nvrtc-dev
 
 # gcc 10, below the policy's 13 for CUDA 12.8 (nvcc's ceiling is <15, so this
 # is legal). At 13 the compiler emits
