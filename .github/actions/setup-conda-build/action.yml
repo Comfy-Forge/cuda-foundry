@@ -22,7 +22,8 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install rattler-build, rattler-sandbox and pixi
+    - name: Install rattler-build, rattler-sandbox and pixi (Linux)
+      if: runner.os == 'Linux'
       shell: bash
       run: |
         set -euo pipefail
@@ -37,7 +38,28 @@ runs:
         rattler-build --version
         rattler-sandbox --version || true
 
+    # Windows gets pixi from its own installer -- pixi.sh/install.sh is a POSIX
+    # script and the runner's git-bash would run it happily right up to the
+    # point it tried to write a Linux path. rattler-sandbox is not installed:
+    # nothing here uses it, and on Windows there is no sandbox to have.
+    - name: Install rattler-build and pixi (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        Invoke-RestMethod -Uri https://pixi.sh/install.ps1 | Invoke-Expression
+        $pixiBin = Join-Path $env:USERPROFILE ".pixi\bin"
+        Add-Content -Path $env:GITHUB_PATH -Value $pixiBin
+        $env:PATH = "$pixiBin;$env:PATH"
+        pixi global install rattler-build
+        rattler-build --version
+
+    # Linux only. The compile cache is what the shard/link handoff rides on,
+    # and that handoff is not ported to win-64 -- build_win.py refuses any
+    # CUW_MODE but `full` and says so. A Windows ccache here would be a
+    # dependency nothing consults.
     - name: Install ccache (pinned, static)
+      if: runner.os == 'Linux'
       shell: bash
       run: |
         set -euo pipefail
@@ -63,6 +85,7 @@ runs:
         echo "CUW_CCACHE_BIN=$RUNNER_TEMP/ccache-bin/ccache" >> "$GITHUB_ENV"
 
     - name: Prepare ccache dir
+      if: runner.os == 'Linux'
       shell: bash
       env:
         CCACHE_DIR_IN: ${{ inputs.ccache-dir }}
@@ -79,7 +102,24 @@ runs:
         echo "CUW_LEDGER=$RUNNER_TEMP/cuw-ledger.txt" >> "$GITHUB_ENV"
         echo "CUW_RSS_LOG=$RUNNER_TEMP/cuw-rss.log" >> "$GITHUB_ENV"
 
+    # The same CUW_* handoff paths, minus everything ccache. build_win.py reads
+    # CUW_WHEELHOUSE for the one wheel that becomes both published outputs; it
+    # must sit outside both the work dir (rattler-build deletes it) and $PREFIX
+    # (rattler-build packages it).
+    - name: Prepare build paths (Windows)
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/wheelhouse"
+        echo "CUW_WHEELHOUSE=$RUNNER_TEMP/wheelhouse" >> "$GITHUB_ENV"
+        echo "CUW_LEDGER=$RUNNER_TEMP/cuw-ledger.txt" >> "$GITHUB_ENV"
+        echo "CUW_RSS_LOG=$RUNNER_TEMP/cuw-rss.log" >> "$GITHUB_ENV"
+
+    # Linux only: sudo, fallocate and swapon are all absent on the Windows
+    # runner, and its disk is not the constraint that made this necessary.
     - name: Free disk and add swap
+      if: runner.os == 'Linux'
       shell: bash
       env:
         SWAP_GB: ${{ inputs.swapfile-gb }}

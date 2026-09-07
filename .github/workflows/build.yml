@@ -21,6 +21,9 @@ on:
       python:
         description: 'python minor filter, e.g. 3.12 (or "all")'
         default: "all"
+      platform:
+        description: 'target platform: "all" (policy default), linux-64 or win-64'
+        default: "all"
       build_number:
         description: "build number (bump to republish with fixed metadata)"
         default: "0"
@@ -39,6 +42,14 @@ concurrency:
   group: build-${{ inputs.package }}-${{ inputs.cuda }}-${{ inputs.pytorch }}-${{ inputs.python }}
   cancel-in-progress: false
 
+# Every run: block in this file is bash -- `set -euo pipefail`, `shopt`, array
+# expansions. GitHub's Windows runners default to pwsh, where all of that is a
+# syntax error, so the shell is pinned here once rather than on ~20 steps.
+# git-bash ships on the Windows image; on Linux this changes nothing.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   matrix:
     runs-on: ubuntu-latest
@@ -51,6 +62,7 @@ jobs:
       IN_CUDA: ${{ inputs.cuda }}
       IN_PYTORCH: ${{ inputs.pytorch }}
       IN_PYTHON: ${{ inputs.python }}
+      IN_PLATFORM: ${{ inputs.platform }}
       IN_BUILD_NUMBER: ${{ inputs.build_number }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -71,12 +83,21 @@ jobs:
           python scripts/generate_matrix.py \
             --package "$IN_PACKAGE" --cuda "$IN_CUDA" \
             --pytorch "$IN_PYTORCH" --python "$IN_PYTHON" \
+            --platform "$IN_PLATFORM" \
             --skip-published --build-number "$IN_BUILD_NUMBER" \
             --output matrix.json
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
           m = json.load(open("matrix.json"))
-          compile_jobs = [c for c in m if int(c.get("shard_count", 0)) > 0]
+          # win-64 never shards. Not a policy choice about Windows -- the
+          # shard/link handoff is a ccache sitting in the nvcc seat, and a
+          # .bat cannot take an .exe's place (PATHEXT puts .EXE first
+          # regardless). build_win.py refuses any CUW_MODE but `full` and says
+          # so, and EVERY cell carries shard_count >= 1 (`sharding: 1` means
+          # one shard, not none), so without this filter every win-64 cell
+          # would get a compile-shard job that fails by design.
+          compile_jobs = [c for c in m if int(c.get("shard_count", 0)) > 0
+                          and not c["platform"].startswith("win")]
           link_jobs    = [c for c in m if int(c.get("shard_count", 0)) == 0] + \
                          [dict(c, shard_index=0) for c in m if int(c.get("shard_count", 0)) > 0
                           and int(c.get("shard_index", 0)) == 1]
@@ -163,13 +184,35 @@ jobs:
           # runners do not provide ("sandboxing failure: Operation not
           # permitted", run 34095721769). The no-network guarantee is imposed
           # inside the build by scripts/build_snippets/nonet.py instead.
+          # The two platforms disagree on the same variant keys, so the
+          # config is a separate file rather than conditional entries:
+          # c_stdlib is `sysroot` on Linux and `vs` on Windows, and a variant
+          # config has no platform conditionals.
+          #
+          # The host compiler is pinned per cell on BOTH platforms and for the
+          # same reason -- nvcc refuses one outside a window it carries
+          # internally, and nothing in the solve enforces it. On Linux that is
+          # a gcc VERSION (c_compiler_version); on Windows it is a different
+          # compiler PACKAGE (c_compiler -> vs2019/vs2022), because MSVC
+          # versions ship as distinct activation packages. Both tables live in
+          # defaults/policy.yml; host_msvc is read here rather than carried on
+          # the cell so the policy file stays the single source of truth.
+          if [[ "${{ matrix.cell.platform }}" == win-* ]]; then
+            VARIANT_CONFIG=defaults/variants-win.yaml
+            MSVC=$(python -c "import yaml,sys; p=yaml.safe_load(open('defaults/policy.yml'))['host_msvc']; print(p['by_cuda'].get('${{ matrix.cell.cuda }}', p['default']))")
+            echo "win-64: MSVC package $MSVC for CUDA ${{ matrix.cell.cuda }}"
+            COMPILER_ARGS=(--variant c_compiler="$MSVC" --variant cxx_compiler="$MSVC")
+          else
+            VARIANT_CONFIG=defaults/variants.yaml
+            COMPILER_ARGS=(--variant c_compiler_version="${{ matrix.cell.gcc_version }}"
+                           --variant cxx_compiler_version="${{ matrix.cell.gcc_version }}")
+          fi
           rattler-build build --recipe "$RECIPE" \
-            --variant-config defaults/variants.yaml \
+            --variant-config "$VARIANT_CONFIG" \
             --variant cuda_compiler_version="${{ matrix.cell.cuda }}" \
             --variant pytorch="${{ matrix.cell.pytorch }}" \
             --variant python="${{ matrix.cell.python }}" \
-            --variant c_compiler_version="${{ matrix.cell.gcc_version }}" \
-            --variant cxx_compiler_version="${{ matrix.cell.gcc_version }}" \
+            "${COMPILER_ARGS[@]}" \
             --target-platform "${{ matrix.cell.platform }}" \
             --output-dir "$RUNNER_TEMP/out" --test skip --no-build-id \
             -c https://comfy-forge.github.io/conda-torch -c conda-forge
@@ -199,13 +242,13 @@ jobs:
           path: staging
       - uses: ./.github/actions/setup-conda-build
       - name: Restore shard caches
-        if: matrix.cell.shard_count != '0'
+        if: matrix.cell.shard_count != '0' && !startsWith(matrix.cell.platform, 'win')
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: cache-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}-*
           path: shard-caches
       - name: Merge shard caches
-        if: matrix.cell.shard_count != '0'
+        if: matrix.cell.shard_count != '0' && !startsWith(matrix.cell.platform, 'win')
         run: |
           set -euo pipefail
           found=0
@@ -220,7 +263,10 @@ jobs:
           "${CUW_CCACHE_BIN:-ccache}" -z
       - name: Build
         env:
-          CUW_MODE: ${{ matrix.cell.shard_count != '0' && 'link' || 'full' }}
+          # `link` asserts a zero-miss ccache replay, which presupposes shards
+          # populated one. win-64 has no shard jobs (see the matrix step), so
+          # there is no cache to replay and the mode is always `full`.
+          CUW_MODE: ${{ startsWith(matrix.cell.platform, 'win') && 'full' || (matrix.cell.shard_count != '0' && 'link' || 'full') }}
           CUW_SHARD_COUNT: "0"
           CUW_SRC_TARBALL: ${{ github.workspace }}/staging/${{ matrix.cell.src_tarball }}
           # Family packages (torchvision/torchaudio) version with the torch

@@ -64,9 +64,17 @@ host_msvc:
 # we build for.
 python_min: "3.10"
 
-# v1 is linux-64 only (ARCHITECTURE.md "Scope"): prove the ccache handoff
-# where the compiler story is simplest. linux-aarch64 is platform #2 and
-# win-64 third; both stay in the build string so nothing forecloses them.
+# What `--platform all` expands to, and therefore what a routine wave builds.
+# linux-64 only, still: prove the ccache handoff where the compiler story is
+# simplest (ARCHITECTURE.md "Scope"). linux-aarch64 is platform #2.
+#
+# win-64 is NOT here on purpose, and its absence is not the same as it being
+# unwired -- the recipes render, solve and carry a real build script for it
+# (docs/WINDOWS.md). Listing it would silently double every wave before the
+# Windows compile has ever run. Build it deliberately instead:
+#   gh workflow run build.yml -f platform=win-64 -f package=fused-ssim ...
+# which generate_matrix.py honours because an explicit --platform overrides
+# this list. Promote it here once win-64 cells pass on their own.
 platforms: ["linux-64"]
 
 # Subdir <-> the conda-torch subdir whose torch builds we compile against.
