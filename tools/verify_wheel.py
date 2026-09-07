@@ -51,9 +51,17 @@ sys.path.insert(0, str(REPO / "tools"))
 # Same list make_wheel.py refuses to advertise, for the same reason.
 TORCH_NAMES = {"torch", "torchvision", "torchaudio", "triton",
                "pytorch-triton", "pytorch"}
+# PEP 427: name-version(-build)?-python-abi-platform.whl. The build tag is
+# OPTIONAL and, when present, is what distinguishes a rebuild of one cell from
+# its predecessor -- make_wheel.py emits the conda build number there. Without
+# the `(?:-(?P<build>\d[^-]*))?` group this regex still MATCHED a six-field
+# name, silently reading the build tag as the python tag and the python tag as
+# the abi: `fused_ssim-0.0.0+cu128torch2.8-1-cp312-cp312-win_amd64.whl` parsed
+# as py="1", abi="cp312", plat="cp312-win_amd64". Every downstream check then
+# asserted against nonsense.
 WHEEL_RE = re.compile(
-    r"^(?P<name>[A-Za-z0-9_.]+)-(?P<ver>[^-]+)-(?P<py>[^-]+)-(?P<abi>[^-]+)-"
-    r"(?P<plat>.+)\.whl$")
+    r"^(?P<name>[A-Za-z0-9_.]+)-(?P<ver>[^-]+)(?:-(?P<build>\d[^-]*))?"
+    r"-(?P<py>[^-]+)-(?P<abi>[^-]+)-(?P<plat>.+)\.whl$")
 
 
 class Report:

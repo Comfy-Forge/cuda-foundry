@@ -406,8 +406,9 @@ def set_header(text: str, name: str, value: str) -> str:
 
 
 def finalize(wheel: Path, version_tag: str, arch_list: str,
-             run_deps: list[str], expect_version: str = "") -> tuple[Path, Path, int]:
-    """Apply the local version, strip deps, write the PEP 658 sidecar."""
+             run_deps: list[str], expect_version: str = "",
+             build_number: str = "") -> tuple[Path, Path, int]:
+    """Apply the local version and build tag, strip deps, write the sidecar."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         with zipfile.ZipFile(wheel) as z:
@@ -496,6 +497,40 @@ def finalize(wheel: Path, version_tag: str, arch_list: str,
                      f".whl, got {len(stem)} field(s)). Refusing to rename it "
                      f"into something that only looks like a wheel.")
         stem[1] = full
+
+        # ---- the build tag, which is what makes a rebuild publishable -------
+        # A .conda's build string carries the build number (..._h6651153_1), so
+        # a rebuild lands under a new filename and immutability holds without
+        # anyone thinking about it. A wheel's name has no such field by
+        # default, so every build of a cell is called the same thing -- while
+        # publish-wheels.yml correctly refuses a published name whose bytes
+        # changed. Together that made a legitimate rebuild unpublishable except
+        # by deleting the published asset, which is the one thing the rule
+        # forbids.
+        #
+        # PEP 427's optional build tag is exactly this field: "same version,
+        # rebuilt". It must start with a digit, and a resolver uses it as a
+        # tiebreaker preferring the HIGHER tag -- so a republished wheel wins
+        # over its predecessor without anything being deleted, and the version
+        # string a user pins is untouched. (Putting the build number in the
+        # local version instead would have changed that string, because the
+        # local segment is part of the version pip resolves against.)
+        #
+        # It carries the CONDA build number verbatim, so one cell has one
+        # number in both formats and "which wheel goes with this .conda" is
+        # answerable by reading the two filenames.
+        if build_number != "":
+            if not str(build_number)[:1].isdigit():
+                sys.exit(f"make_wheel: build tag {build_number!r} does not start "
+                         f"with a digit; PEP 427 requires that, and a resolver "
+                         f"will not parse the filename.")
+            # A build tag already present must be replaced, not stacked. Only
+            # field 2 can be one, and it is distinguishable without ambiguity:
+            # a build tag starts with a digit and a python tag never does.
+            if len(stem) >= 6 and stem[2][:1].isdigit():
+                stem[2] = str(build_number)
+            else:
+                stem.insert(2, str(build_number))
         out = wheel.with_name("-".join(stem))
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             for f in sorted(root.rglob("*")):
@@ -518,6 +553,9 @@ def main() -> int:
     ap.add_argument("--cuda", required=True)
     ap.add_argument("--pytorch", required=True)
     ap.add_argument("--arch-list", default="")
+    ap.add_argument("--build-number", default="",
+                    help="the cell's conda build number, emitted as the PEP 427 "
+                         "build tag so a rebuild publishes under a new filename")
     ap.add_argument("--expect-version", default="",
                     help="the cell's version; the wheel's own base version "
                          "must equal it or this refuses to publish")
@@ -554,7 +592,8 @@ def main() -> int:
         staged = args.out_dir / args.wheel.name
         shutil.copy2(args.wheel, staged)
         final, side, n = finalize(staged, local_tag(args.cuda, args.pytorch),
-                                  args.arch_list, run_deps, args.expect_version)
+                                  args.arch_list, run_deps, args.expect_version,
+                                  args.build_number)
         print(f"  win-64  : no repair -- Windows wheels vendor nothing")
         print(f"  wheel   : {final.name}")
         print(f"  sidecar : {side.name}  ({n} Requires-Dist)")
@@ -574,7 +613,8 @@ def main() -> int:
               "out what started linking them.")
 
     final, side, n = finalize(repaired, local_tag(args.cuda, args.pytorch),
-                              args.arch_list, run_deps, args.expect_version)
+                              args.arch_list, run_deps, args.expect_version,
+                              args.build_number)
     print(f"  wheel   : {final.name}")
     print(f"  sidecar : {side.name}  ({n} Requires-Dist)")
     return 0

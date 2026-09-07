@@ -403,6 +403,10 @@ jobs:
       - name: Build the published wheel from the same artifact
         env:
           CELL_PLATFORM: ${{ matrix.cell.platform }}
+          # The SAME number the .conda's build string carries, so one cell has
+          # one number in both formats and the two filenames can be matched by
+          # eye when a rebuild is being chased.
+          CELL_BUILD_NUMBER: ${{ inputs.build_number }}
           CELL_PKG: ${{ matrix.cell.package }}
           CELL_CUDA: ${{ matrix.cell.cuda }}
           CELL_TORCH: ${{ matrix.cell.pytorch }}
@@ -430,6 +434,7 @@ jobs:
             --platform "$CELL_PLATFORM" \
             --cuda "$CELL_CUDA" --pytorch "$CELL_TORCH" \
             --arch-list "$CELL_ARCH" --expect-version "$CELL_VERSION" \
+            --build-number "$CELL_BUILD_NUMBER" \
             "${EXTRA[@]}"
 
       - name: Verify the wheel against its .conda
