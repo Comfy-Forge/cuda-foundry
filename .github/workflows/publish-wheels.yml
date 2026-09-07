@@ -1,0 +1,143 @@
+name: publish-wheels
+
+# Uploads compiled wheels and their PEP 658 sidecars to the per-subdir
+# release, which is where the index generator looks and where the .conda
+# artifacts for the same cells already live. Then nudges the index.
+#
+# Publishing is IMMUTABLE, the same discipline the channel fragments follow:
+# re-uploading a byte-identical asset is a no-op, uploading DIFFERENT bytes
+# under a name that already exists is a hard error. There is no --clobber
+# path, because a lockfile or a #sha256= anchor already out in the world
+# pins the bytes that were published, not the name.
+
+on:
+  workflow_call:
+    inputs:
+      subdir:
+        description: "Release tag to publish into (a conda subdir)"
+        required: true
+        type: string
+      artifact:
+        description: "Name of the build artifact holding *.whl and *.whl.metadata"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      subdir:
+        description: "Release tag to publish into"
+        required: true
+        type: choice
+        options: [linux-64, linux-aarch64, win-64, noarch]
+      artifact:
+        description: "Name of the build artifact holding *.whl and *.whl.metadata"
+        required: true
+        type: string
+      run_id:
+        description: "Run ID the artifact belongs to (blank = this repo's latest)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  # Serialised per subdir: two jobs uploading into one release race on the
+  # asset list, and the existence check below would read a stale one.
+  group: publish-wheels-${{ inputs.subdir }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ inputs.run_id && secrets.GITHUB_TOKEN || '' }}
+
+      # Every `${{ inputs.* }}` below is routed through env: on purpose. An
+      # expression written inside a run: block is text-substituted before
+      # bash ever parses the script, so a crafted input is command injection
+      # (CWE-78); an env var is data no matter what it contains.
+      - name: Gate on sidecars, then upload immutably
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUBDIR: ${{ inputs.subdir }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=( dist/*.whl )
+          if [ ${#wheels[@]} -eq 0 ]; then
+            echo "::error::artifact contains no .whl files"; exit 1
+          fi
+
+          # A wheel with no sidecar is not a publish failure the index can
+          # see: the root tree serves it fine and /deps/ just declines to
+          # advertise metadata for it, so the package silently installs
+          # without its dependencies. Catch it here, where it is still cheap.
+          missing=0
+          for whl in "${wheels[@]}"; do
+            if [ ! -f "$whl.metadata" ]; then
+              echo "::error::$(basename "$whl") has no PEP 658 sidecar next to it"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+          # One listing for the whole run; the concurrency group above is
+          # what makes it safe to reuse.
+          gh release view "$SUBDIR" -R "$REPO" \
+            --json assets --jq '.assets[].name' > /tmp/existing.txt
+
+          for f in "${wheels[@]}" "${wheels[@]/%/.metadata}"; do
+            base=$(basename "$f")
+            if grep -Fxq "$base" /tmp/existing.txt; then
+              url="https://github.com/$REPO/releases/download/$SUBDIR/$base"
+              published=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
+              local_sum=$(sha256sum "$f" | cut -d' ' -f1)
+              if [ "$published" = "$local_sum" ]; then
+                echo "no-op: $base already published with the same bytes"
+                continue
+              fi
+              echo "::error::$base is already published with DIFFERENT bytes"
+              echo "published sha256 $published"
+              echo "local     sha256 $local_sum"
+              echo "Published artifacts are immutable. Bump the build number"
+              echo "and publish under a new filename; if the published one is"
+              echo "defective, record it in known_bad.json as well."
+              exit 1
+            fi
+            gh release upload "$SUBDIR" "$f" -R "$REPO"
+            echo "uploaded $base"
+          done
+
+      # The index lives in another repo, so this needs a cross-repo token
+      # that the default GITHUB_TOKEN cannot be. Absent one, the index
+      # refreshes on its own six-hourly schedule -- so this is a latency
+      # optimisation, never a correctness dependency, and must not fail the
+      # publish.
+      - name: Ask the index to refresh
+        if: ${{ success() }}
+        env:
+          INDEX_TOKEN: ${{ secrets.PYPI_INDEX_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${INDEX_TOKEN:-}" ]; then
+            echo "PYPI_INDEX_TOKEN not set -- the index will pick these wheels"
+            echo "up on its next scheduled run (within 6h). To make it"
+            echo "immediate, add a token with contents:write on"
+            echo "Comfy-Forge/pypi-cuda-wheels as the PYPI_INDEX_TOKEN secret."
+            exit 0
+          fi
+          curl -fsS -X POST \
+            -H "Authorization: token $INDEX_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/Comfy-Forge/pypi-cuda-wheels/dispatches \
+            -d '{"event_type":"wheels-published"}'
+          echo "dispatched wheels-published"

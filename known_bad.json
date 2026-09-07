@@ -1,0 +1,7 @@
+{
+  "_about": "Published artifacts are immutable: a defective build can never be removed, only superseded by a higher build number and/or neutralised by a metadata patch in patches/. Both of those protect FUTURE solves only -- an existing pixi.lock keeps installing whatever it pinned, silently, forever. This list is the static, self-serve record of every build known to be defective, so anyone holding a lockfile can check it with tools/check_lock.py. Keyed by subdir, then by exact .conda filename; 'fixed_by' names the superseding build to re-lock onto.",
+  "linux-64": {},
+  "linux-aarch64": {},
+  "win-64": {},
+  "noarch": {}
+}
