@@ -259,13 +259,42 @@ def verify(path: Path, ledger: set, expect_arch: str, tmp: Path) -> bool:
     rep.check(bool(rev) and rev.lower() not in ("main", "master", "head"),
               f"records a non-floating source_rev ({rev!r})")
 
-    # ---- compile ledger covers every shipped extension module --------------
-    if ledger:
-        stems = {Path(e).name.split(".")[0] for e in exts}
-        compiled = {Path(x).name.split(".")[0] for x in ledger}
-        missing = sorted(s for s in stems if s not in compiled)
-        rep.check(not missing,
-                  f"compile ledger covers every extension module (uncovered: {missing[:3]})")
+    # ---- L3: the compile ledger -------------------------------------------
+    # What this CAN establish, and what it cannot.
+    #
+    # The ledger is a list of translation units the nvcc wrapper actually
+    # compiled -- source paths like ".../torchvision/csrc/ops/cuda/nms_kernel.cu".
+    # The shipped artifact contains linked MODULES, named for the extension
+    # (_C.so, image.so). There is no general mapping between the two: _C.so is
+    # linked from dozens of TUs and none of them is called "_C".
+    #
+    # This check used to compare those two name sets directly and require
+    # every module stem to appear as a compiled file name. That can only pass
+    # for a package whose TU happens to share its module's name, which is none
+    # of them -- every artifact this repo has ever built fails it. It never
+    # fired because the workflow calls verify_conda.py without --ledger, so
+    # the whole branch was dead: L3 was documented as a publish gate, was
+    # never run, and could not have passed if it were.
+    #
+    # So it asserts the two things the ledger genuinely proves:
+    #   1. an artifact that ships compiled modules must have compiled
+    #      something -- an empty ledger beside a .so means the binary came
+    #      from somewhere this build did not look (a vendored blob, or a
+    #      prebuilt wheel that L1 failed to stop);
+    #   2. every TU came from THIS build's work tree, so nothing was compiled
+    #      out of a system path or a foreign checkout.
+    # Neither proves a particular .so was linked only from ledger TUs; that
+    # needs link-line capture, which the wrapper does not do. Stated plainly
+    # rather than implied by a check that looks stronger than it is.
+    if ledger is not None and exts:
+        rep.check(bool(ledger),
+                  f"compile ledger is non-empty for an artifact shipping "
+                  f"{len(exts)} extension module(s)")
+        foreign = sorted(x for x in ledger
+                         if "/work/" not in x and "\\work\\" not in x)
+        rep.check(not foreign,
+                  f"every compiled TU came from the build work tree "
+                  f"({len(ledger)} TUs; foreign: {foreign[:2]})")
 
     # ---- SASS arch census ---------------------------------------------------
     if expect_arch and exts:

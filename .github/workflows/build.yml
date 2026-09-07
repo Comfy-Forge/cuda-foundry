@@ -367,7 +367,12 @@ jobs:
           files=("$RUNNER_TEMP"/out/*/*.conda)
           [ ${#files[@]} -gt 0 ] || { echo "::error::no .conda produced"; exit 1; }
           if [ -f tools/verify_conda.py ]; then
-            python tools/verify_conda.py "${files[@]}"
+            # --ledger and --expect-arch are passed, so L3 and the SASS census
+            # actually run. Without --ledger the ledger branch is skipped
+            # entirely, which is how a documented publish gate sat dead.
+            python tools/verify_conda.py "${files[@]}" \
+              --ledger "$CUW_LEDGER" \
+              --expect-arch "${{ matrix.cell.arch_list }}"
           else
             echo "::warning::tools/verify_conda.py not present yet — artifact gate skipped"
           fi
