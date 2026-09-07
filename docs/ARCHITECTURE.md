@@ -104,6 +104,53 @@ must be *constrained*, not merely named, and each was learned the hard way:
   compiler was being packaged inside torchvision, declared in `paths.json`.
   Restore on exit; gate on it.
 
+## What the wheel half costs, measured
+
+The claim above -- one compile, two packaging contracts -- holds, and building
+it turned up three things that are properties of the arrangement rather than
+bugs in a package. They are recorded here because the next platform hits all
+three.
+
+**The conda toolchain cannot always produce a manylinux wheel.** conda-forge's
+gcc 13 emits `__throw_bad_array_new_length@GLIBCXX_3.4.29` (GCC 11+ generates
+it for `new T[n]`). manylinux_2_28 permits GLIBCXX up to 3.4.25, and
+`manylinux_2_31`, `_2_34` and `_2_35` all refuse it as well -- so raising the
+tag is not an escape, it would ship a worse glibc floor than torch's own and
+still fail. Upstream's manylinux_2_28 torchaudio references nothing above
+3.4.25, so the policy is right and our toolchain is the outlier. Of the first
+five packages built, **four did not trip it and torchaudio did**: whether a
+package uses array `new` anywhere is luck, so this recurs unpredictably across
+the grid. The lever is `gcc_version:` in `package.yml`, which may lower the
+compiler below the policy's value but never raise it (the policy value is
+nvcc's ceiling, not a default to argue with). The `.conda` is unaffected either
+way -- it declares `libstdcxx >=13` and gets it.
+
+**RPATH is a defect the wheel half structurally always has.** pip links the
+extension against the conda host prefix, so setuptools writes that absolute
+path into `DT_RPATH`. rattler-build rewrites RPATHs when it packages, which is
+why the `.conda` is clean and `verify_conda`'s lint passes -- but the wheel is
+taken *before* that step. auditwheel only rewrites binaries it grafts into, so
+a package that vendors nothing keeps a build-machine path in a published
+artifact. `make_wheel.py` drops every non-`$ORIGIN` entry.
+
+**auditwheel needs the host prefix, which normally no longer exists.** The
+libraries it vendors live in the conda host env, so the build must run with
+`--keep-build` and the repair must happen in the same job. Not theoretical:
+torchvision vendors libjpeg, libpng16, libwebp, libsharpyuv and libnvjpeg, all
+from that prefix.
+
+Measured on one torchvision compile, which is the clearest statement of the
+contract inversion the design rests on:
+
+| | `.conda` | wheel |
+|---|---|---|
+| vendored shared libraries | **none** | libjpeg, libnvjpeg, libpng16, libsharpyuv, libwebp |
+| declares | libjpeg-turbo, libpng, libwebp-base, libzlib, libnvjpeg | **nothing** |
+
+Both pass the same op on an RTX 3090 -- `nms`, `encode_jpeg`/`decode_jpeg`,
+`encode_png`/`decode_png`, and `decode_jpeg(device="cuda")` -- the conda half
+from a real solve, the wheel half in a plain venv on PyPI torch 2.8.0+cu128.
+
 ## Dependencies: derive, then curate
 
 `cuda-wheels` ships wheels with **zero** `Requires-Dist` and writes a PEP 658
