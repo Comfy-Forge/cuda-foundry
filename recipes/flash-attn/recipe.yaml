@@ -335,14 +335,28 @@ build:
           # back to, so a broken handoff fails loudly here instead of quietly installing
           # somebody else's build. (The seccomp filter would also refuse it -- this is
           # the same belt-and-braces as declaring force_source_build alongside L1.)
+          # Counted with positional parameters rather than a bash array, and that is
+          # NOT a style choice. rattler-build renders this script through minijinja
+          # BEFORE running it, and minijinja opens a comment on the two-character
+          # sequence brace-hash -- which is exactly what a bash array-length
+          # expansion starts with (dollar, brace, hash, name). The comment never
+          # closes, so the render fails and rattler-build reports only:
+          #   Error:   x Script failed to execute
+          # with no script output and no "Running build script" header at all,
+          # because the script never existed to be run. Measured: an array-length
+          # expansion fails, while array assignment, a subscripted element and a
+          # whole-array expansion all render fine -- it is that one digraph alone.
+          # Two other minijinja openers are the same trap and must never appear in
+          # this file either: brace-brace (an expression) and brace-percent (a
+          # statement). This comment therefore spells all three out in words.
           shopt -s nullglob
-          CUW_WHEELS=("$CUW_WHEELHOUSE"/*.whl)
+          set -- "$CUW_WHEELHOUSE"/*.whl
           shopt -u nullglob
-          if [ "${#CUW_WHEELS[@]}" -ne 1 ]; then
-            echo "::error::expected exactly 1 wheel in $CUW_WHEELHOUSE, found ${#CUW_WHEELS[@]}: ${CUW_WHEELS[*]:-none}. The .conda and the published wheel must come from ONE file; anything else means the compile produced nothing or the wheelhouse was not cleared." >&2
+          if [ "$#" -ne 1 ]; then
+            echo "::error::expected exactly 1 wheel in $CUW_WHEELHOUSE, found $#: ${*:-none}. The .conda and the published wheel must come from ONE file; anything else means the compile produced nothing or the wheelhouse was not cleared." >&2
             exit 1
           fi
-          CUW_WHEEL="${CUW_WHEELS[0]}"
+          CUW_WHEEL="$1"
           echo "=== installing $(basename "$CUW_WHEEL") into \$PREFIX"
           $PYTHON "$RECIPE_DIR/nonet.py" -- $PYTHON -m pip install "$CUW_WHEEL" \
               --no-deps --no-index --no-build-isolation --force-reinstall -vv
