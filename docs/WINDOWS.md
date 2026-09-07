@@ -211,6 +211,57 @@ mode is at least as likely and the structural checks are just as blind to it.
 stated as expectation, not measurement — it has not yet been observed on
 win-64, and it should be checked before it is believed.
 
+## What is wired, and what is still unproven
+
+The win branch is no longer an `exit 1` stub. As of commits `d0398d6` and
+`333be32` (where it landed by way of an unrelated broad `git add`, so their
+messages do not mention it):
+
+| piece | where |
+|---|---|
+| entry point | `scripts/build_snippets/build.bat` — thin, because rattler-build renders it through minijinja |
+| the actual build | `scripts/build_snippets/build_win.py` — a sibling file copied next to the recipe like `nonet.py`, so it is never rendered |
+| MSVC selection | the `c_compiler` variant, consumed by `compiler('c')`; table in `defaults/policy.yml` `host_msvc`, computed by `tools/msvc_ceiling.py` |
+| win-64 variant config | `defaults/variants-win.yaml` — separate from `variants.yaml` because `c_stdlib` differs (`vs` against `sysroot`) and a variant config has no platform conditionals |
+| toolkit | `cuda-nvcc_win-64`, never the `cuda-nvcc` metapackage |
+| setuptools | `>=78,<84`, win-64 only |
+
+**Solving is proven; building is not.** *Measured* — `rattler-build
+--render-only --with-solve --target-platform win-64` against the live
+`conda-torch` channel resolves all five packages at py3.12 / cu12.8 / torch
+2.8.0, and linux-64 still resolves after the same template changes. That
+retires the structural risk. It says nothing about whether the compile works:
+there is no Windows machine here, so `build_win.py` has never been executed.
+Everything it does — the MSVC window re-check, the ninja-log ledger, the wheel
+handoff — is written from measurement but run for the first time on a runner.
+
+Two things found only by attempting the solve, both worth keeping:
+
+- **`cuda-nvtx` has no win-64 build at all.** conda-forge ships it for
+  linux-64/aarch64/ppc64le; win-64 gets only `cuda-nvtx-dev`. Unconditional in
+  `host:`, it made every win-64 cell UNSAT. Consistent with why it is there:
+  torch 2.4/2.5 link `libnvToolsExt.so.1`, an ELF soname.
+- **`build_env` values are shell syntax.** `package.yml` is written once for
+  both platforms, and torchaudio declares `FFMPEG_ROOT: $PREFIX`. Copied into a
+  `.bat` that would set the *literal* string `$PREFIX` — silently. The hook now
+  translates `$VAR`/`${VAR}` to `%VAR%` and refuses anything with a dollar left
+  in it. Path separators are deliberately not rewritten; Windows takes forward
+  slashes, and a blanket conversion would corrupt non-path values.
+
+**Sharding is not ported, on purpose.** `build_win.py` refuses any `CUW_MODE`
+but `full`, and says why: the Linux shard handoff rides on ccache occupying the
+nvcc seat, and a `.bat` cannot take an `.exe`'s place (PATHEXT puts `.EXE`
+first in any case). `flash-attn` is the only one of the five that shards, so it
+is Windows-blocked until that exists; the other four are not.
+
+The compile ledger is correspondingly different. With no wrapper in the nvcc
+seat there is nothing to record invocations, so L3 on win-64 reads ninja's own
+`.ninja_log` instead. That is arguably the better source: it is evidence about
+what was *built* rather than what was *invoked*, and a prebuilt binary copied
+into the source tree appears in it not at all — which is precisely the case L3
+exists to catch. It does assume ninja was used, and fails loudly if extension
+modules exist with no compiled objects behind them.
+
 ## Scope for the first Windows cell
 
 py3.12 / CUDA 12.8 / torch 2.8.0 / win-64, the same five packages as linux-64,
