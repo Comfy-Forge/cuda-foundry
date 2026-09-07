@@ -52,7 +52,12 @@ runs:
         Add-Content -Path $env:GITHUB_PATH -Value $pixiBin
         $env:PATH = "$pixiBin;$env:PATH"
         pixi global install rattler-build
+        # cuobjdump is how the publish gate reads a binary's SASS architectures,
+        # and it is not on the Windows image. Its own package, so this does not
+        # drag a toolkit in.
+        pixi global install cuda-cuobjdump
         rattler-build --version
+        cuobjdump --version
 
     # Linux only. The compile cache is what the shard/link handoff rides on,
     # and that handoff is not ported to win-64 -- build_win.py refuses any

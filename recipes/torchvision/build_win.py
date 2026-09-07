@@ -221,6 +221,59 @@ def installed_files(dist_info: Path) -> list[Path]:
     return out
 
 
+def ninja_translation_units(src_dir: Path) -> list[str]:
+    """Source files ninja actually compiled, by joining .ninja_log to build.ninja.
+
+    .ninja_log records OUTPUTS; the ledger that tools/verify_conda.py consumes
+    is a list of translation unit SOURCES, one per line, the same shape the
+    Linux nvcc wrapper appends. build.ninja carries the mapping in its
+    `build <out>: <rule> <in>` edges, so joining the two gives the sources for
+    exactly the outputs this run produced -- not everything the build file
+    could have built.
+    """
+    edges: dict[str, str] = {}
+    for ninja in src_dir.glob("**/build.ninja"):
+        for line in ninja.read_text(encoding="utf8", errors="replace").splitlines():
+            if not line.startswith("build "):
+                continue
+            head, _, rest = line[len("build "):].partition(":")
+            parts = rest.split()
+            if len(parts) >= 2:
+                # parts[0] is the rule name; the first input follows it.
+                edges[head.strip()] = parts[1]
+    units = []
+    for out in ninja_log_entries(src_dir):
+        src = edges.get(out)
+        if src:
+            units.append(src)
+    return units
+
+
+def write_ledger(src_dir: Path) -> int:
+    r"""Write CUW_LEDGER so L3 is a real gate on win-64 too.
+
+    Without this the file never exists, tools/verify_conda.py reads an empty
+    ledger, and its "compile ledger is non-empty" check is skipped -- reporting
+    `0 TUs` while passing. That is precisely the failure mode the L4 canary
+    exists to prevent elsewhere: a guarantee reported as being in force during a
+    run where its mechanism never started.
+
+    One caveat worth stating rather than leaving to be discovered: the verifier's
+    companion check, that no TU came from OUTSIDE the work tree, tests
+    `x.startswith("/")` and so cannot judge a Windows path like
+    `D:\a\...\work\ssim.cu`. On win-64 the non-empty assertion is real and the
+    foreign-path assertion is inert.
+    """
+    ledger = os.environ.get("CUW_LEDGER")
+    if not ledger:
+        die("CUW_LEDGER is not set; L3 would silently not run")
+    units = ninja_translation_units(src_dir)
+    Path(ledger).parent.mkdir(parents=True, exist_ok=True)
+    Path(ledger).write_text("\n".join(units) + ("\n" if units else ""), encoding="utf8")
+    log(f"=== ledger: wrote {len(units)} translation unit(s) to {ledger}")
+    return len(units)
+
+
 def check_ledger(src_dir: Path, own_files: list[Path]) -> None:
     """L3: every extension module we ship must have been compiled by this run.
 
@@ -336,6 +389,7 @@ def main() -> int:
     # RECORD is read here and deleted below, in that order.
     own_files = installed_files(dist_info)
     check_ledger(src_dir, own_files)
+    write_ledger(src_dir)
     scrub_dist_info(dist_info)
     log("=== win-64 build complete")
     return 0
