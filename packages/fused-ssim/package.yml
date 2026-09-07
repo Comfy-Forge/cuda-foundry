@@ -5,6 +5,7 @@ version: "0.0.1"
 
 source_repo: rahul-goel/fused-ssim
 source_rev: 328dc9836f513d00c4b5bc38fe30478b4435cbb5
+patch_script: packages/fused-ssim/patches/fused_ssim.py
 
 links_torch: true
 
@@ -16,8 +17,15 @@ nvcc_threads: 1
 # ── dependencies ──────────────────────────────────────────────────────────
 # setup.py declares no install_requires at all (only `packages=['fused_ssim']`
 # and a CUDAExtension). It imports torch at build time to probe the local GPU
-# arch, which the recipe overrides with TORCH_CUDA_ARCH_LIST -- a build-time
-# concern, not a runtime dependency.
+# arch -- a build-time concern, not a runtime dependency.
+#
+# Correction: an earlier version of this comment said the recipe "overrides"
+# that probe with TORCH_CUDA_ARCH_LIST. It does not, and cannot. Upstream never
+# reads TORCH_CUDA_ARCH_LIST, and worse, the arch flag it does emit makes torch
+# discard the variable outright (cpp_extension._get_cuda_arch_flags returns []
+# as soon as any user nvcc flag contains 'arch'). Without patch_script above,
+# this package compiles for the build host's own GPU -- or for a hardcoded
+# sm_75/80/89 on a GPU-less runner -- whatever the cell says. See the patch.
 run_deps: []
 
 # ssim.cu / ssim.h / ext.cpp include only torch headers; no CUDA library
