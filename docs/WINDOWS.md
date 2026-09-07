@@ -164,6 +164,39 @@ those codecs must be statically linked into the extension or genuinely disabled.
 `delvewheel` 1.13.1 and `sccache` 0.17.0 are both available on conda-forge
 win-64 (*measured*) if either is needed; neither is currently in the design.
 
+## Two things the merge makes easier, and one it makes harder
+
+**Easier: no Windows CUDA installer.** `cuda-wheels` gets its toolkit from a
+system install, and its policy file says so — "adding a [CUDA] line requires
+wiring its Windows installer URL in `.github/actions/setup-cuda` first (Linux
+derives apt package names from the version and needs nothing)". Here CUDA comes
+from conda on both platforms (`cuda-nvcc_win-64`), so that asymmetry disappears
+and a new CUDA line costs nothing Windows-specific.
+
+**Easier: the target cell is already in policy.** *Measured*, from
+`cuda-wheels/defaults/python_cuda_torch_os_policy.yml`: `platforms` includes
+`windows`, and cu12.8 / torch 2.8.0 / py3.12 is a live row with no
+`pytorch_windows` override. (That key exists, but on exactly one row — cu12.9
+pins Windows to torch 2.9.0 where Linux gets 2.9.1 — so it is a per-row
+substitution, not a Windows torch floor.)
+
+**Harder: patches can no longer gate on the host platform.**
+`fetch_patched_sources.py` emits **one tarball per package**, consumed by every
+platform's build. A patch that branches on `os.name` therefore bakes the
+*fetching* machine's answer into the Windows build. The predecessor's patches do
+branch on it — legitimately, because the wheel farm patches on the build machine
+— and *13 of them* do (`natten`, `torchsparse`, `sageattention`, `cubvh`,
+`gsplat`, the `ovoxel` family and others). Every one is a future port into this
+repo and every one needs its conditional moved from the patch script into the C
+source, where `#ifdef _WIN32` expresses it correctly.
+
+`fused-ssim` is the worked example: its Windows prologue is applied
+unconditionally and made inert off-Windows by `#ifdef _WIN32`. The same patch
+carries the other half of that lesson — the predecessor's arch fix has a
+substitution that has never matched this pinned revision, and it went unnoticed
+because a whole-file before/after guard passes on a partial match. When porting
+those 13, assert per substitution.
+
 ## The codec trap almost certainly recurs, differently
 
 The Linux lesson worth repeating here: torchvision stats its codec headers under
