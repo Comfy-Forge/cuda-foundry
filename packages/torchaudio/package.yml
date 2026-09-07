@@ -125,3 +125,14 @@ verify:
     b = torch.tensor([0.5, 0.5], device="cuda")
     z = F.lfilter(x, a, b)
     assert z.shape == x.shape and torch.isfinite(z).all()
+    # Fail closed on the backends. Both are ON by default upstream and both
+    # reach the network to build, so the tempting fix is to switch them off
+    # -- which builds cleanly, passes every check above, and ships a package
+    # missing what upstream's own wheel carries. Exactly the torchvision
+    # codec trap, so it is asserted rather than assumed. These are the two
+    # libraries that only exist if sox and ffmpeg were really compiled.
+    import os, glob, torchaudio.lib as _lib
+    _libs = {os.path.basename(p) for p in glob.glob(os.path.dirname(_lib.__file__) + "/*.so")}
+    assert "libtorchaudio_sox.so" in _libs, sorted(_libs)
+    from torio._extension import lazy_import_ffmpeg_ext
+    assert lazy_import_ffmpeg_ext() is not None, "torio ffmpeg extension did not load"

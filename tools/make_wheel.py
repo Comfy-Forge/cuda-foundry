@@ -185,7 +185,44 @@ def repair(wheel: Path, out_dir: Path, links_torch: bool,
     try:
         proc = run(cmd, env=env)
     except subprocess.CalledProcessError as e:
-        print(e.stdout or "", file=sys.stderr)
+        out = e.stdout or ""
+        print(out, file=sys.stderr)
+        if "too-recent versioned symbols" in out:
+            # Diagnosed once, so it does not have to be diagnosed again. The
+            # conda toolchain is the cause: conda-forge's gcc 13 emits calls
+            # to libstdc++ symbols that no manylinux policy allows, and
+            # whether a given package trips it is luck -- of the first five
+            # built here, torchaudio did and the other four did not.
+            #
+            # Measured on torchaudio 2.8.0: ONE symbol, in ONE library --
+            # _ZSt28__throw_bad_array_new_lengthv@GLIBCXX_3.4.29 in
+            # pybind11_prefixctc.so. GCC 11+ emits it for `new T[n]`.
+            # manylinux_2_28 allows GLIBCXX_3.4.25 (RHEL 8), and 2_31, 2_34
+            # and 2_35 all refuse it too, so raising the tag is not a fix --
+            # it would ship a wheel with a worse glibc floor than torch's own
+            # 2.28 while still failing. Upstream's manylinux_2_28 torchaudio
+            # references nothing above 3.4.25, so the policy is right and our
+            # toolchain is the outlier.
+            #
+            # It is a real decision, not a bug to route around, and it belongs
+            # to whoever owns defaults/policy.yml:
+            #   * pin host_gcc below 11 for the cell (CUDA 12.8 allows
+            #     >=6,<15, so gcc 10 is legal) -- keeps ONE compile feeding
+            #     both outputs, costs a compiler generation everywhere;
+            #   * or link -static-libstdc++, which resolves the symbol at link
+            #     time but degrades the conda package -- it would stop
+            #     dynamically linking the C++ runtime purely to satisfy the
+            #     wheel, which is backwards;
+            #   * or publish this package's wheel from a different toolchain,
+            #     giving up the single-compile guarantee for it.
+            sys.exit(
+                f"make_wheel: {wheel.name} cannot be repaired to a manylinux "
+                f"wheel -- the conda toolchain emitted libstdc++ symbols newer "
+                f"than any manylinux policy permits. The .conda from this same "
+                f"compile is unaffected (it declares libstdcxx >=13 and gets "
+                f"it). Run `auditwheel show` on the raw wheel to see which "
+                f"symbol, and see the comment at this call site for the three "
+                f"real options. This is a toolchain policy decision.")
         sys.exit(f"make_wheel: auditwheel repair failed for {wheel.name}")
     for line in (proc.stdout or "").splitlines():
         if "Grafting" in line or "Setting RPATH" in line or "previous" in line:
