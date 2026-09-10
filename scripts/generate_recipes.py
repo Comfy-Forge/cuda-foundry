@@ -195,6 +195,7 @@ def render(folder: str, cfg: dict, env) -> str:
         host_deps=cfg.get("host_deps") or [],
         run_deps=cfg.get("run_deps") or [],
         build_deps=cfg.get("build_deps") or [],
+        shard_sources=cfg.get("shard_sources") or [],
         import_name=cfg.get("import_name") or cfg["name"],
         homepage=cfg.get("homepage", f"https://github.com/{cfg.get('source_repo','')}"),
         license=_license(cfg),
@@ -226,6 +227,16 @@ def main() -> int:
                       comment_start_string="<#", comment_end_string="#>",
                       undefined=StrictUndefined, keep_trailing_newline=True)
 
+    # The sibling files copied next to each recipe, and where they come from.
+    # --check has to cover these too. It used to check recipe.yaml alone, which
+    # meant a change to build_win.py, nvcc-wrap.sh or nonet.py left every
+    # committed copy stale and CI green -- and the copy beside the recipe is
+    # the one the build actually runs, because $RECIPE_DIR is the only path it
+    # can rely on inside the sandbox. An edit that was never regenerated would
+    # simply not take effect, which is the hardest kind of change to debug: the
+    # source says one thing and the build does another.
+    siblings = {"nvcc-wrap.sh": NVCC_WRAP, "nonet.py": NONET, "build_win.py": BUILD_WIN}
+
     stale = []
     for folder, cfg in load_packages(args.package):
         text = render(folder, cfg, env)
@@ -238,6 +249,12 @@ def main() -> int:
                     have.splitlines(True), text.splitlines(True),
                     fromfile=f"{out.relative_to(REPO)} (committed)",
                     tofile=f"{out.relative_to(REPO)} (regenerated)"))
+            for name, src in siblings.items():
+                copy = out.parent / name
+                if not copy.is_file() or copy.read_text() != src.read_text():
+                    stale.append(copy.relative_to(REPO))
+                    print(f"{copy.relative_to(REPO)} differs from "
+                          f"{src.relative_to(REPO)}")
             continue
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text)

@@ -95,15 +95,24 @@ jobs:
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
           m = json.load(open("matrix.json"))
-          # win-64 never shards. Not a policy choice about Windows -- the
-          # shard/link handoff is a ccache sitting in the nvcc seat, and a
-          # .bat cannot take an .exe's place (PATHEXT puts .EXE first
-          # regardless). build_win.py refuses any CUW_MODE but `full` and says
-          # so, and EVERY cell carries shard_count >= 1 (`sharding: 1` means
-          # one shard, not none), so without this filter every win-64 cell
-          # would get a compile-shard job that fails by design.
-          compile_jobs = [c for c in m if int(c.get("shard_count", 0)) > 0
-                          and not c["platform"].startswith("win")]
+          # EVERY cell carries shard_count >= 1 ("sharding: 1" means one
+          # shard, not none), so on linux-64 every cell gets a compile-shard
+          # job and then a link job that replays it.
+          #
+          # win-64 shards only where sharding actually buys something. It CAN
+          # now shard -- build_win.py drives ccache through torch's
+          # PYTORCH_NVCC hook rather than through the compiler seat, which is
+          # what the old "a .bat cannot take an .exe's place" note was really
+          # about (ninja calls CreateProcess directly, so PATHEXT never gets a
+          # say and only a real .exe can sit in the seat; PYTORCH_NVCC needs
+          # no seat at all). But a `sharding: 1` cell would then compile
+          # everything twice on the slowest runners in the fleet to prove a
+          # handoff it does not need, so the four win-64 packages that publish
+          # today keep the single monolithic job they already fit in.
+          def shards_here(c):
+              n = int(c.get("shard_count", 0))
+              return n > 1 if c["platform"].startswith("win") else n > 0
+          compile_jobs = [c for c in m if shards_here(c)]
           link_jobs    = [c for c in m if int(c.get("shard_count", 0)) == 0] + \
                          [dict(c, shard_index=0) for c in m if int(c.get("shard_count", 0)) > 0
                           and int(c.get("shard_index", 0)) == 1]
@@ -248,13 +257,16 @@ jobs:
           path: staging
       - uses: ./.github/actions/setup-conda-build
       - name: Restore shard caches
-        if: matrix.cell.shard_count != '0' && !startsWith(matrix.cell.platform, 'win')
+        if: matrix.cell.shard_count > 1 || !startsWith(matrix.cell.platform, 'win')
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: cache-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}-*
           path: shard-caches
       - name: Merge shard caches
-        if: matrix.cell.shard_count != '0' && !startsWith(matrix.cell.platform, 'win')
+        # Same predicate as the restore step above, and it must stay the same:
+        # restoring without merging leaves the link job with an empty cache and
+        # 72 misses, which reads exactly like a broken handoff.
+        if: matrix.cell.shard_count > 1 || !startsWith(matrix.cell.platform, 'win')
         run: |
           set -euo pipefail
           found=0
@@ -270,9 +282,10 @@ jobs:
       - name: Build
         env:
           # `link` asserts a zero-miss ccache replay, which presupposes shards
-          # populated one. win-64 has no shard jobs (see the matrix step), so
-          # there is no cache to replay and the mode is always `full`.
-          CUW_MODE: ${{ startsWith(matrix.cell.platform, 'win') && 'full' || (matrix.cell.shard_count != '0' && 'link' || 'full') }}
+          # populated one. The predicate is the matrix step's `shards_here`
+          # spelled in expression syntax: a win-64 cell that did not get
+          # compile-shard jobs has no cache to replay and must run `full`.
+          CUW_MODE: ${{ (matrix.cell.shard_count > 1 || !startsWith(matrix.cell.platform, 'win')) && 'link' || 'full' }}
           CUW_SHARD_COUNT: "0"
           CUW_SRC_TARBALL: ${{ github.workspace }}/staging/${{ matrix.cell.src_tarball }}
           # Family packages (torchvision/torchaudio) version with the torch

@@ -90,10 +90,6 @@ runs:
         rattler-build --version
         cuobjdump --version
 
-    # Linux only. The compile cache is what the shard/link handoff rides on,
-    # and that handoff is not ported to win-64 -- build_win.py refuses any
-    # CUW_MODE but `full` and says so. A Windows ccache here would be a
-    # dependency nothing consults.
     - name: Install ccache (pinned, static)
       if: runner.os == 'Linux'
       shell: bash
@@ -145,9 +141,55 @@ runs:
         # $PREFIX (rattler-build packages it).
         echo "CUW_WHEELHOUSE=$RUNNER_TEMP/wheelhouse" >> "$GITHUB_ENV"
 
-    # The same CUW_* handoff paths, minus everything ccache. build_win.py reads
-    # CUW_WHEELHOUSE for the one wheel that becomes both published outputs; it
-    # must sit outside both the work dir (rattler-build deletes it) and $PREFIX
+    # The Windows ccache, from the project's own release rather than
+    # conda-forge, for the same reasons the Linux pin exists: the version is
+    # part of the build's identity, and a solver is free to move it under us.
+    # Same 4.14, same >= 4 floor and the same reason for it -- ccache 3.x has
+    # no "cu" entry in its source-language table, so every `-x cu` TU is passed
+    # through UNCACHED and the shard lane would silently void itself.
+    #
+    # win-64 needs this now because the shard/link handoff IS ported: it does
+    # not go through the compiler seat (ninja hands its command lines to
+    # CreateProcess, which appends only ".exe", so nothing but a real
+    # executable can sit there) but through torch's own PYTORCH_NVCC hook,
+    # which build_win.py sets to the two-token command `<ccache> <real nvcc>`.
+    - name: Install ccache (pinned, Windows)
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        CC_VER=4.14
+        CC_SHA=2568347a697e103ca1b073981c704ad76fb2507d066c38dba038dd73399d968f
+        CC_ZIP="ccache-${CC_VER}-windows-x86_64.zip"
+        for attempt in 1 2 3; do
+          curl -fsSL --retry 3 --retry-connrefused --connect-timeout 15 \
+            -o "$RUNNER_TEMP/$CC_ZIP" \
+            "https://github.com/ccache/ccache/releases/download/v${CC_VER}/${CC_ZIP}" && break
+          echo "ccache fetch failed (attempt $attempt/3); retrying"
+          sleep $((attempt * 5))
+        done
+        GOT="$(sha256sum "$RUNNER_TEMP/$CC_ZIP" | cut -d' ' -f1)"
+        [ "$GOT" = "$CC_SHA" ] || {
+          echo "::error::ccache zip sha256 $GOT != pinned $CC_SHA"; exit 1; }
+        # python, not unzip or tar: git-bash ships neither a zip-capable tar nor
+        # a guaranteed unzip, and the runner image's python is already a
+        # dependency of the step below.
+        python -c "import sys,zipfile;zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
+          "$RUNNER_TEMP/$CC_ZIP" "$RUNNER_TEMP/ccache-dl"
+        mkdir -p "$RUNNER_TEMP/ccache-bin"
+        cp "$RUNNER_TEMP/ccache-dl/ccache-${CC_VER}-windows-x86_64/ccache.exe" \
+           "$RUNNER_TEMP/ccache-bin/ccache.exe"
+        echo "$RUNNER_TEMP/ccache-bin" >> "$GITHUB_PATH"
+        # The same mixed spelling every other CUW_* path on this lane uses, and
+        # for the same reason: the steps that read it are bash. build_win.py
+        # normalises it to a native Windows path before it goes anywhere near
+        # PYTORCH_NVCC, which is a raw CreateProcess command line.
+        echo "CUW_CCACHE_BIN=$RUNNER_TEMP/ccache-bin/ccache.exe" >> "$GITHUB_ENV"
+        "$RUNNER_TEMP/ccache-bin/ccache.exe" --version | head -1
+
+    # The same CUW_* handoff paths as Linux. build_win.py reads CUW_WHEELHOUSE
+    # for the one wheel that becomes both published outputs; it must sit
+    # outside both the work dir (rattler-build deletes it) and $PREFIX
     # (rattler-build packages it).
     - name: Prepare build paths (Windows)
       if: runner.os == 'Windows'
@@ -156,6 +198,16 @@ runs:
         set -euo pipefail
         mkdir -p "$RUNNER_TEMP/wheelhouse"
         echo "CUW_WHEELHOUSE=$RUNNER_TEMP/wheelhouse" >> "$GITHUB_ENV"
+        mkdir -p "$RUNNER_TEMP/ccache"
+        echo "CUW_CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+        # Same value as the Linux lane, and the same caveat: GITHUB_WORKSPACE
+        # is not actually an ancestor of the work dir on either platform, so
+        # nothing gets rewritten and this is inert. What makes the replay work
+        # is that --no-build-id gives the shard job and the link job the SAME
+        # work-dir and prefix paths, so there is nothing to absorb. Kept
+        # because it costs nothing and is the thing to reach for if a runner
+        # image ever moves one of them.
+        echo "CUW_CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         # The build step reads defaults/policy.yml host_msvc to pick this
         # cell's MSVC package, so the policy file stays the single source of
         # truth rather than the value being duplicated onto the matrix cell.

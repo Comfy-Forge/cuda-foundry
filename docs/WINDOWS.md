@@ -145,7 +145,7 @@ same *mechanism*:
 | `$ORIGIN`-relative RPATHs, no absolute or empty entries | No RPATH exists in PE. The property — "this binary finds its libraries without depending on the build machine's layout" — becomes: every DLL in the `.pyd`'s import table resolves to the conda prefix (`Library/bin`) or to torch's own `lib` directory, and nothing resolves to a build-time path. |
 | computed glibc floor | No glibc. The equivalent declaration is the `vc14_runtime` dependency, which conda-forge's MSVC `run_exports` supplies. |
 | no vendored `libtorch` | Same property, different evidence: no `torch_*.dll` / `c10*.dll` inside the artifact. |
-| no `nvcc.real` | The ccache seat-swap is a Linux mechanism; on Windows the compiler-cache story is `sccache`, which does not move the compiler aside. The gate still belongs there — cheap, and it fails closed. |
+| no `nvcc.real` | The ccache seat-swap is a Linux mechanism. win-64 caches through torch's `PYTORCH_NVCC` hook and never moves the real compiler, so there is nothing to leave behind. The gate still belongs there — cheap, and it fails closed. |
 | SASS arch check | Carries over: `cuobjdump` is cross-platform, and `cuda-wheels`' `resolve_windows_arch_list` already exists because the Windows arch list genuinely differs from x86 Linux. |
 
 ## Wheels on Windows vendor nothing
@@ -248,13 +248,7 @@ Two things found only by attempting the solve, both worth keeping:
   in it. Path separators are deliberately not rewritten; Windows takes forward
   slashes, and a blanket conversion would corrupt non-path values.
 
-**Sharding is not ported, on purpose.** `build_win.py` refuses any `CUW_MODE`
-but `full`, and says why: the Linux shard handoff rides on ccache occupying the
-nvcc seat, and a `.bat` cannot take an `.exe`'s place (PATHEXT puts `.EXE`
-first in any case). `flash-attn` is the only one of the five that shards, so it
-is Windows-blocked until that exists; the other four are not.
-
-The compile ledger is correspondingly different. With no wrapper in the nvcc
+**The compile ledger is different, and better.** With no wrapper in the nvcc
 seat there is nothing to record invocations, so L3 on win-64 reads ninja's own
 `.ninja_log` instead. That is arguably the better source: it is evidence about
 what was *built* rather than what was *invoked*, and a prebuilt binary copied
@@ -262,6 +256,121 @@ into the source tree appears in it not at all — which is precisely the case L3
 exists to catch. It does assume ninja was used, and fails loudly if extension
 modules exist with no compiled objects behind them.
 
+It also happens to be immune to the failure the Linux lane hit on torchaudio,
+where a cache HIT means the wrapper never runs and the link job's ledger comes
+out empty. ninja records an output whether or not ccache served it, so a win-64
+link job that replays all 72 of its nvcc translation units still writes all 73.
+
+## Sharding on Windows: there is no seat, and none is needed
+
+This file used to say sharding could not be ported because "a `.bat` cannot
+take an `.exe`'s place (PATHEXT puts `.EXE` first in any case)". The conclusion
+about the seat was right; the reason was not, and the reason is what mattered,
+because it made the seat look like the only door.
+
+*Measured*, from ninja's `src/subprocess-win32.cc` and pytorch v2.8.0's
+`torch/utils/cpp_extension.py`:
+
+- **ninja does not run its commands through `cmd.exe`.** It hands the command
+  line straight to `CreateProcess`, deliberately — "Do not prepend `cmd /c` on
+  Windows, this breaks command lines greater than 8,191 chars".
+  `CreateProcess` appends only `.exe` to an extensionless name, so **PATHEXT
+  never gets a say at all** and nothing but a real executable can occupy the
+  seat. That is a stronger statement than the old one, and it rules the `.bat`
+  out on every path rather than only where the caller spells the extension.
+- **the seat is not the only door.** `_write_ninja_file` reads `PYTORCH_NVCC`
+  and writes its value **verbatim** as the ninja `nvcc` variable
+  (`cpp_extension.py:2840`, with the upstream comment "user can set nvcc
+  compiler with ccache using the environment variable here"). ninja does no
+  tokenising of its own and `CreateProcess` takes the executable from the front
+  of the command line, so a **two-token** value is a launcher:
+
+      PYTORCH_NVCC = "<...>\ccache.exe <...>\nvcc.exe"
+
+  which is byte-for-byte the invocation the Linux wrapper ends up making,
+  `ccache <real nvcc> <args>`. No seat swap, no `nvcc.real` passenger in
+  `$PREFIX`, nothing to restore on exit, and nothing that depends on PATHEXT.
+
+ccache's own masquerade mode — copy `ccache.exe` to `nvcc.exe` and let it find
+the real compiler on PATH, skipping itself — also works and was the first
+candidate. It is not used, because it still needs the seat (or a PATH entry) to
+be reached at all, and because "which nvcc did it actually resolve?" then
+becomes a question the build answers at runtime instead of a path this repo
+writes down. `CMAKE_CUDA_COMPILER_LAUNCHER` was the third candidate and does
+not apply here at all: flash-attn is a `BuildExtension` + ninja build with no
+CMake anywhere.
+
+### What partitions the work, since nothing sits in the seat
+
+On Linux the wrapper is also where the shard partition happens: it sees one
+translation unit per invocation and emits an empty object for the ones outside
+its slice. A launcher cannot do that — it is `ccache`, not our code — so the
+win-64 partition happens one step earlier, on the **source files**, before
+`pip wheel` runs. Files outside this shard's slice are overwritten with a stub.
+
+That is a strictly weaker mechanism: it has to be *told* which files are
+translation units, which is `shard_sources` in `package.yml`. Two things make
+it safe to rely on:
+
+- **a mistake cannot reach an artifact.** A shard is never published; its only
+  output is a ccache directory. Anything the partition gets wrong is compiled
+  for real by the link job, whose lookup then misses, and the zero-miss gate
+  fails the build. The failure mode of a bad glob is a red link job, never a
+  wrong `.conda`.
+- **the declaration is checked against `.ninja_log`.** After the build,
+  `check_declared_tus()` requires the declared set to **equal** the set ninja
+  actually compiled. Declared-but-not-built and built-but-not-declared are both
+  hard errors, so a glob that matched too little, too much or nothing at all
+  cannot quietly describe a different build. flash-attn declares 73 entries
+  (`csrc/flash_attn/flash_api.cpp` plus `csrc/flash_attn/src/*.cu`) and ninja
+  compiles exactly 73.
+
+One asymmetry is deliberate. **C++ translation units are stubbed in every
+shard, never partitioned.** torch writes the literal string `cl` into the ninja
+compile rule — `compiler_name = "$cxx" if IS_HIP_EXTENSION else "cl"` — so
+`CXX` does not reach it and only a real `cl.exe` earlier on PATH could
+intercept it. Nothing here does, so a C++ TU is not cached, and a shard that
+compiled one would just be slower: flash-attn's single `flash_api.cpp` took
+**16 minutes** in run 34195844795. It is stubbed in every shard and compiled
+once, for real, in the link job.
+
+Stubbing it needs one piece of care that is not obvious. `PYBIND11_MODULE`
+expands to `PyInit_<TORCH_EXTENSION_NAME>`, and distutils passes
+`/EXPORT:PyInit_<name>` to `link.exe` regardless of what the sources contain —
+so a shard whose module TU is stubbed away has an unresolved export and dies at
+link with LNK2001, having compiled its slice perfectly. The stub therefore
+defines that symbol itself, pasting the `-DTORCH_EXTENSION_NAME` already on the
+compile line, `extern "C"` so the C++ TU does not mangle it.
+`LINK=/FORCE:UNRESOLVED` is set as a backstop for a package whose entry point
+is somewhere else — scoped to shard mode, so a published artifact can never be
+linked with it. (`/FORCE:UNRESOLVED` is documented as ignored when the *entry
+point* is unresolved; for a DLL that is the CRT's `_DllMainCRTStartup`, which
+is always resolved, so it does still apply to an export.)
+
+### What the zero-miss gate covers, stated exactly
+
+The link job asserts `cache_miss == 0` and, separately, that the number of
+ccache lookups **equals** the number of `cuda_compile` edges ninja ran. The
+second half is what stops the first from passing vacuously: without it a build
+where `PYTORCH_NVCC` never reached ninja would report zero misses because it
+reported zero of everything. `direct_cache_miss` is deliberately not counted as
+a miss — a TU that misses the direct lookup and then hits the preprocessed one
+is a hit — and `scripts/test_ninja_ledger.py` carries the control for that.
+
+The honest limit: the gate covers the **72 nvcc** translation units, not the
+one C++ one, because nothing caches that one. It is recompiled in the link job
+and it appears in the ledger like everything else.
+
+### What is NOT sharded on win-64, and why
+
+`sharding: 1` means one shard, not none, so on linux-64 every cell runs a
+compile-shard job and then a link job that replays it. win-64 shards only where
+`sharding > 1`. The four win-64 packages that publish today (`cc-torch`,
+`fused-ssim`, `torchvision`, `torchaudio`) fit in one job, and making them
+compile everything twice on the slowest runners in the fleet — to prove a
+handoff they do not need — would trade real wall clock for nothing. Their path
+is unchanged: `CUW_MODE=full`, no ccache, no `PYTORCH_NVCC`, byte-identical to
+what shipped.
 ## Scope for the first Windows cell
 
 py3.12 / CUDA 12.8 / torch 2.8.0 / win-64, the same five packages as linux-64,

@@ -55,6 +55,30 @@ jobs: 1
 nvcc_threads: 1
 sharding: 25  # owner call 2026-08-26 -- down from 40
 
+# ── which files the shard partition may divide (win-64 only) ──────────────
+# Linux does not read this. Its nvcc wrapper occupies the compiler seat and
+# sees every translation unit as it is invoked, so it can partition without
+# being told anything. Windows has no seat: ninja hands its command lines
+# straight to CreateProcess, which appends only ".exe" to an extensionless
+# name, so PATHEXT never gets a say and nothing but a real executable can sit
+# there. The win-64 partition therefore works on the SOURCE files, and this is
+# the list it is allowed to divide.
+#
+# It must name EVERY translation unit, C++ included -- build_win.py compares it
+# against .ninja_log after the build and fails if the two sets differ, so a
+# stale or partial list cannot quietly produce a smaller build. These 73
+# entries are exactly the `sources=[...]` of the CUDAExtension in setup.py
+# (v2.8.3): one flash_api.cpp and 72 .cu files.
+#
+# Only the .cu half is actually partitioned. flash_api.cpp is compiled by a
+# bare `cl` -- torch writes that literal into the ninja rule, so no launcher
+# can intercept it -- which means it is not cached and a shard compiling it
+# (~16 min, measured in run 34195844795) would buy nothing. It is stubbed in
+# every shard and compiled for real once, in the link job.
+shard_sources:
+  - "csrc/flash_attn/flash_api.cpp"
+  - "csrc/flash_attn/src/*.cu"
+
 nvcc_flags: -diag-suppress=221
 
 # ── dependencies ──────────────────────────────────────────────────────────

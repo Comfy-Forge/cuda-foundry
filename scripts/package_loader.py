@@ -107,6 +107,42 @@ def _check_parallelism_declared(cfg: dict, pkg_dir: Path) -> None:
                 f"an integer >= 1; the value is used verbatim.")
 
 
+def _check_shard_sources(cfg: dict, pkg_dir: Path) -> None:
+    """A package that shards must say WHICH files may be divided, and only then.
+
+    Linux needs no such declaration: its nvcc wrapper sits in the compiler seat
+    and sees each translation unit as it is invoked. Windows has no seat --
+    ninja hands its command lines to CreateProcess, which appends only `.exe`,
+    so PATHEXT never applies and nothing but a real executable can occupy it --
+    so the win-64 partition works on the SOURCE files and has to be told which
+    ones are translation units.
+
+    Required rather than defaulted, for the reason the parallelism check gives:
+    a wrong-but-plausible default here is a shard that compiles a subset of its
+    own slice and still exits 0. build_win.py checks the declaration against
+    .ninja_log after the build, so a wrong list fails loudly -- but only if
+    there IS one.
+    """
+    shards = int(cfg.get("sharding") or 1)
+    declared = cfg.get("shard_sources") or []
+    if shards > 1 and not declared:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml sets sharding: {shards} but "
+            f"declares no shard_sources. win-64 partitions on source files and "
+            f"cannot infer the translation unit list; list the globs (relative "
+            f"to the source root, one entry per pattern, EVERY translation "
+            f"unit including the C++ ones).")
+    if declared and shards <= 1:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml declares shard_sources but "
+            f"sharding is {shards} -- nothing reads it. Either shard, or drop "
+            f"the list rather than leaving a declaration that does nothing.")
+    if declared and not isinstance(declared, list):
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml shard_sources must be a list "
+            f"of glob patterns, got {type(declared).__name__}.")
+
+
 def _check_dependencies_declared(cfg: dict, pkg_dir: Path) -> None:
     """`run_deps` is mandatory -- the inverse of the wheel farm's rule.
 
@@ -275,6 +311,7 @@ def load_package(pkg_dir: Path) -> dict:
     _check_pre_build_not_redactable(cfg, pkg_dir)
     _check_parallelism_declared(cfg, pkg_dir)
     _check_dependencies_declared(cfg, pkg_dir)
+    _check_shard_sources(cfg, pkg_dir)
     _check_force_source_build(cfg, pkg_dir)
     _check_carry(cfg, pkg_dir)
 

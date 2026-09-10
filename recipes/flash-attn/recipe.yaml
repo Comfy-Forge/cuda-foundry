@@ -62,6 +62,16 @@ build:
       CUW_LEDGER: ${{ env.get("CUW_LEDGER", default="/tmp/cuw/ledger.txt") }}
       CUW_RSS_LOG: ${{ env.get("CUW_RSS_LOG", default="/tmp/cuw/rss.log") }}
       CUW_CCACHE_BIN: ${{ env.get("CUW_CCACHE_BIN", default="ccache") }}
+      # The translation units the win-64 shard partition is allowed to divide,
+      # from package.yml `shard_sources`. Linux does not read this: its wrapper
+      # sits in the nvcc seat and sees the real TU list one invocation at a
+      # time, so it needs nothing declared. Windows has no seat (ninja calls
+      # CreateProcess directly, which never consults PATHEXT), so the partition
+      # happens on the SOURCE files instead and has to be told which they are.
+      # build_win.py checks the declaration against .ninja_log afterwards and
+      # fails if the two sets differ, so this cannot quietly describe the
+      # wrong build.
+      CUW_SHARD_SOURCES: "csrc/flash_attn/flash_api.cpp;csrc/flash_attn/src/*.cu"
       # Where the ONE compile leaves its wheel. Outside the work dir and
       # outside $PREFIX, because rattler-build deletes the first and packages
       # the second -- the caller collects the wheel here after the build and
@@ -75,8 +85,13 @@ build:
       CCACHE_COMPILERCHECK: content
       CCACHE_SLOPPINESS: include_file_ctime,include_file_mtime,time_macros,locale
       CCACHE_MAXSIZE: "0"
-      # torch >= 2.12 knob: keeps nvcc's dependency generation off the cached
-      # command line. Older torch ignores it; the wrapper writes stub depfiles.
+      # Keeps nvcc's dependency generation off the cached command line. Not a
+      # future knob: pytorch v2.8.0 already gates on it
+      # (cpp_extension.py:2903, `os.getenv(..., '0') != '1'`), and the win-64
+      # flash-attn compile lines in run 34195844795 carry no
+      # --generate-dependencies-with-compile, which is that gate firing. It
+      # matters most on Windows, where that flag would put $out.d -- a path --
+      # into every nvcc command line ccache hashes.
       TORCH_EXTENSION_SKIP_NVCC_GEN_DEPENDENCIES: "1"
       CUW_RUN_ID: ${{ env.get("GITHUB_RUN_ID", default="local") }}
       CUW_RUN_URL: ${{ env.get("CUW_RUN_URL", default="local") }}

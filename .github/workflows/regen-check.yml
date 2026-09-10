@@ -30,6 +30,22 @@ jobs:
       - name: Recipes match their sources
         run: python scripts/generate_recipes.py --check
 
+  ledger-and-partition:
+    # The win-64 ledger parser and the win-64 shard partition, both of which
+    # fail SILENTLY when they are wrong: a ledger that maps zero outputs still
+    # writes a file and still passes verify_conda's non-empty check by being
+    # skipped, and a partition that stubs everything still exits 0 having
+    # compiled nothing. Every check in here has a negative control for exactly
+    # that reason. It runs on ubuntu because none of it needs Windows -- it is
+    # parsing and arithmetic over fixtures.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: python scripts/test_ninja_ledger.py
+
   guarantee-lint:
     # The from-source guarantee's silent failure modes: --allow-network
     # appearing, the compile no longer running under nonet.py, the guard
