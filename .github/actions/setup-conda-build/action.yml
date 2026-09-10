@@ -168,7 +168,13 @@ runs:
           echo "ccache fetch failed (attempt $attempt/3); retrying"
           sleep $((attempt * 5))
         done
-        GOT="$(sha256sum "$RUNNER_TEMP/$CC_ZIP" | cut -d' ' -f1)"
+        # Hashed from STDIN, with no filename on the command line. Given one,
+        # GNU coreutils escapes any backslash in it by prefixing the whole
+        # output line with a backslash -- and RUNNER_TEMP is D:\a\_temp, so
+        # the digest came back as "\2568347a..." and never matched the pin
+        # (run 34535550849). A checksum check that cannot pass is the same
+        # class of defect as one that cannot fail.
+        GOT="$(sha256sum < "$RUNNER_TEMP/$CC_ZIP" | cut -d' ' -f1)"
         [ "$GOT" = "$CC_SHA" ] || {
           echo "::error::ccache zip sha256 $GOT != pinned $CC_SHA"; exit 1; }
         # python, not unzip or tar: git-bash ships neither a zip-capable tar nor
