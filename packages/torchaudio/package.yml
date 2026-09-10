@@ -45,8 +45,19 @@ summary: Audio and signal processing primitives for PyTorch, compiled against th
 
 links_torch: true
 
-# 4 small .cu. Measured at 3m08s on a 4-vCPU runner, and most of that is
-# environment solve/download rather than compile (3.5 CPU-minutes total).
+# CORRECTION (2026-09-10). This block used to read "4 small .cu. Measured at
+# 3m08s on a 4-vCPU runner, and most of that is environment solve/download
+# rather than compile". Both halves are wrong and the shard job says so: 46
+# translation units (6 .cu and 40 C/C++, once sox and ffmpeg are really
+# built), 17.5 minutes of compiling on a 4-vCPU runner in run 34195839332.
+#
+# `jobs` also does nothing here, and that is a property of the upstream rather
+# than of the value: torchaudio is the one CMake-driven package, and
+# tools/setup_helpers/extension.py reads CMAKE_BUILD_PARALLEL_LEVEL and never
+# MAX_JOBS, so its `cmake --build .` runs SERIALLY whatever this says. Left at
+# 3 because 3 is what it should use once something sets that variable -- the
+# memory reasoning behind the number is unchanged -- but nothing today reads
+# it, and a comment claiming otherwise is how a tuning knob stays broken.
 jobs: 3
 nvcc_threads: 1
 
