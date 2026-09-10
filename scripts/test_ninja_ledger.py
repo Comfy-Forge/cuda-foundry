@@ -130,6 +130,14 @@ def tree_checks() -> list:
         # live beside the sources must not be touched.
         (root / "csrc" / "src" / "launch.h").write_text("#pragma once\n")
 
+        caught = False
+        try:
+            bw.partition_sources(root, patterns, 30, 40)
+        except SystemExit:
+            caught = True
+        _check(failures, caught,
+               "a shard with an empty slice is REFUSED, not silently run")
+
         mine = bw.partition_sources(root, patterns, 0, 3)
         _check(failures, all(q.suffix == ".cu" for q in mine),
                "the C++ TU is never this shard's -- nothing caches it")
@@ -214,25 +222,32 @@ def partition_checks() -> list:
     failures: list = []
     files = [f"csrc/src/f{i}.cu" for i in range(72)]
 
-    for count in (1, 3, 25):
-        owners = [[f for f in files if bw.owns(f, i, count)] for i in range(count)]
+    for count in (1, 3, 25, 40):
+        owners = [bw.slice_for(files, i, count) for i in range(count)]
         flat = [f for slice_ in owners for f in slice_]
         _check(failures, sorted(flat) == sorted(files),
                f"{count} shard(s): every TU is owned by exactly one shard "
                f"({len(flat)} of {len(files)})")
         _check(failures, len(set(flat)) == len(flat),
                f"{count} shard(s): no TU is owned twice")
+        # Balance, which is the whole reason this is a stride and not a hash.
+        # md5-modulo over these same 72 files at 25 shards left one shard with
+        # nothing and another with seven (run 34535747572); the critical path
+        # is the largest slice and an empty slice is a wasted Windows runner.
+        sizes = [len(o) for o in owners]
+        _check(failures, max(sizes) - min(sizes) <= 1,
+               f"{count} shard(s): slices differ by at most one "
+               f"(min {min(sizes)}, max {max(sizes)})")
+        if count <= len(files):
+            _check(failures, min(sizes) > 0,
+                   f"{count} shard(s): no shard draws an empty slice")
 
-    # Stable: the same path must land in the same shard in every job, or the
-    # slices disagree and the link job misses whatever fell between them.
-    _check(failures,
-           all(bw.owns("csrc/src/f7.cu", 3, 25) == bw.owns("csrc/src/f7.cu", 3, 25)
-               for _ in range(3)),
-           "the partition is a pure function of the path")
-    # The negative control for the off-by-one that build.sh documents: a
-    # 1-based index would leave shard 0 with a slice nothing else has.
-    _check(failures, bw.owns("csrc/src/f0.cu", 0, 1),
+    _check(failures, bw.slice_for(files, 0, 1) == files,
            "with one shard, index 0 owns everything")
+    # More shards than TUs is the one case where a slice can legitimately be
+    # empty, and partition_sources refuses it rather than running the job.
+    _check(failures, bw.slice_for(files, 90, 100) == [],
+           "a shard beyond the TU count draws nothing (refused upstream)")
     return failures
 
 

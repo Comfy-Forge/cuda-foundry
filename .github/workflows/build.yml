@@ -232,7 +232,21 @@ jobs:
             --output-dir "$RUNNER_TEMP/out" --test skip --no-build-id \
             -c https://comfy-forge.github.io/conda-torch -c conda-forge
       - name: Package shard cache
-        run: tar -czf "$RUNNER_TEMP/ccache.tar.gz" -C "$CUW_CCACHE_DIR" .
+        run: |
+          set -euo pipefail
+          # git-bash's tar is GNU tar, which reads `D:\a\_temp/x.tar.gz` as a
+          # REMOTE archive -- host `D`, path the rest -- and tries to rsh to it:
+          # "tar (child): Cannot connect to D: resolve failed" (run
+          # 34535747572, every win-64 shard, after a build that had already
+          # succeeded). cygpath is the conversion; on Linux there is none and
+          # the values pass through untouched.
+          ARCHIVE="$RUNNER_TEMP/ccache.tar.gz"
+          CCDIR="$CUW_CCACHE_DIR"
+          if command -v cygpath >/dev/null 2>&1; then
+            ARCHIVE="$(cygpath -u "$RUNNER_TEMP")/ccache.tar.gz"
+            CCDIR="$(cygpath -u "$CUW_CCACHE_DIR")"
+          fi
+          tar -czf "$ARCHIVE" -C "$CCDIR" .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cache-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}-${{ matrix.cell.shard_index }}
@@ -269,10 +283,15 @@ jobs:
         if: matrix.cell.shard_count > 1 || !startsWith(matrix.cell.platform, 'win')
         run: |
           set -euo pipefail
+          # Same cygpath conversion as the shard's "Package shard cache" step,
+          # and for the same GNU-tar reason: a `D:\...` destination is read as
+          # a remote host.
+          CCDIR="$CUW_CCACHE_DIR"
+          command -v cygpath >/dev/null 2>&1 && CCDIR="$(cygpath -u "$CUW_CCACHE_DIR")"
           found=0
           for t in shard-caches/*/ccache.tar.gz; do
             [ -f "$t" ] || continue
-            found=$((found+1)); tar -xzf "$t" -C "$CUW_CCACHE_DIR"
+            found=$((found+1)); tar -xzf "$t" -C "$CCDIR"
           done
           [ "$found" -gt 0 ] || { echo "::error::no shard caches restored"; exit 1; }
           echo "merged $found shard cache(s)"

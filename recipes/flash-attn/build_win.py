@@ -25,7 +25,6 @@ See docs/WINDOWS.md for the measurements behind the checks below.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import shutil
@@ -579,30 +578,40 @@ def declared_tus(src_dir: Path, patterns: list) -> list:
     return found
 
 
-def owns(rel: str, index0: int, count: int) -> bool:
-    """Is this translation unit this shard's?
+def slice_for(files: list, index0: int, count: int) -> list:
+    """This shard's slice: a stride over the sorted list, not a hash of it.
 
-    A hash of the path relative to SRC_DIR, exactly as stateless as the Linux
-    wrapper's md5-of-realpath and for the same reason -- but taken on the
-    RELATIVE path, because every shard has to reach the same answer and only
-    the relative half is guaranteed identical between two runners.
+    The Linux wrapper has to hash, because it is stateless -- it sees one
+    translation unit per invocation and cannot know a global index. Here the
+    whole list is in hand and sorted, so the obviously better thing is
+    available: deal the files round-robin. Balance is the point, and it is not
+    cosmetic. Measured on the first win-64 run (34535747572), md5-modulo over
+    72 files and 25 shards left shard 21 with an EMPTY slice -- a whole Windows
+    job that compiled nothing -- while the critical path was set by whichever
+    shard drew seven. A stride gives every shard 2 or 3 and no shard nothing.
     """
-    h = int(hashlib.md5(rel.encode("utf8")).hexdigest()[:8], 16)
-    return h % count == index0
+    return files[index0::count]
 
 
 def partition_sources(src_dir: Path, patterns: list, index0: int, count: int) -> list:
     """Stub out every declared TU that is not this shard's. Returns the slice."""
     files = declared_tus(src_dir, patterns)
-    mine, stub = [], []
-    for q in files:
-        rel = _norm(str(q.relative_to(src_dir)))
-        # C++ TUs are stubbed in every shard: they are compiled by `cl`, which
-        # nothing here caches, so a shard that built one would just be slower.
-        if q.suffix.lower() != ".cu" or not owns(rel, index0, count):
-            stub.append(q)
-        else:
-            mine.append(q)
+    # Sorted on the path relative to SRC_DIR, which is the one spelling every
+    # shard is guaranteed to agree on. Two shards that ordered this list
+    # differently would overlap on some files and skip others, and the skipped
+    # ones would surface only as link-job misses.
+    cu = sorted((q for q in files if q.suffix.lower() == ".cu"),
+                key=lambda q: _norm(str(q.relative_to(src_dir))))
+    mine = slice_for(cu, index0, count)
+    if not mine:
+        die(f"shard {index0 + 1}/{count} has an empty slice: {len(cu)} nvcc "
+            f"translation unit(s) cannot be dealt to {count} shards. Lower "
+            f"`sharding` in package.yml -- a shard with nothing to compile "
+            f"contributes nothing to the link job and costs a whole runner.")
+    minekeys = {_norm(str(q)) for q in mine}
+    # C++ TUs are stubbed in every shard: they are compiled by `cl`, which
+    # nothing here caches, so a shard that built one would just be slower.
+    stub = [q for q in files if _norm(str(q)) not in minekeys]
     pyinit_done = False
     for q in stub:
         text = q.read_text(encoding="utf8", errors="replace")
@@ -725,7 +734,7 @@ def main() -> int:
         # build.sh converts in the same place and for the same reason: without
         # it the comparison never matches, every TU is stubbed, and the build
         # still succeeds -- having compiled nothing.
-        partition_sources(src_dir, patterns, shard_index - 1, shard_count)
+        my_slice = partition_sources(src_dir, patterns, shard_index - 1, shard_count)
         # A shard whose real sources are all stubbed still has to LINK, and
         # /EXPORT:PyInit_<name> is not the only symbol that can go missing --
         # a package whose entry point is not in a PYBIND11_MODULE C++ file
@@ -778,17 +787,19 @@ def main() -> int:
                 f"handoff covers less than it claims.")
 
     if mode == "shard":
-        # ZERO tolerance in the LINK job is what this exists to make possible,
-        # so a shard that stored nothing is a defect even though it exits 0
-        # today: it would ship an empty slice and the link job would recompile
-        # it -- as one miss, indistinguishable from a wrong-architecture shard.
-        if misses == 0:
-            die(f"shard {shard_index}/{shard_count} stored nothing in the cache "
-                f"({hits} hit(s), 0 miss(es)). Either the partition stubbed "
-                f"every translation unit, or the cache was already populated -- "
-                f"both mean this shard contributes nothing to the link job.")
-        log(f"shard {shard_index}/{shard_count} done; cache populated. "
-            f"Exiting before install.")
+        # Counted against the SLICE, not against zero. Every stubbed TU is a
+        # ccache miss too -- it is a real compile of a real (empty) file -- so
+        # "misses > 0" is true in a shard that compiled nothing of substance
+        # and cannot fail. Run 34535747572 is the evidence: shard 21 drew an
+        # empty slice and still reported 72 misses. The slice size is now the
+        # denominator, and an empty slice is refused in partition_sources.
+        if misses < len(my_slice):
+            die(f"shard {shard_index}/{shard_count} owns {len(my_slice)} "
+                f"translation unit(s) but ccache stored only {misses}. Some of "
+                f"this shard's slice never reached the cache, and the link job "
+                f"would recompile it as a miss.")
+        log(f"shard {shard_index}/{shard_count} done; {len(my_slice)} "
+            f"translation unit(s) stored. Exiting before install.")
         return 0
 
     if mode == "link":
