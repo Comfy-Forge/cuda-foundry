@@ -185,6 +185,51 @@ Two traps found while proving it: rattler-build hands the build script a
 files**, so changing the build script left the key identical and restored a
 stale tree. Both need the script's own hash to ride in the build command.
 
+### Where a package's own build system owns the cache
+
+Everything above assumes the nvcc wrapper is the outermost thing on the compile
+line. For the one CMake-driven package it is not, and the two consequences are
+worth stating because the next CMake package hits both (measured on torchaudio,
+run 34195839332).
+
+torchaudio's own `CMakeLists.txt` does `find_program(CCACHE_PROGRAM ccache)` and
+sets `CMAKE_{C,CXX,CUDA}_COMPILER_LAUNCHER`. That is *load-bearing and welcome*
+— the wrapper only ever occupies the **nvcc** seat, so without it the 40 C++
+TUs of a 46-TU build would not be cached at all and sharding would buy nothing.
+But it puts ccache **outside** the wrapper, and:
+
+- **cmake's `try_compile` probes are uncacheable by construction.** They reach
+  ccache through the nvcc seat, and cmake writes each probe's source into
+  `CMakeFiles/CMakeScratch/TryCompile-<6 random chars>/`. ccache hashes the
+  source **path** — `### inputfile` in the direct hash, and the `# 1 "…"` line
+  markers in the preprocessed one — so both lookups miss on every configure,
+  and no ccache setting absorbs it: `CCACHE_BASEDIR` rewrites a prefix and the
+  randomness is not in the prefix. Two of torchaudio's three CUDA probes are
+  like this, `OpenMPTryFlag.cu` and `OpenMPCheckVersion.cu`, and they are the
+  whole of "2 ccache miss(es) of 49": all 46 real translation units replayed,
+  and so did the third probe, `CMakeCUDACompilerABI.cu`, whose source has a
+  fixed path in the cmake install (the random `cmTC_…` name reaches it only
+  through `-MT`/`-MF`/`-o`, none of which ccache hashes). The wrapper now sends
+  a recognised probe straight to the real compiler, so ccache's counters are
+  exactly the package's TUs and **zero stays reachable**. The alternative —
+  tolerating two misses — is precisely what a ratio cannot distinguish from two
+  shards built for the wrong architecture, and the bypass removes the cause
+  instead of widening the gate. Only a positive probe match bypasses; anything
+  the patterns fail to classify still goes through ccache and still shows up as
+  a miss.
+- **on a cache hit the wrapper never runs, so the link job's ledger is empty.**
+  Where the wrapper is outermost (flash-attn) it records each TU on its way to
+  a hit and the link job's ledger is full — 72 entries for 72 hits. Where it is
+  not, the only record of what produced those objects is the **shard's**
+  ledger, so it now travels with the cache and L3 reads the union. Without
+  that, verify_conda's "compile ledger is non-empty" would fail an artifact
+  that was in fact compiled entirely from source in that very run.
+
+One ccache mechanic makes the nesting harmless rather than double-counted:
+ccache disables itself when it is the one invoking the compiler, so the
+wrapper's own `ccache` call inside a launcher-driven compile reports
+`Result: disabled` and never becomes a second lookup.
+
 ## Known per-package facts, carried forward
 
 - **ninja is required in `build:`.** Without it torch's `BuildExtension` falls

@@ -29,8 +29,36 @@ done
 # try_compile TUs get linked into probe executables, and a stubbed one has no
 # main, so configure fails with "Detecting CUDA compiler ABI info - failed".
 # Probes cost seconds; when in doubt, compile.
+#
+# They must not be CACHED either, and that is a separate fact with its own
+# measurement (torchaudio, run 34195839332, reproduced locally under
+# CCACHE_DEBUG). cmake writes a try_compile's source into
+# CMakeFiles/CMakeScratch/TryCompile-<6 random chars>/, and ccache hashes the
+# SOURCE PATH -- it shows up as `### inputfile` in the direct-mode hash input
+# and again in the `# 1 "..."` line markers of the preprocessed output, so
+# both lookups miss. The name is different in the shard job and the link job
+# BY CONSTRUCTION, and no ccache setting can absorb it: CCACHE_BASEDIR only
+# rewrites a prefix, and the random part is not in the prefix.
+#
+# Left in the cache they are permanent misses. Exactly two of torchaudio's
+# three CUDA probes are like this -- OpenMPTryFlag.cu and OpenMPCheckVersion.cu
+# -- which is the whole of "2 ccache miss(es) of 49"; all 46 real translation
+# units replayed, and so did the third probe, CMakeCUDACompilerABI.cu, whose
+# source has a fixed path in the cmake install (`-MT`/`-MF`/`-o` carry the
+# random cmTC_ name and ccache hashes none of them).
+#
+# Sending a probe straight to the real compiler is what makes zero misses
+# achievable and keeps the gate meaning what it says -- rather than relaxing it
+# to a ratio, which could not tell two unhashable probes from two shards built
+# for the wrong architecture.
+#
+# Only a POSITIVE probe match bypasses the cache. Anything the patterns do not
+# recognise still goes through ccache, so a translation unit this wrapper fails
+# to classify shows up as a miss instead of quietly recompiling behind the gate.
+probe=0
 case "$src|$out" in
-  *CMakeScratch*|*CompilerId*|*CMakeTmp*|*cmTC_*|*meson-private*|*conftest*) src="" ;;
+  *CMakeScratch*|*CompilerId*|*CMakeTmp*|*cmTC_*|*meson-private*|*conftest*)
+    probe=1; src="" ;;
 esac
 
 if [ -n "$src" ] && [ -n "$out" ] && [ "${CUW_PARTITION:-0}" = "1" ] && [ "${CUW_SHARD_COUNT:-0}" != "0" ]; then
@@ -58,7 +86,7 @@ fi
 [ -n "$src" ] && [ -n "${CUW_LEDGER:-}" ] && printf '%s\n' "$src" >> "$CUW_LEDGER"
 
 REAL="${CUW_REAL_NVCC:-nvcc.real}"
-if [ -n "${CUW_CCACHE_BIN:-}" ]; then
+if [ -n "${CUW_CCACHE_BIN:-}" ] && [ "$probe" -eq 0 ]; then
   set -- "$REAL" "$@"
   if [ -n "${CUW_RSS_LOG:-}" ] && command -v /usr/bin/time >/dev/null 2>&1; then
     tmp=$(mktemp 2>/dev/null) || tmp=""

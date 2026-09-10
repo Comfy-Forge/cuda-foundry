@@ -247,10 +247,32 @@ jobs:
             CCDIR="$(cygpath -u "$CUW_CCACHE_DIR")"
           fi
           tar -czf "$ARCHIVE" -C "$CCDIR" .
+          # The compile ledger travels WITH the cache, because the link job
+          # replays these translation units and therefore compiles none of
+          # them itself. Where the nvcc wrapper is the outermost thing in the
+          # compile line that does not matter -- it records the TU on its way
+          # to a ccache hit -- but a package whose own build system puts
+          # ccache OUTSIDE the wrapper never reaches the wrapper on a hit, and
+          # the link job's ledger is then empty. torchaudio is that package:
+          # its CMakeLists sets CMAKE_{C,CXX,CUDA}_COMPILER_LAUNCHER=ccache, so
+          # its link job compiled nothing, recorded nothing, and would have
+          # failed verify_conda's L3 gate ("compile ledger is non-empty") on an
+          # artifact that was in fact compiled entirely from source in this
+          # very run -- by the shard job, whose record was being thrown away.
+          #
+          # Same cygpath treatment as the archive above, for the same reason:
+          # on git-bash $RUNNER_TEMP is a `D:\a\_temp` path.
+          LEDGER_OUT="$RUNNER_TEMP/shard-ledger.txt"
+          if command -v cygpath >/dev/null 2>&1; then
+            LEDGER_OUT="$(cygpath -u "$RUNNER_TEMP")/shard-ledger.txt"
+          fi
+          cp "$CUW_LEDGER" "$LEDGER_OUT" 2>/dev/null || : > "$LEDGER_OUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cache-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}-${{ matrix.cell.shard_index }}
-          path: ${{ runner.temp }}/ccache.tar.gz
+          path: |
+            ${{ runner.temp }}/ccache.tar.gz
+            ${{ runner.temp }}/shard-ledger.txt
           retention-days: 3
 
   link:
@@ -295,9 +317,24 @@ jobs:
           done
           [ "$found" -gt 0 ] || { echo "::error::no shard caches restored"; exit 1; }
           echo "merged $found shard cache(s)"
+          # And the shards' compile ledgers, which are the only record of what
+          # produced the objects this job is about to replay. See the
+          # "Package shard cache" step for why the link job cannot always
+          # write its own.
+          : > "$RUNNER_TEMP/cuw-ledger-shards.txt"
+          for l in shard-caches/*/shard-ledger.txt; do
+            # `if`, not `[ -f ] &&`: under `set -e` a false test as the last
+            # command of the last iteration makes the whole loop exit non-zero
+            # and takes the step with it.
+            if [ -f "$l" ]; then cat "$l" >> "$RUNNER_TEMP/cuw-ledger-shards.txt"; fi
+          done
+          echo "carried $(wc -l < "$RUNNER_TEMP/cuw-ledger-shards.txt") shard ledger entr(ies)"
           # The tarballs carry each shard's stats files, which would pollute the
           # link job's zero-miss assert with the shards' own compile misses.
-          "${CUW_CCACHE_BIN:-ccache}" -z
+          # CCACHE_DIR explicitly: this step's environment carries CUW_* names
+          # only, so a bare `ccache -z` zeroes the default cache in $HOME and
+          # leaves the merged one exactly as it was.
+          CCACHE_DIR="$CUW_CCACHE_DIR" "${CUW_CCACHE_BIN:-ccache}" -z
       - name: Build
         env:
           # `link` asserts a zero-miss ccache replay, which presupposes shards
@@ -395,7 +432,11 @@ jobs:
           PY
           echo "## compile ledger"
           echo '```'
+          # This job's own ledger, plus whatever the shards carried in. For a
+          # sharded cell the second is the whole record: the link job replays
+          # every TU from cache and so compiles, and records, nothing.
           cat "$CUW_LEDGER" 2>/dev/null || echo "(no ledger at $CUW_LEDGER)"
+          cat "$RUNNER_TEMP/cuw-ledger-shards.txt" 2>/dev/null || true
           echo '```'
 
       - name: Verify artifact
@@ -410,12 +451,22 @@ jobs:
           shopt -s nullglob
           files=("$RUNNER_TEMP"/out/*/*.conda)
           [ ${#files[@]} -gt 0 ] || { echo "::error::no .conda produced"; exit 1; }
+          # L3 reads THIS run's whole compile record, not just this job's. A
+          # sharded cell compiles in the shard jobs and replays here, so its
+          # link-job ledger is empty whenever the package's build system puts
+          # ccache outside the nvcc wrapper (torchaudio does). Concatenating
+          # them is not a loosening: the shard ledgers were written by the same
+          # wrapper, in the same run, for the same cell, and every entry still
+          # has to satisfy the "came from this build's work tree" assertion.
+          LEDGER="$RUNNER_TEMP/cuw-ledger-all.txt"
+          cat "$CUW_LEDGER" "$RUNNER_TEMP/cuw-ledger-shards.txt" 2>/dev/null \
+            | sort -u > "$LEDGER" || true
           if [ -f tools/verify_conda.py ]; then
             # --ledger and --expect-arch are passed, so L3 and the SASS census
             # actually run. Without --ledger the ledger branch is skipped
             # entirely, which is how a documented publish gate sat dead.
             python tools/verify_conda.py "${files[@]}" \
-              --ledger "$CUW_LEDGER" \
+              --ledger "$LEDGER" \
               --expect-arch "$CELL_ARCH"
           else
             echo "::warning::tools/verify_conda.py not present yet — artifact gate skipped"
