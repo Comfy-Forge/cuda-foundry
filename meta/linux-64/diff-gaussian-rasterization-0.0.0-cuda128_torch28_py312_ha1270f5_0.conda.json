@@ -1,0 +1,44 @@
+{
+ "arch": "x86_64",
+ "build": "cuda128_torch28_py312_ha1270f5_0",
+ "build_number": 0,
+ "depends": [
+  "python",
+  "__cuda",
+  "pytorch 2.8.* cuda128_*",
+  "__glibc >=2.28,<3.0.a0",
+  "libstdcxx >=13",
+  "libgcc >=13",
+  "libcusolver >=11.7.5.82,<12.0a0",
+  "cuda-cudart >=12.9.79,<13.0a0",
+  "libcufft >=11.4.1.4,<12.0a0",
+  "pytorch >=2.8.0,<2.9.0a0",
+  "libtorch >=2.8.0,<2.9.0a0",
+  "python_abi 3.12.* *_cp312",
+  "libcusparse >=12.5.10.65,<13.0a0",
+  "libcurand >=10.3.10.19,<11.0a0",
+  "libcublas >=12.9.2.10,<13.0a0"
+ ],
+ "license": "LicenseRef-Gaussian-Splatting-License",
+ "md5": "9131c08895fcc51579ce8b5bbf3c8223",
+ "name": "diff-gaussian-rasterization",
+ "platform": "linux",
+ "provenance": {
+  "arch_list": "7.0 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "12.8",
+  "prebuilt_wheel_used": false,
+  "run_id": "34584955839",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34584955839",
+  "source_rev": "8829d14f814fccdaf840b7b0f3021a616583c0a1",
+  "torch_build": "cuda128_repack_py312_h2bed46fa_7"
+ },
+ "purls": [
+  "pkg:pypi/diff_gaussian_rasterization@0.0.0"
+ ],
+ "sha256": "641ef6a716fb58b1646c56f2cffe85e2d2ef459aff0a540e805dfef12b516923",
+ "size": 1518843,
+ "subdir": "linux-64",
+ "timestamp": 1789119662462,
+ "version": "0.0.0"
+}
