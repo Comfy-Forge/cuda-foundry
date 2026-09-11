@@ -9,9 +9,24 @@ import_name: natten
 version: "0.21.6"
 
 # MIT, read from the repo's own LICENSE at the pinned rev.
-license: MIT
+license: MIT AND BSD-3-Clause
 homepage: https://github.com/SHI-Labs/NATTEN
-summary: NATTEN, neighborhood attention with CUTLASS FNA kernels, compiled against the conda-torch channel
+summary: NATTEN, neighborhood attention with CUTLASS FNA kernels, compiled against the conda-torch channel. linux-64 carries sm_100 (Blackwell datacentre) from CUDA 12.8; win-64 does not, at the same version and build number, because MSVC cannot parse the sm_100 FNA backward header (arch_override.yml)
+repository: https://github.com/SHI-Labs/NATTEN
+documentation: https://natten.org
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# MIT LICENSE, the NOTICE that points at CUTLASS, and CUTLASS's BSD-3 --
+# the FNA kernels are CUTLASS instantiations.
+license_files:
+  - LICENSE
+  - NOTICE
+  - third_party/cutlass/LICENSE.txt
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (SHI-Labs/NATTEN, Ali Hassani).
+pypi_project: natten
 
 source_repo: SHI-Labs/NATTEN
 # v0.21.6, dereferenced to the commit (git ls-remote --tags, 2026-09-11).
@@ -68,8 +83,7 @@ run_deps: []
 
 # csrc includes the CUDA runtime and torch; CUTLASS is the vendored
 # submodule. libnatten links cudart (cmake target_link_libraries).
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 # setup.py shells out to cmake (checks `cmake --version` at build time) and,
 # on Windows, asks for the Ninja generator; on Linux it uses the default
