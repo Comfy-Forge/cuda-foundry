@@ -47,7 +47,7 @@ import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
-from patch_lib import (fix_inplace_exclusive_sum_in_files, require,  # noqa: E402
+from patch_lib import (bind_symbol_version, fix_inplace_exclusive_sum_in_files, require,  # noqa: E402
                        strip_std_flags)
 
 # ── 1. atlas.cu: upstream's own fix must still be in place ────────────────
@@ -97,6 +97,16 @@ else:
     setup.write_text(new)
     print(f"cumesh patch: dropped {n_std} hardcoded C++-standard flag(s); "
           f"torch's cpp_extension now selects the standard")
+
+# ── libstdc++ symbol version the wheel policy admits ─────────────────────
+# xatlas's task scheduler waits on a std::condition_variable; linked in a
+# conda host env that reference binds to GLIBCXX_3.4.30 and auditwheel then
+# refuses the manylinux_2_28 repair (runs 34585896166, 34590139840 -- gcc 13
+# and gcc 10 alike). Bind it to the 3.4.11 node every libstdc++ since GCC
+# 4.4 exports, which is what the farm's wheel of this same source carries.
+bind_symbol_version("third_party/xatlas/xatlas.cpp",
+                    "_ZNSt18condition_variable4waitERSt11unique_lockISt5mutexE",
+                    "GLIBCXX_3.4.11", label="cumesh: xatlas condition_variable::wait")
 
 # ── the cell's arch list must stay authoritative ─────────────────────────
 final = setup.read_text()

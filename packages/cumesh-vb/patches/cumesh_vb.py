@@ -40,7 +40,7 @@ import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
-from patch_lib import (EIGEN_E63D9F6, add_pybind_module_local,  # noqa: E402
+from patch_lib import (bind_symbol_version, EIGEN_E63D9F6, add_pybind_module_local,  # noqa: E402
                        fix_inplace_exclusive_sum_in_files, require,
                        strip_std_flags, vendor_eigen)
 
@@ -130,6 +130,16 @@ require(sum(ml.values()) == 7,
         f"cumesh_vb: expected 7 module-local pybind11 class registrations, got "
         f"{sum(ml.values())} {ml}")
 print("cumesh_vb patch: 7 py::class_ registrations are module_local")
+
+# ── libstdc++ symbol version the wheel policy admits ─────────────────────
+# xatlas's task scheduler waits on a std::condition_variable; linked in a
+# conda host env that reference binds to GLIBCXX_3.4.30 and auditwheel then
+# refuses the manylinux_2_28 repair (runs 34585896166, 34590139840 -- gcc 13
+# and gcc 10 alike). Bind it to the 3.4.11 node every libstdc++ since GCC
+# 4.4 exports, which is what the farm's wheel of this same source carries.
+bind_symbol_version("third_party/xatlas/xatlas_mod.cpp",
+                    "_ZNSt18condition_variable4waitERSt11unique_lockISt5mutexE",
+                    "GLIBCXX_3.4.11", label="cumesh_vb: xatlas condition_variable::wait")
 
 # ── the cell's arch list must stay authoritative ─────────────────────────
 for lineno, line in enumerate(setup.read_text().splitlines(), 1):

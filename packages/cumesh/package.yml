@@ -56,20 +56,20 @@ build_deps: []
 
 carry: complete   # not on conda-forge; nothing to shadow
 
-# ── host compiler: gcc 10, below the policy's 13 for CUDA 12.8 ──────────
-# The wheel half needs it; the .conda does not care (ARCHITECTURE.md, "The
-# conda toolchain cannot always produce a manylinux wheel"). Measured on the
-# first linux-64 CI cell (run 34585896166) and again locally with gcc 13: the
-# C++-only xatlas extension (_cumesh_xatlas) references
+# ── the wheel half and libstdc++ symbol versions ──────────────────────────
+# The first linux-64 cells (run 34585896166 with the policy gcc 13, then
+# run 34590139840 with gcc_version 10) built, passed every conda gate, and
+# failed auditwheel: the C++-only xatlas extension references
 #   _ZNSt18condition_variable4waitERSt11unique_lockISt5mutexE@GLIBCXX_3.4.30
-# (libstdc++ 12+ re-versioned condition_variable::wait), and manylinux_2_28
-# permits GLIBCXX only to 3.4.25, so auditwheel refused the repair:
-#   "cannot repair ... to manylinux_2_28_x86_64 ABI because of the presence
-#    of too-recent versioned symbols". The two CUDA extensions top out at
-# GLIBCXX_3.4.21 and were fine. Same lever torchaudio pulls, for the same
-# reason; nvcc's ceiling for this CUDA line is <15, so 10 is legal, and the
-# policy value can only ever be lowered here, never raised.
-gcc_version: "10"
+# and manylinux_2_28 permits GLIBCXX only to 3.4.25. Lowering the compiler
+# did not change it because the version is bound at LINK time to whatever
+# libstdc++.so the host env carries (16.2.0), not emitted by gcc -- the other
+# of the two mechanisms ARCHITECTURE.md's torchaudio note describes. The
+# patch binds that one reference to GLIBCXX_3.4.11 with a .symver directive,
+# which is exactly the binding the farm's published wheel of this source
+# carries (nm on it: wait@GLIBCXX_3.4.11) because a manylinux container's
+# libstdc++ defaults to the old node. See patch_lib.bind_symbol_version. The
+# policy compiler (13) is used, like every other package here.
 
 
 # NOTE: cumesh._cubvh is a vendored copy of ashawkey/cubvh and registers the

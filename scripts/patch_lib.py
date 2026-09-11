@@ -1030,3 +1030,60 @@ def hoist_subdir(subdir: str | Path, carry=("LICENSE", "LICENSE.md", "LICENSE.tx
     marker.write_text(str(sub) + "\n")
     print(f"patch_lib: hoisted {sub} to the source root; the rest of the "
           f"checkout is gone")
+
+
+# --------------------------------------------------------------------------
+# libstdc++ symbol versions that no manylinux policy admits, bound at LINK
+# time rather than emitted by the compiler.
+#
+# ARCHITECTURE.md records the compiler-emitted case (gcc 11+ generates
+# __throw_bad_array_new_length@GLIBCXX_3.4.29 for `new T[n]`; lowering
+# gcc_version to 10 fixes it). This is the other case, and gcc_version does
+# NOT fix it -- measured on cumesh, runs 34585896166 (gcc 13) and 34590139840
+# (gcc 10), identical failure: the C++-only xatlas extension references
+#     _ZNSt18condition_variable4waitERSt11unique_lockISt5mutexE@GLIBCXX_3.4.30
+# because condition_variable::wait is an out-of-line function in
+# libstdc++.so, libstdc++ 12 gave it a new version node (3.4.30; the old
+# 3.4.11 one is kept for compatibility), and the linker binds an undefined reference
+# to the DEFAULT version exported by the libstdc++.so it links against --
+# which in a conda host env is conda-forge's newest (16.2.0), whatever
+# gcc_version compiled the object. manylinux_2_28 permits GLIBCXX 3.4.25 at
+# most, so auditwheel refuses the repair.
+#
+# The wheel farm's build of the same source binds the SAME function to
+# GLIBCXX_3.4.11 (verified with nm on its published cumesh wheel), because a
+# manylinux container carries an old libstdc++ whose default IS the old
+# version. A `.symver` directive in the referencing translation unit asks
+# the linker for exactly that binding, explicitly:
+#     __asm__(".symver SYM,SYM@GLIBCXX_3.4.11");
+# Every libstdc++ since GCC 4.4 exports that node, the .conda gets the same
+# binding as the wheel (one compile), and no gate is widened: the wheel
+# then satisfies the policy on its merits, as the farm's did.
+# --------------------------------------------------------------------------
+
+
+def bind_symbol_version(path: str | Path, symbol: str, version: str,
+                        label: str = "") -> bool:
+    """Append a `.symver` directive to `path` binding `symbol` to `version`.
+
+    ELF/GNU-only by construction: guarded on __linux__ and __GLIBCXX__, so
+    the same source compiles unchanged for MSVC (no symbol versioning in PE)
+    and for any libstdc++-free toolchain. Idempotent. Returns True if the
+    file was changed.
+    """
+    p = Path(path)
+    text = p.read_text(encoding="utf-8", errors="surrogateescape")
+    marker = f".symver {symbol},{symbol}@{version}"
+    if marker in text:
+        print(f"patch_lib: {label or p}: {symbol} already bound to {version}")
+        return False
+    block = (
+        "\n\n// cuda-foundry: bind this libstdc++ reference to the symbol version a\n"
+        "// manylinux toolchain would have given it (see patch_lib.bind_symbol_version).\n"
+        "#if defined(__linux__) && defined(__GLIBCXX__) && !defined(__clang__)\n"
+        f'__asm__(".symver {symbol},{symbol}@{version}");\n'
+        "#endif\n"
+    )
+    p.write_text(text.rstrip("\n") + block, encoding="utf-8", errors="surrogateescape")
+    print(f"patch_lib: {label or p}: {symbol} -> @{version}")
+    return True
