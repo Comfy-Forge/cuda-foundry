@@ -460,6 +460,16 @@ def main() -> int:
     ok, out = run_verify(make_conda(td / "out-under2", tree, base_index(), base_about()), tmp, **common)
     check(ok, "(j) ...and PASSES when package.yml verify.allow_transitive names the soname")
     vc.PACKAGE_CFG_OVERRIDE.clear()
+    # a DT_NEEDED on the display driver (libcuda.so.1) is not resolvable
+    # through any conda package by design; verify.allow_dso is the declared
+    # exception -- run 34627125361 (sageattention _qattn_sm90) must pass.
+    tree = good_tree(td / "drv", needed=NEEDED + ["libcuda.so.1"])
+    ok, out = run_verify(make_conda(td / "out-drv", tree, base_index(), base_about()), tmp, **common)
+    check(not ok and fails_on(out, "unresolved: [('"), "(j) a DT_NEEDED on libcuda.so.1 FAILS as unresolvable by default")
+    vc.PACKAGE_CFG_OVERRIDE["fx"] = {"verify": {"allow_dso": ["libcuda.so.1"]}}
+    ok, out = run_verify(make_conda(td / "out-drv2", tree, base_index(), base_about()), tmp, **common)
+    check(ok, "(j) ...and PASSES when package.yml verify.allow_dso names it")
+    vc.PACKAGE_CFG_OVERRIDE.clear()
     tree = good_tree(td / "gomp", needed=NEEDED + ["libgomp.so.1"])
     ok, out = run_verify(make_conda(td / "out-gomp", tree, base_index(), base_about()), tmp, **common)
     check(ok, "(j) libgomp.so.1 is credited to the declared libgcc (delivered via _openmp_mutex)")

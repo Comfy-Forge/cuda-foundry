@@ -852,6 +852,13 @@ def verify(path: Path, args, tmp: Path) -> bool:
             torch_libdirs = [d for d in pfiles if d.endswith("torch/lib")] if torch_declared else []
             allow_transitive = {str(x).split()[0].lower()
                                 for x in (_verify_field(name, "allow_transitive") or [])}
+            # `verify.allow_dso`: libraries that are NOT conda packages by
+            # design -- the display driver's libcuda.so.1 / nvcuda.dll for
+            # cuTensorMapEncodeTiled (sageattention). The same list feeds
+            # rattler-build's missing_dso_allowlist; the resolvability gate
+            # honours it too, or run 34627125361 recurs.
+            allow_dso = {str(x).split()[0].lower()
+                         for x in (_verify_field(name, "allow_dso") or [])}
             unresolved, transitive = [], []
 
             def _undeclared(so: str) -> str | None:
@@ -873,7 +880,7 @@ def verify(path: Path, args, tmp: Path) -> bool:
                             search.append(_norm_dir(here + r[len("$ORIGIN"):]))
                     for so in needed:
                         key = so.lower()
-                        if so in GLIBC_SONAMES:
+                        if so in GLIBC_SONAMES or key in allow_dso:
                             continue
                         found = any(
                             (f"{d}/{so}" if d else so) in files or key in pfiles.get(d, ())
@@ -892,7 +899,7 @@ def verify(path: Path, args, tmp: Path) -> bool:
                     search = [here, "", "Library/bin"] + torch_libdirs
                     for dll in imports:
                         key = dll.lower()
-                        if WIN_SYSTEM_DLLS.match(dll):
+                        if WIN_SYSTEM_DLLS.match(dll) or key in allow_dso:
                             continue
                         found = any((f"{d}/{dll}" if d else dll) in files or key in pfiles.get(d, ())
                                     for d in search)
