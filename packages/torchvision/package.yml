@@ -42,6 +42,19 @@ clone_recursive: false
 license: BSD-3-Clause
 homepage: https://github.com/pytorch/vision
 summary: Datasets, transforms and models for computer vision, compiled against the conda-torch channel
+repository: https://github.com/pytorch/vision
+documentation: https://docs.pytorch.org/vision/stable/
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# LICENSE only; the tree vendors nothing (checked at the 0.19.0 and 0.29.0
+# ends of the family).
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (pytorch/vision).
+pypi_project: torchvision
 
 links_torch: true
 
@@ -58,9 +71,27 @@ nvcc_threads: 1
 # `pytorch <minor>.* cuda<NNN>_*`, which is both the runtime dep and the
 # flavour lock, and a second bare `pytorch` would give the solver a looser
 # spec it could satisfy with a different flavour.
+#
+# pillow's bound is upstream's own, in full: `pillow >= 5.3.0, !=8.3.*` --
+# 8.3.0 and 8.3.1 broke torchvision's PIL interop (pytorch/vision#4146) and
+# every torchvision release in the family still excludes them. Spelled as
+# the two point releases conda's MatchSpec can express.
+#
+# torchvision-extra-decoders (the avif/heic decoders torchvision >= 0.20
+# dlopens on demand; conda-forge, linux only) is NOT declared, and this is
+# a gap to know about rather than an omission: conda-forge builds it per
+# torch minor and has no build for torch 2.4.x or 2.14.0 (checked
+# 2026-09-11 against conda-torch's torch list), so an unconditional linux
+# entry would make those cells UNSAT, and for torch < 2.7 -- where PyPI's
+# libtorch (conda-torch's is the PyPI wheel repacked) still uses the
+# pre-cxx11 ABI conda-forge's build does not -- it would load against the
+# wrong ABI. The run_deps selector vocabulary is platform-only; a
+# torch-version-conditional entry (`{if: "linux and pytorch >= 2.7"}`, say)
+# is what this needs, and until the loader admits one the avif check in the
+# op below runs only where the decoder happens to be installed.
 run_deps:
   - numpy
-  - pillow >=5.3.0
+  - pillow >=5.3.0,!=8.3.0,!=8.3.1
 build_deps:
   # ALSO in build:, while the import library stays in host:. torchvision does
   # not ask the compiler whether nvjpeg exists -- it stats
@@ -85,11 +116,15 @@ build_deps:
 #
 # Every entry is a header the sources actually #include:
 #   jpeglib.h      decode_jpeg.cpp / encode_jpeg.cpp   -> libjpeg-turbo
-#   png.h          decode_png.cpp / encode_png.cpp     -> libpng (needs zlib)
+#   png.h          decode_png.cpp / encode_png.cpp     -> libpng (brings zlib)
 #   webp/decode.h  decode_webp.cpp                     -> libwebp-base
 #   nvjpeg.h       decode_jpegs_cuda.cpp (USE_NVJPEG)  -> libnvjpeg-dev
 # setup.py finds them via CONDA_PREFIX/BUILD_PREFIX (its find_library() walks
 # those explicitly), so a conda host env is the supported discovery path.
+# libzlib is NOT listed: nothing torchvision compiles links it (verified on
+# the published artifact -- the image extension's DT_NEEDED names libpng16,
+# not libz), and libpng's own run_export carries the zlib it needs. Listing
+# it declared a run dep the artifact does not have.
 host_deps:
   # torchvision <= 0.26.0 imports pkg_resources in setup.py; setuptools 82.0.0
   # removed it, and CI resolved 84.0.0, so every cell whose pairing is older
@@ -104,7 +139,6 @@ host_deps:
   - libjpeg-turbo
   - libpng
   - libwebp-base
-  - libzlib
   - libnvjpeg-dev
 
 # torchvision's setup.py does not ASK the compiler whether a codec is
@@ -163,9 +197,19 @@ verify:
     - libpng
     - libwebp
     - nvjpeg
-  # Three things at once: a CUDA kernel (nms) so a mis-arch'd build fails
+  # GPU-less import surface: io is the codec extension, ops the CUDA one,
+  # models/transforms the pure-Python bulk.
+  imports:
+    - torchvision
+    - torchvision.io
+    - torchvision.ops
+    - torchvision.models
+    - torchvision.transforms
+  # Four things at once: a CUDA kernel (nms) so a mis-arch'd build fails
   # with cudaErrorNoKernelImageForDevice rather than passing a bare import,
-  # and both codec paths, which are what compiling was for.
+  # every codec the host deps exist for (jpeg, png, webp, nvjpeg), and the
+  # avif decoder where torchvision-extra-decoders is installed (see
+  # run_deps for why it cannot yet be required).
   op: |
     import torch, torchvision, io
     from torchvision.ops import nms
@@ -174,10 +218,29 @@ verify:
     scores = torch.tensor([0.9, 0.8, 0.7], device="cuda")
     keep = nms(boxes, scores, 0.5)
     assert keep.numel() == 2, keep
-    from torchvision.io import decode_jpeg, encode_jpeg, decode_png, encode_png
+    from torchvision.io import decode_jpeg, encode_jpeg, decode_png, encode_png, decode_image
     img = (torch.rand(3, 32, 32) * 255).to(torch.uint8)
     assert decode_jpeg(encode_jpeg(img)).shape == img.shape
     assert decode_png(encode_png(img)).shape == img.shape
+    # webp: the reason libwebp-base is a host dep. Pillow encodes (torchvision
+    # has no webp encoder); torchvision's own decode_webp -- a public API from
+    # 0.20 (torch 2.5); 0.19 links libwebp but exposes no decoder -- must read
+    # it back, bit-exact since the encode is lossless.
+    from PIL import Image, features
+    if hasattr(torchvision.io, "decode_webp"):
+        buf = io.BytesIO()
+        Image.fromarray(img.permute(1, 2, 0).numpy()).save(buf, format="WEBP", lossless=True)
+        w = torchvision.io.decode_webp(torch.frombuffer(buf.getvalue(), dtype=torch.uint8))
+        assert w.shape == img.shape and torch.equal(w, img), w.shape
     # nvjpeg path: the reason libnvjpeg-dev is a host dep
     d = decode_jpeg(encode_jpeg(img), device="cuda")
     assert d.is_cuda and d.shape == img.shape, d.shape
+    # avif, wherever the extra decoders are present (torchvision >= 0.20,
+    # torchvision-extra-decoders installed, and a Pillow that can encode it).
+    import importlib.util
+    if (importlib.util.find_spec("torchvision_extra_decoders")
+            and hasattr(torchvision.io, "decode_avif") and features.check("avif")):
+        buf = io.BytesIO()
+        Image.fromarray(img.permute(1, 2, 0).numpy()).save(buf, format="AVIF")
+        a = torchvision.io.decode_avif(torch.frombuffer(buf.getvalue(), dtype=torch.uint8))
+        assert a.shape == img.shape, a.shape
