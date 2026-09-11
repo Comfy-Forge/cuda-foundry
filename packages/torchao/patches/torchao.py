@@ -44,14 +44,19 @@ _old_win = '''    if not IS_WINDOWS:
             ["-O3" if not debug_mode else "-O0", "-fdiagnostics-color=always"]
         )'''
 require(_t.count(_old_win) == 1, "torchao: the non-Windows cxx block was not found once")
-_t = _t.replace(_old_win, _old_win + '''
-    else:
+# A separate `if IS_WINDOWS:` BEFORE upstream's block, not an `else:` after
+# its first statement: upstream's `if not IS_WINDOWS:` body continues with a
+# nested `if use_cpu_kernels and is_linux:` block, and an else inserted after
+# the first extend() lands inside it (SyntaxError at the generated line 431,
+# runs 34596208356 and 34596419720 -- parsed here BEFORE writing now).
+_t = _t.replace(_old_win, '''    if IS_WINDOWS:
         # cuda-foundry: what CUTLASS 3.x needs from MSVC, on both the host
         # compile and nvcc's host pass.
         _cuw_msvc = ["/Zc:__cplusplus", "/bigobj", "/Zc:preprocessor", "/permissive-"]
         extra_compile_args["cxx"].extend(_cuw_msvc)
-        extra_compile_args["nvcc"].extend(f"-Xcompiler={f}" for f in _cuw_msvc)''', 1)
-_sp.write_text(_t)
+        extra_compile_args["nvcc"].extend(f"-Xcompiler={f}" for f in _cuw_msvc)
+''' + _old_win, 1)
 import ast as _ast
 _ast.parse(_t)
+_sp.write_text(_t)
 print("torchao patch: CUTLASS include dirs and MSVC flags enabled on Windows")
