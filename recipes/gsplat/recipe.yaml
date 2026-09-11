@@ -671,6 +671,14 @@ requirements:
     - rich >=12
     - packaging
     - typing_extensions
+  # package.yml `constrains`: packages this one must never be installed
+  # beside, because they install the SAME files (a fork published under its
+  # own name with no Python-level rename). `<other> <0.0a0` matches no real
+  # version, so a solve that asks for both is refused instead of letting the
+  # second silently overwrite the first. Not a dependency: it only bites when
+  # the other package is requested too.
+  run_constraints:
+    - gsplat-maskgaussian <0.0a0
 
 tests:
   - python:

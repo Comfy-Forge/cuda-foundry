@@ -1,1 +1,12 @@
-{}
+{
+  "gsplat-1.5.3-cuda128_torch28_py312_ha1270f5_0.conda": {
+    "constrains": [
+      "gsplat-maskgaussian <0.0a0"
+    ]
+  },
+  "gsplat-maskgaussian-1.5.3-cuda128_torch28_py312_ha1270f5_0.conda": {
+    "constrains": [
+      "gsplat <0.0a0"
+    ]
+  }
+}

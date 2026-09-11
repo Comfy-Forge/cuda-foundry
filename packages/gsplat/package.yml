@@ -104,3 +104,9 @@ verify:
     assert torch.isfinite(img).all() and torch.isfinite(alpha).all()
     assert alpha.max() > 0.5, alpha.max()
     assert img[..., 0].max() > 0.5, img[..., 0].max()
+
+# Installs the same gsplat/ files as gsplat-maskgaussian; upstream says one per
+# environment. An unsatisfiable constrain makes the solver refuse both
+# together instead of letting the second silently overwrite the first.
+constrains:
+  - gsplat-maskgaussian <0.0a0
