@@ -21,6 +21,23 @@ version: "0.1"
 license: LicenseRef-Tencent-Hunyuan-3D-2.1-Community-License
 homepage: https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1
 summary: Hunyuan3D 2.1's custom_rasterizer_kernel (texture-baking rasterizer), compiled against the conda-torch channel
+repository: https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# The repo-root LICENSE the patch copies beside the relocated setup.py.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no custom_rasterizer_hy3d2 project (404, 2026-09-11).
+pypi_project: null
+# The licence is territorial: it "DOES NOT APPLY IN THE EUROPEAN UNION, UNITED
+# KINGDOM AND SOUTH KOREA" (LICENSE line 3), defines Territory as the world
+# minus those three (line 18), grants the licence "for the Territory only"
+# (line 24) and forbids use or distribution outside it (line 40). Stated on
+# the artifact so a consumer can see it without opening the text.
+distribution_restriction: "Licence excludes the EU, UK and South Korea (LICENSE lines 3, 18, 24, 40)"
 
 source_repo: Tencent-Hunyuan/Hunyuan3D-2.1
 source_rev: 82920d643c0dc2f7bfd7255f45f62d386edfe60c   # main @ 2025-10-17
@@ -45,8 +62,7 @@ nvcc_threads: 1
 run_deps: []
 
 # rasterizer_gpu.cu uses the runtime and ATen's CUDA stream; nothing else.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 
