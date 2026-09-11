@@ -1,0 +1,49 @@
+{
+ "arch": "x86_64",
+ "build": "cuda128_torch28_py312_h6651153_0",
+ "build_number": 0,
+ "depends": [
+  "python",
+  "__cuda",
+  "pytorch 2.8.* cuda128_*",
+  "trimesh",
+  "numpy",
+  "scipy",
+  "einops",
+  "cuda-version >=12.8,<13",
+  "vc >=14.3,<15",
+  "vc14_runtime >=14.44.35208",
+  "ucrt >=10.0.20348.0",
+  "libcufft >=11.4.1.4,<12.0a0",
+  "pytorch >=2.8.0,<2.9.0a0",
+  "libtorch >=2.8.0,<2.9.0a0",
+  "libcublas >=12.9.2.10,<13.0a0",
+  "libcusolver >=11.7.5.82,<12.0a0",
+  "cuda-cudart >=12.9.79,<13.0a0",
+  "python_abi 3.12.* *_cp312",
+  "libcusparse >=12.5.10.65,<13.0a0",
+  "libcurand >=10.3.10.19,<11.0a0"
+ ],
+ "license": "Apache-2.0 AND MIT",
+ "md5": "82498d866ec1b329e1d8874e87a0252d",
+ "name": "faithc-aot",
+ "platform": "win",
+ "provenance": {
+  "arch_list": "7.0 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "12.8",
+  "prebuilt_wheel_used": false,
+  "run_id": "34585005621",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34585005621",
+  "source_rev": "193bb9f423048965e0411616038064b576d932cf",
+  "torch_build": "cuda128_mkl_py312_hc0cb929_302"
+ },
+ "purls": [
+  "pkg:pypi/faithc-aot@1.5.0"
+ ],
+ "sha256": "a78a9ee7332fea7f1586fb9f171662dcb85ac80e98c437476d71c8f050372eb4",
+ "size": 701589,
+ "subdir": "win-64",
+ "timestamp": 1789119404882,
+ "version": "1.5.0"
+}
