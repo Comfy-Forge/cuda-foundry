@@ -5,23 +5,45 @@ Nothing here is novel: it is cuda-wheels' verify_wheel.py checks (filename,
 binary census, ELF sanity, torch linkage, glibc ceiling, SASS archs, import)
 re-expressed for .conda, plus conda-torch's packaging invariants (paths.json
 matches payload, no RECORD, INSTALLER=conda, $ORIGIN-relative RPATHs), plus
-the three this repo adds:
+the ones this repo adds:
 
-  * the compile ledger covers every extension module shipped  (L3 of the
-    from-source guarantee: an artifact must not contain a binary this build
-    did not compile);
-  * provenance says built_from_source and NOT prebuilt_wheel_used;
+  * the compile ledger is non-empty and every TU came from THIS build's work
+    tree (L3 of the from-source guarantee), anchored on the actual
+    rattler-build work directory rather than on the substring "/work/";
+  * compiler provenance: every shipped binary was produced by conda-forge's
+    toolchain (`.comment` on ELF, the PE linker version on win-64), which is
+    what catches an nvcc that fell back to /usr/bin/g++;
+  * provenance claims in about.json are DERIVED from the artifact and the
+    ledger, not read back as constants;
   * the torch dependency carries a flavour build-glob, without which the
-    solver may pair a cu128 extension with a cu130 torch.
+    solver may pair a cu128 extension with a cu130 torch;
+  * linkage against the DECLARED closure: every DT_NEEDED / PE import
+    resolves through the binary's own RPATH, the declared run deps installed
+    into --dep-prefix, or the torch preloader contract; and every declared
+    run dep that provides a shared library is actually linked (or
+    allowlisted in package.yml `verify.allow_unlinked`).
 
-Usage: verify_conda.py <pkg.conda> [...] [--ledger FILE] [--expect-arch "8.0 9.0"]
+Every gate here is falsifiable: tools/test_verify_conda.py carries a fixture
+that must FAIL for each one. A gate that cannot fail is decoration, and this
+file has had several (run 34166741643: `ok no compiled TU came from outside
+the build work tree (0 TUs)`).
+
+Usage:
+  verify_conda.py <pkg.conda> [...] [--ledger FILE --work-dir DIR]
+                  [--expect-arch "8.0 9.0"] [--expect-gcc 13 | --expect-msvc vs2022]
+                  [--dep-prefix DIR] [--noarch] [--tmp DIR]
 Exit: 0 all pass, 1 otherwise.
 """
 
+from __future__ import annotations
+
 import argparse
+import hashlib
 import io
 import json
+import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -29,8 +51,61 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parent.parent
+
 BUILD_RE = re.compile(
     r"^cuda(?P<cu>\d+)_(?:torch(?P<torch>\d+)_)?py(?P<py>\d+)_h[0-9a-f]+_(?P<n>\d+)$")
+
+# What a linux binary compiled by THIS pipeline may carry in `.comment`:
+# conda-forge's gcc, and the crt objects of the conda sysroot (CentOS/RHEL 8
+# glibc 2.28, built with Red Hat's gcc 8.5 -- every binary linked against
+# that sysroot carries this second entry, from crt1.o/crti.o/crtbegin.o).
+# Anything else -- `GCC: (Ubuntu 13.3.0-6ubuntu2~24.04.1)` in particular --
+# means a translation unit went through the RUNNER's compiler, which is what
+# happened to pyg-lib when its recipe clobbered NVCC_PREPEND_FLAGS and nvcc
+# fell back to /usr/bin/g++ for its host-side code.
+COMMENT_CONDA_FORGE = re.compile(r"^GCC: \(conda-forge gcc (?P<ver>\d+)\.\d+\.\d+-\d+\) ")
+COMMENT_SYSROOT = re.compile(r"^GCC: \(GNU\) \d+\.\d+\.\d+ \d{8} \(Red Hat [\d.]+-\d+\)$")
+# conda-forge's MSVC activation packages and the linker versions they carry
+# (PE optional header MajorLinkerVersion.MinorLinkerVersion == the MSVC
+# toolset, 14.2x for VS2019, 14.3x/14.4x for VS2022). MinGW's ld and lld write
+# something else entirely (2.x / 14.0), which is the case this exists to
+# catch on a platform where there is no `.comment` to read.
+MSVC_LINKER = {"vs2019": (20, 30), "vs2022": (30, 50)}
+
+# Libraries the dynamic loader finds without any RPATH, on any manylinux-2.28
+# box: glibc itself. Everything else must be resolvable through the artifact,
+# the declared closure, or the torch preloader contract.
+GLIBC_SONAMES = {
+    "libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0", "librt.so.1",
+    "libresolv.so.2", "libutil.so.1", "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1",
+    "libnsl.so.1", "libcrypt.so.1", "libanl.so.1",
+}
+# Windows: the OS and the UCRT/VC runtime redistributables, plus the
+# interpreter itself (python3XX.dll sits in the env root and is loaded before
+# any extension). Everything else must be provided by the artifact, the
+# declared closure, or torch/lib.
+WIN_SYSTEM_DLLS = re.compile(
+    r"^(kernel32|kernelbase|ntdll|user32|gdi32|advapi32|shell32|ole32|oleaut32|"
+    r"ws2_32|wsock32|mswsock|ucrtbase|msvcp\d+|vcruntime\d+(_\d)?|concrt\d+|"
+    r"api-ms-win-[\w-]+|ext-ms-[\w-]+|bcrypt|crypt32|dbghelp|imagehlp|iphlpapi|"
+    r"netapi32|normaliz|psapi|rpcrt4|secur32|shlwapi|userenv|version|winmm|"
+    r"wldap32|comdlg32|cfgmgr32|setupapi|powrprof|comctl32|dxgi|d3d1[12]|"
+    r"opengl32|glu32|winhttp|wininet|python3\d*)\.dll$", re.I)
+
+# The torch libraries `import torch` loads eagerly. A DT_NEEDED on one of them
+# resolves against the already-loaded SONAME in the process, which is why
+# make_wheel excludes them from vendoring and why a .conda has no RPATH to
+# them: the contract is "torch is imported first". That contract only holds
+# for a package that DECLARES pytorch.
+TORCH_PRELOADED = re.compile(r"^(lib)?(torch|torch_cpu|torch_cuda|torch_cuda_linalg|"
+                             r"torch_python|torch_global_deps|c10|c10_cuda|caffe2_nvrtc|"
+                             r"shm|nvfuser_codegen|cudart64_\d+|cublas64_\d+|cublasLt64_\d+|"
+                             r"nvrtc64_\d+_\d|nvJitLink_\d+_\d|cudnn64_\d+|cudnn_\w+64_\d+|"
+                             r"cufft64_\d+|cufftw64_\d+|curand64_\d+|cusolver64_\d+|"
+                             r"cusparse64_\d+|nvToolsExt64_1|libgomp|gomp|uv|asmjit|fbgemm|"
+                             r"sleef|libiomp5md|libiompstubs5md|c10_xpu|torch_xpu)"
+                             r"(\.so(\.\d+)*|\.dll)$", re.I)
 
 
 class Report:
@@ -44,66 +119,122 @@ class Report:
         print(f"FAIL {msg}")
         self.failed = True
 
+    def warn(self, msg):
+        print(f"WARN {msg}")
+
     def check(self, cond, msg):
         (self.ok if cond else self.bad)(msg)
         return cond
 
 
-def read_conda(path: Path):
-    """(index.json, about.json, paths.json, {payload member -> bytes-or-None})."""
+# ---------------------------------------------------------------------------
+# reading the artifact
+# ---------------------------------------------------------------------------
+
+def extract_conda(path: Path, dest: Path) -> Path:
+    """Extract a .conda to `dest` (info/ and the payload side by side).
+
+    `rattler-build package extract` when rattler-build is on PATH -- the one
+    reader that is guaranteed to agree with what rattler-build wrote -- and
+    the zstd CLI otherwise, so this stays runnable on a box with neither
+    Rust nor a conda toolchain.
+    """
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    rb = shutil.which("rattler-build")
+    if rb:
+        p = subprocess.run([rb, "package", "extract", str(path), "--dest", str(dest)],
+                           capture_output=True, text=True)
+        if p.returncode == 0 and (dest / "info" / "index.json").is_file():
+            return dest
+        # fall through: an older rattler-build without the subcommand
     zf = zipfile.ZipFile(path)
-    info_n = [n for n in zf.namelist() if n.startswith("info-") and n.endswith(".tar.zst")]
-    pkg_n = [n for n in zf.namelist() if n.startswith("pkg-") and n.endswith(".tar.zst")]
+    members = [n for n in zf.namelist() if n.endswith(".tar.zst")]
+    info_n = [n for n in members if n.startswith("info-")]
+    pkg_n = [n for n in members if n.startswith("pkg-")]
     if len(info_n) != 1 or len(pkg_n) != 1:
         sys.exit(f"{path.name}: expected one info- and one pkg- member, "
                  f"found {info_n} / {pkg_n}")
-
-    def untar(member):
+    for member in (info_n[0], pkg_n[0]):
         raw = subprocess.run(["zstd", "-d", "--stdout"], input=zf.read(member),
                              capture_output=True, check=True).stdout
-        return tarfile.open(fileobj=io.BytesIO(raw))
-
-    itf = untar(info_n[0])
-
-    def jload(name, default=None):
-        try:
-            m = itf.extractfile(name)
-            return json.load(m) if m else default
-        except KeyError:
-            return default
-
-    return (jload("info/index.json", {}), jload("info/about.json", {}),
-            jload("info/paths.json", {"paths": []}), itf, untar(pkg_n[0]))
+        with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+            tf.extractall(dest, filter="data")
+    return dest
 
 
-def elf_dynamic(data: bytes, tmp: Path, name: str):
-    """readelf -d output for an in-memory ELF, or None if not an ELF."""
-    if data[:4] != b"\x7fELF":
-        return None
-    p = tmp / name.replace("/", "_")
-    p.write_bytes(data)
-    return subprocess.run(["readelf", "-d", str(p)], capture_output=True,
-                          text=True).stdout
+def load_json(root: Path, rel: str, default):
+    p = root / rel
+    if not p.is_file():
+        return default
+    return json.loads(p.read_text())
 
 
-def pe_imports(data: bytes) -> set[str] | None:
-    """DLL names in a PE's import and delay-import directories.
+def read_conda(path: Path, tmp: Path | None = None):
+    """(index.json, about.json, paths.json, extracted root). Used by verify_wheel."""
+    tmp = tmp or Path(os.environ.get("TMPDIR", "/tmp")) / "verify-conda"
+    root = extract_conda(path, tmp / path.stem)
+    return (load_json(root, "info/index.json", {}), load_json(root, "info/about.json", {}),
+            load_json(root, "info/paths.json", {"paths": []}), root)
 
-    None when the bytes are not a PE, so callers can tell "not applicable" from
-    "applicable and empty" -- the distinction the ELF path gets for free by
-    checking the \\x7fELF magic.
-    """
+
+def payload_files(root: Path) -> dict[str, Path]:
+    """Every packaged file (relative path -> absolute), info/ excluded."""
+    out = {}
+    for p in root.rglob("*"):
+        if p.is_dir() and not p.is_symlink():
+            continue
+        rel = p.relative_to(root).as_posix()
+        if rel == "info" or rel.startswith("info/"):
+            continue
+        out[rel] = p
+    return out
+
+
+# ---------------------------------------------------------------------------
+# binary readers
+# ---------------------------------------------------------------------------
+
+def is_elf(p: Path) -> bool:
+    try:
+        with open(p, "rb") as f:
+            return f.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
+def elf_dynamic(p: Path) -> tuple[list[str], list[str]]:
+    """(DT_NEEDED sonames, RPATH/RUNPATH entries) via readelf -d."""
+    out = subprocess.run(["readelf", "-d", str(p)], capture_output=True, text=True).stdout
+    needed = re.findall(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]", out)
+    rpaths: list[str] = []
+    for line in out.splitlines():
+        if "(RPATH)" in line or "(RUNPATH)" in line:
+            val = line.split("[", 1)[-1].rstrip("]").strip()
+            rpaths.extend(val.split(":"))
+    return needed, rpaths
+
+
+def elf_comment(p: Path) -> list[str]:
+    """The `.comment` strings: one per distinct compiler that produced an object."""
+    out = subprocess.run(["readelf", "-p", ".comment", str(p)], capture_output=True, text=True).stdout
+    return [m.strip() for m in re.findall(r"^\s*\[\s*[0-9a-fx]+\]\s+(.*)$", out, re.M)]
+
+
+def pe_header(data: bytes):
+    """(linker_major, linker_minor, import DLL names) for a PE, or None."""
     if len(data) < 0x40 or data[:2] != b"MZ":
         return None
     (e_lfanew,) = struct.unpack_from("<I", data, 0x3C)
     if len(data) < e_lfanew + 24 or data[e_lfanew:e_lfanew + 4] != b"PE\0\0":
         return None
-
     coff = e_lfanew + 4
     n_sections, = struct.unpack_from("<H", data, coff + 2)
     size_opt, = struct.unpack_from("<H", data, coff + 16)
     opt = coff + 20
     magic, = struct.unpack_from("<H", data, opt)
+    linker_major, linker_minor = struct.unpack_from("<BB", data, opt + 2)
     if magic == 0x20B:      # PE32+
         dd = opt + 112
     elif magic == 0x10B:    # PE32
@@ -111,7 +242,6 @@ def pe_imports(data: bytes) -> set[str] | None:
     else:
         return None
     n_dd, = struct.unpack_from("<I", data, dd - 4)
-
     sections = []
     sec = opt + size_opt
     for i in range(n_sections):
@@ -135,9 +265,8 @@ def pe_imports(data: bytes) -> set[str] | None:
         return data[off:end if end != -1 else len(data)].decode("ascii", "replace")
 
     names: set[str] = set()
-
-    # Directory 1: the ordinary import table. 20-byte descriptors, DLL name RVA
-    # at +12, terminated by an all-zero entry.
+    # Directory 1: the import table (20-byte descriptors, name RVA at +12);
+    # directory 13: delay-load imports (32-byte descriptors, name RVA at +4).
     for index, name_off, stride in ((1, 12, 20), (13, 4, 32)):
         if index >= n_dd:
             continue
@@ -156,95 +285,226 @@ def pe_imports(data: bytes) -> set[str] | None:
             name_rva, = struct.unpack_from("<I", data, ent + name_off)
             if not name_rva:
                 continue
-            # Delay-load descriptors written by older linkers store a virtual
-            # ADDRESS rather than an RVA; a name that does not resolve inside a
-            # section is that case, and is skipped rather than guessed at.
             nm = cstr(name_rva)
             if nm:
                 names.add(nm)
-    return names
+    return linker_major, linker_minor, names
+
+
+def pe_imports(data: bytes) -> set[str] | None:
+    h = pe_header(data)
+    return None if h is None else h[2]
+
+
+# ---------------------------------------------------------------------------
+# package.yml lookups
+# ---------------------------------------------------------------------------
+
+# Tests inject a package.yml here rather than writing into packages/.
+PACKAGE_CFG_OVERRIDE: dict[str, dict] = {}
+
+
+def _package_cfg(pkg_name: str) -> dict:
+    if not pkg_name:
+        return {}
+    if pkg_name in PACKAGE_CFG_OVERRIDE:
+        return PACKAGE_CFG_OVERRIDE[pkg_name]
+    cfg = REPO / "packages" / pkg_name / "package.yml"
+    if not cfg.is_file():
+        # conda name and folder name agree for every package today; a folder
+        # whose package.yml says a different `name` is found by scanning.
+        for p in (REPO / "packages").glob("*/package.yml"):
+            if re.search(rf"^name:\s*{re.escape(pkg_name)}\s*$", p.read_text(), re.M):
+                cfg = p
+                break
+    if not cfg.is_file():
+        return {}
+    try:
+        import yaml
+    except ImportError:
+        return {}
+    return yaml.safe_load(cfg.read_text()) or {}
 
 
 def _verify_field(pkg_name: str, key: str):
     """`verify.<key>` from the package's own package.yml, raw, or None."""
-    if not pkg_name:
-        return None
-    cfg = Path(__file__).resolve().parent.parent / "packages" / pkg_name / "package.yml"
-    if not cfg.is_file():
-        return None
-    try:
-        import yaml
-    except ImportError:
-        return None
-    data = yaml.safe_load(cfg.read_text()) or {}
-    return (data.get("verify") or {}).get(key)
+    return (_package_cfg(pkg_name).get("verify") or {}).get(key)
 
 
 def _expect_linked(pkg_name: str, key: str = "expect_linked") -> list:
-    """`verify.<key>` from the package's own package.yml, if present.
+    """`verify.expect_linked` (ELF sonames) / `verify.expect_linked_win` (DLLs).
 
     Read from packages/ rather than passed on the command line so the
     expectation lives beside the host_deps that are supposed to satisfy it,
-    and so no caller can forget to pass it.
-
-    `key` selects the platform's list: `expect_linked` names ELF sonames,
-    `expect_linked_win` names DLLs. They are separate lists rather than one
-    list plus a translation because there is no reliable mapping -- libjpeg
-    is jpeg8.dll, libpng is libpng16.dll, nvjpeg is nvjpeg64_12.dll -- and a
-    guessed mapping that silently matched nothing would turn this gate into
-    decoration.
+    and so no caller can forget to pass it. Two lists rather than one plus a
+    translation: libjpeg is jpeg8.dll, libpng is libpng16.dll, nvjpeg is
+    nvjpeg64_12.dll, and a guessed mapping that silently matched nothing
+    would turn the gate into decoration.
     """
-    if not pkg_name:
-        return []
-    cfg = Path(__file__).resolve().parent.parent / "packages" / pkg_name / "package.yml"
-    if not cfg.is_file():
-        return []
-    try:
-        import yaml
-    except ImportError:
-        return []
-    data = yaml.safe_load(cfg.read_text()) or {}
-    return list((data.get("verify") or {}).get(key) or [])
+    return list(_verify_field(pkg_name, key) or [])
 
 
-def verify(path: Path, ledger: set, expect_arch: str, tmp: Path) -> bool:
+# ---------------------------------------------------------------------------
+# the declared closure, from a prefix
+# ---------------------------------------------------------------------------
+
+def _credited(pkg: str) -> set[str]:
+    """The declared names a package's files count towards.
+
+    conda-forge splits some packages into a metapackage and a per-platform
+    payload (`cuda-cudart` -> `cuda-cudart_linux-64`); a recipe declares the
+    metapackage, so the payload's files are credited to it. The OpenMP runtime
+    is delivered through `libgcc`'s dependency on `_openmp_mutex` -> `libgomp`,
+    and the compiler's run_exports say `libgcc`, never `libgomp`, so a
+    package linking libgomp.so.1 has declared what conda-forge expects it to
+    declare by carrying `libgcc`.
+    """
+    out = {pkg}
+    m = re.match(r"^(.+)_(linux-64|linux-aarch64|win-64|osx-64|osx-arm64)$", pkg)
+    if m:
+        out.add(m.group(1))
+    if pkg in ("_openmp_mutex", "libgomp"):
+        out.add("libgcc")
+    return out
+
+
+def closure_providers(prefix: Path) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """(soname/dll basename -> packages credited with it, package -> its sonames).
+
+    Read from conda-meta/*.json, which lists every file a package owns. That
+    is the exact answer to "which declared dependency provides libcublas.so.12"
+    without a hand-written table that would drift the first time NVIDIA
+    renumbers a soname.
+    """
+    owner: dict[str, set[str]] = {}
+    provides: dict[str, set[str]] = {}
+    meta = prefix / "conda-meta"
+    if not meta.is_dir():
+        return owner, provides
+    for rec in meta.glob("*.json"):
+        try:
+            d = json.loads(rec.read_text())
+        except (OSError, ValueError):
+            continue
+        name = d.get("name") or rec.stem.rsplit("-", 2)[0]
+        for f in d.get("files") or []:
+            base = f.rsplit("/", 1)[-1]
+            if re.search(r"\.(so(\.\d+)*|dll)$", base, re.I):
+                for credited in _credited(name):
+                    owner.setdefault(base.lower(), set()).add(credited)
+                    provides.setdefault(credited, set()).add(base.lower())
+    return owner, provides
+
+
+def closure_files(prefix: Path) -> dict[str, set[str]]:
+    """directory (prefix-relative, posix) -> basenames (lowercased) of shared libs in it."""
+    out: dict[str, set[str]] = {}
+    for p in prefix.rglob("*"):
+        if p.is_dir():
+            continue
+        if not re.search(r"\.(so(\.\d+)*|dll)$", p.name, re.I):
+            continue
+        rel = p.relative_to(prefix).as_posix()
+        d, _, b = rel.rpartition("/")
+        out.setdefault(d, set()).add(b.lower())
+    return out
+
+
+def _norm_dir(d: str) -> str:
+    parts: list[str] = []
+    for seg in d.replace("\\", "/").split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(seg)
+    return "/".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# the gate
+# ---------------------------------------------------------------------------
+
+def verify(path: Path, args, tmp: Path) -> bool:
     rep = Report(path.name)
     print(f"\n=== {path.name} ===")
-    index, about, paths, itf, ptf = read_conda(path)
+    root = extract_conda(path, tmp / path.stem)
+    index = load_json(root, "info/index.json", {})
+    about = load_json(root, "info/about.json", {})
+    paths = load_json(root, "info/paths.json", {"paths": []})
+    noarch = bool(args.noarch)
+    name = index.get("name", "")
+    cfg = _package_cfg(name)
+    links_torch = cfg.get("links_torch", True) if cfg else None
 
     # ---- filename / build string agree with the cell it claims -------------
     stem = path.name[: -len(".conda")]
-    expected = f"{index.get('name')}-{index.get('version')}-{index.get('build')}"
+    expected = f"{name}-{index.get('version')}-{index.get('build')}"
     rep.check(stem == expected,
               f"filename matches index.json ({stem} vs {expected})")
-    m = BUILD_RE.match(str(index.get("build", "")))
-    rep.check(bool(m), f"build string parses as a cell: {index.get('build')!r}")
+    m = None
+    if noarch:
+        rep.check(index.get("noarch") == "python",
+                  f"index.json says noarch: python (got {index.get('noarch')!r})")
+        rep.check(index.get("subdir") == "noarch",
+                  f"subdir is noarch (got {index.get('subdir')!r})")
+    else:
+        m = BUILD_RE.match(str(index.get("build", "")))
+        rep.check(bool(m), f"build string parses as a cell: {index.get('build')!r}")
+        if m and links_torch is not None:
+            # A torch-free package has no torch axis in its build string and a
+            # torch-linked one must have it; package.yml decides which.
+            rep.check(bool(m.group("torch")) == bool(links_torch),
+                      f"build string's torch axis agrees with package.yml links_torch="
+                      f"{links_torch} ({index.get('build')!r})")
     rep.check("+" not in str(index.get("version", "")),
               "version carries no '+' local tag (conda sorts those BELOW the plain version)")
 
-    # ---- paths.json matches the payload ------------------------------------
-    payload = {mem.name for mem in ptf.getmembers() if mem.isfile() or mem.issym()}
-    declared = {p["_path"] for p in paths.get("paths", [])}
-    rep.check(declared == payload,
-              f"paths.json matches payload (declared {len(declared)}, payload {len(payload)})")
+    # ---- paths.json matches the payload: names, sizes AND hashes -----------
+    # The old check compared names only. A file whose bytes differ from what
+    # paths.json records installs fine and fails only when a solver verifies
+    # the package (or never), so the hash is checked here where it is cheap.
+    files = payload_files(root)
+    declared = {p["_path"]: p for p in paths.get("paths", [])}
+    rep.check(set(declared) == set(files),
+              f"paths.json matches payload (declared {len(declared)}, payload {len(files)}; "
+              f"only in paths.json: {sorted(set(declared) - set(files))[:3]}, "
+              f"only in payload: {sorted(set(files) - set(declared))[:3]})")
+    bad_hash, checked_hash = [], 0
+    for rel, ent in declared.items():
+        p = files.get(rel)
+        if p is None or p.is_symlink() or ent.get("path_type") == "softlink":
+            continue
+        data = p.read_bytes()
+        checked_hash += 1
+        if ent.get("sha256") and ent["sha256"] != hashlib.sha256(data).hexdigest():
+            bad_hash.append(f"{rel}: sha256")
+        elif ent.get("size_in_bytes") is not None and ent["size_in_bytes"] != len(data):
+            bad_hash.append(f"{rel}: size {ent['size_in_bytes']} != {len(data)}")
+        elif not ent.get("sha256"):
+            bad_hash.append(f"{rel}: no sha256 recorded")
+    rep.check(not bad_hash,
+              f"every paths.json sha256/size matches the payload ({checked_hash} files; "
+              f"mismatches: {bad_hash[:3]})")
 
     # ---- dist-info hygiene (conda-torch's lessons) -------------------------
-    rec = [n for n in payload if n.endswith(".dist-info/RECORD")]
+    rec = [n for n in files if n.endswith(".dist-info/RECORD")]
     rep.check(not rec, "no RECORD in dist-info (pip uninstall would delete conda's files)")
-    durl = [n for n in payload if n.endswith("direct_url.json")]
+    durl = [n for n in files if n.endswith("direct_url.json")]
     rep.check(not durl, "no direct_url.json (it poisons pip freeze with a build path)")
-    inst = [n for n in payload if n.endswith(".dist-info/INSTALLER")]
+    inst = [n for n in files if n.endswith(".dist-info/INSTALLER")]
     if inst:
         # rattler-build 0.75 normalises this file during packaging, appending a
-        # trailing newline: a recipe writing exactly b"conda" still ships
-        # b"conda\n", and there is no knob to stop it. A byte-exact assert here
-        # is unsatisfiable, so compare the content, not the trailing whitespace.
-        val = ptf.extractfile(inst[0]).read()
+        # trailing newline; compare the content, not the trailing whitespace.
+        val = files[inst[0]].read_bytes()
         rep.check(val.strip() == b"conda", f"INSTALLER names conda (got {val!r})")
 
     # ---- dependencies: non-empty, and the torch flavour lock ---------------
     depends = index.get("depends", [])
     rep.check(bool(depends), f"run deps are non-empty ({len(depends)} entries)")
+    dep_names = {d.split(" ", 1)[0] for d in depends}
     torch_dep = [d for d in depends if d.split(" ", 1)[0] == "pytorch"]
     if m and m.group("torch"):
         rep.check(bool(torch_dep), "declares a pytorch dependency")
@@ -255,257 +515,366 @@ def verify(path: Path, ledger: set, expect_arch: str, tmp: Path) -> bool:
                   f"(got {torch_dep!r}) -- the torch we build against exports a "
                   f"flavour-blind run_export, so without this a "
                   f"cu{m.group('cu')} build can pair with another flavour")
+    elif m and links_torch is False:
+        rep.check(not torch_dep,
+                  f"a links_torch: false package declares no pytorch dependency (got {torch_dep!r})")
 
     # ---- interpreter ABI ----------------------------------------------------
-    # A build string claiming py312 must carry a matching python_abi run dep.
-    # A bare `python` bound lets a cp312 extension module install into py3.10;
-    # for torch-linked packages pytorch's own python_abi masks that
-    # transitively, which is exactly why it must be asserted here rather than
-    # assumed -- the mask is absent for any package that does not link torch.
     if m and m.group("py"):
-        pytag = m.group("py")                      # e.g. "312"
-        want = f"{pytag[0]}.{pytag[1:]}"           # "3.12"
+        pytag = m.group("py")
+        want = f"{pytag[0]}.{pytag[1:]}"
         abi = [d for d in depends if d.split(" ", 1)[0] == "python_abi"]
         rep.check(bool(abi), f"declares a python_abi dependency (build says py{pytag})")
         rep.check(any(d.split()[1].startswith(want) for d in abi if len(d.split()) >= 2),
                   f"python_abi pins {want} to match the build string (got {abi!r})")
 
     # ---- states its own GPU requirement -------------------------------------
-    # Inheriting __cuda through libtorch is enough for the solver, but a
-    # consumer that wants to know whether a package needs a GPU should not have
-    # to walk a dependency closure to find out -- comfy-test's accelerator lint
-    # asks exactly this, on a bare checkout with nothing installed.
-    rep.check(any(d.split(" ", 1)[0] == "__cuda" for d in depends),
-              "declares __cuda directly (GPU requirement readable without a closure walk)")
+    if not noarch:
+        rep.check("__cuda" in dep_names,
+                  "declares __cuda directly (GPU requirement readable without a closure walk)")
 
     # ---- no build-toolchain passengers -------------------------------------
-    # rattler-build ships whatever appeared in $PREFIX during the build, and
-    # build.sh mutates $PREFIX on purpose: it moves the real nvcc aside to put
-    # a ccache wrapper in its seat. `bin/nvcc.real` is then a NEW file, so it
-    # was packaged -- a 27.5 MB CUDA compiler inside torchvision, declared in
-    # paths.json, in every artifact this repo had built. build.sh now restores
-    # the prefix on exit; this asserts it, because the failure is completely
-    # silent otherwise (the package installs, imports and works).
     STOWAWAY = re.compile(
         r"(^|/)(nvcc|cicc|cudafe\+\+|ptxas|nvlink|fatbinary|nvdisasm|cuobjdump"
-        r"|ninja|ccache|patchelf|cc1|cc1plus|ld|as)(\.real)?$")
-    stowaways = sorted(n for n in payload if STOWAWAY.search(n))
+        r"|ninja|ccache|patchelf|cc1|cc1plus|ld|as)(\.real|\.exe)?$")
+    stowaways = sorted(n for n in files if STOWAWAY.search(n))
     rep.check(not stowaways,
               f"ships no build-toolchain binaries ({stowaways[:3]})")
 
     # ---- no vendored torch --------------------------------------------------
-    vendored_torch = [n for n in payload
-                      if re.search(r"(^|/)(lib)?torch(_cpu|_cuda|_python)?\.(so|dll)", n)]
+    # c10, libc10_cuda and libtorch_cuda_linalg were missed by the earlier
+    # `(lib)?torch(_cpu|_cuda|_python)?` spelling; a wheel that vendors torch
+    # vendors ALL of these, and c10 is the smallest and easiest to overlook.
+    VENDORED_TORCH = re.compile(
+        r"(^|/)(lib)?(torch(_cpu|_cuda|_python|_cuda_linalg|_global_deps)?|c10|c10_cuda|"
+        r"caffe2_nvrtc|shm|nvfuser_codegen)(-[0-9a-f]{8})?\.(so|dll)(\.\d+)*$")
+    vendored_torch = [n for n in files if VENDORED_TORCH.search(n)]
     rep.check(not vendored_torch,
               f"ships no vendored torch libraries ({vendored_torch[:3]})")
 
+    # ---- the binaries -------------------------------------------------------
+    exts = sorted(n for n in files
+                  if re.search(r"\.(so(\.\d+)*|pyd|dll)$", n, re.I) and not files[n].is_symlink())
+    elfs = [n for n in exts if is_elf(files[n])]
+    pes: dict[str, tuple] = {}
+    for n in exts:
+        if n in elfs:
+            continue
+        h = pe_header(files[n].read_bytes())
+        if h is not None:
+            pes[n] = h
+    is_win = bool(pes) and not elfs
+    if noarch:
+        rep.check(not exts, f"a noarch package ships no compiled modules ({exts[:3]})")
+    else:
+        rep.check(bool(exts), f"ships compiled extension modules ({len(exts)})")
+        rep.check(bool(elfs) != bool(pes),
+                  f"binaries are one platform's ({len(elfs)} ELF, {len(pes)} PE)")
+
     # ---- ELF sanity: $ORIGIN-relative RPATHs, no absolute/empty entries -----
-    exts, bad_rpath, checked = [], [], 0
-    for mem in ptf.getmembers():
-        if not mem.isfile() or not re.search(r"\.(so|so\.\d+|pyd)$", mem.name):
-            continue
-        data = ptf.extractfile(mem).read()
-        exts.append(mem.name)
-        dyn = elf_dynamic(data, tmp, mem.name)
-        if dyn is None:
-            continue
-        checked += 1
-        for line in dyn.splitlines():
-            if "RPATH" in line or "RUNPATH" in line:
-                val = line.split("[", 1)[-1].rstrip("]").strip()
-                for entry in val.split(":"):
-                    if entry == "" or entry.startswith("/"):
-                        bad_rpath.append((mem.name, val))
-    rep.check(bool(exts), f"ships compiled extension modules ({len(exts)})")
-    rep.check(not bad_rpath,
-              f"RPATH lint clean over {checked} ELFs "
-              f"(absolute or empty entries: {bad_rpath[:2]})")
+    dyn: dict[str, tuple[list[str], list[str]]] = {}
+    bad_rpath = []
+    for n in elfs:
+        needed, rpaths = elf_dynamic(files[n])
+        dyn[n] = (needed, rpaths)
+        for entry in rpaths:
+            if entry == "" or entry.startswith("/"):
+                bad_rpath.append((n, entry))
+    if elfs:
+        rep.check(not bad_rpath,
+                  f"RPATH lint clean over {len(elfs)} ELFs "
+                  f"(absolute or empty entries: {bad_rpath[:2]})")
 
     # ---- declared linkage must be REAL --------------------------------------
-    # A codec that fails to be detected does not fail the build: torchvision
-    # prints a warning, ships an image extension linking libpng alone, still
-    # imports, and still carries libjpeg-turbo/libwebp/libnvjpeg in `depends`
-    # via run_exports -- so the metadata claims codecs the binary does not
-    # have and decode_jpeg raises only on the user's machine. conda-forge hit
-    # the same trap and patched setup.py to raise instead of warn
-    # (torchvision-feedstock, 0002-Force-nvjpeg-and-force-failure.patch).
-    # Asserting the DT_NEEDED here is the same fail-closed idea one level out:
-    # it needs no patch per upstream version, and unlike the GPU verify op it
-    # runs on a CI box with no GPU, which is where the fan-out happens.
-    expect_linked = _expect_linked(index.get("name", ""))
+    # torchvision prints a warning when a codec is not detected, ships an
+    # image extension without it, and still carries libjpeg-turbo/libwebp/
+    # libnvjpeg in `depends` via run_exports. Asserting DT_NEEDED here is the
+    # fail-closed idea one level out, and it runs on a GPU-less CI box.
+    needed_all: set[str] = set()
+    for n in elfs:
+        needed_all.update(dyn[n][0])
+    for n, (_, _, imports) in pes.items():
+        needed_all.update(imports)
+    expect_linked = _expect_linked(name)
     if expect_linked and exts:
-        needed, is_pe = set(), False
-        for mem in ptf.getmembers():
-            if not mem.isfile() or not re.search(r"\.(so|so\.\d+|pyd|dll)$", mem.name):
-                continue
-            blob = ptf.extractfile(mem).read()
-            # DT_NEEDED is an ELF concept. On win-64 the equivalent statement
-            # lives in the PE import directory, and asking readelf about a .pyd
-            # returns nothing -- which this gate previously read as "links
-            # none of them" and failed on, reporting NEEDED=[] for a binary
-            # whose imports it had never looked at.
-            imports = pe_imports(blob)
-            if imports is not None:
-                is_pe, _ = True, needed.update(imports)
-                continue
-            dyn = elf_dynamic(blob, tmp, mem.name)
-            for line in (dyn or "").splitlines():
-                m2 = re.search(r"Shared library: \[([^\]]+)\]", line)
-                if m2:
-                    needed.add(m2.group(1))
-
-        if is_pe:
-            # The expectation itself is platform-specific: `libjpeg` is an ELF
-            # soname and the same library is `jpeg8.dll` here, so matching the
-            # Linux list against PE imports would be a guess at a naming
-            # convention. A package states the Windows names itself, or this
-            # gate says plainly that it cannot judge -- it does not invent a
-            # mapping and then report confidence in it.
-            expect_win = _expect_linked(index.get("name", ""), key="expect_linked_win")
-            # FAILS when the Windows list is absent, and this was a warning
-            # first -- which is how run 34169055830 published a torchvision
-            # win-64 artifact whose .pyd imports libpng16.dll and NOTHING for
-            # jpeg, webp or nvjpeg. That is the exact trap this gate exists to
-            # catch, and warning about it let it through. A package that states
-            # the expectation on one platform and cannot be checked on another
-            # does not get to publish there.
-            if not rep.check(bool(expect_win),
-                             f"declares verify.expect_linked_win, without which the "
-                             f"codec gate cannot run on win-64. Imports actually "
-                             f"present: {sorted(needed)}"):
-                pass
-            else:
-                low = {n.lower() for n in needed}
-                missing = [w for w in expect_win
-                           if not any(n.startswith(w.lower()) for n in low)]
-                # The interesting imports, with the platform's own runtime
-                # dropped. Every PE imports KERNEL32, the CRT and the
-                # api-ms-win-* apisets, and they sort to the front -- so a
-                # truncated list showed ten of those and none of the libraries
-                # the check is actually about, which is the opposite of what a
-                # failure message is for.
-                interesting = sorted(
-                    n for n in needed
-                    if not n.lower().startswith(("kernel32", "msvcp", "vcruntime",
-                                                 "api-ms-win-", "ucrtbase",
-                                                 "advapi32", "user32"))
-                )
+        if is_win:
+            expect_win = _expect_linked(name, key="expect_linked_win")
+            # FAILS when the Windows list is absent; a warning here is how run
+            # 34169055830 published a torchvision win-64 artifact whose .pyd
+            # imports libpng16.dll and nothing for jpeg, webp or nvjpeg.
+            if rep.check(bool(expect_win),
+                         f"declares verify.expect_linked_win, without which the codec "
+                         f"gate cannot run on win-64. Imports actually present: "
+                         f"{sorted(needed_all)}"):
+                low = {x.lower() for x in needed_all}
+                missing = [w for w in expect_win if not any(x.startswith(w.lower()) for x in low)]
+                interesting = sorted(x for x in needed_all if not WIN_SYSTEM_DLLS.match(x))
                 rep.check(not missing,
                           f"imports every DLL package.yml says it must "
                           f"(missing {missing}; non-system imports={interesting})")
         else:
-            missing = [w for w in expect_linked
-                       if not any(n.startswith(w) for n in needed)]
+            missing = [w for w in expect_linked if not any(x.startswith(w) for x in needed_all)]
             rep.check(not missing,
                       f"links every library package.yml says it must "
-                      f"(missing {missing}; NEEDED={sorted(needed)[:8]})")
+                      f"(missing {missing}; NEEDED={sorted(needed_all)[:8]})")
 
-    # ---- provenance: the from-source guarantee, recorded --------------------
-    extra = about.get("extra") or {}
-    rep.check(extra.get("built_from_source") is True,
-              f"about.extra.built_from_source is true (got {extra.get('built_from_source')!r})")
-    rep.check(extra.get("prebuilt_wheel_used") is False,
-              f"about.extra.prebuilt_wheel_used is false (got {extra.get('prebuilt_wheel_used')!r})")
-    rep.check(bool(extra.get("torch_build")),
-              f"records the exact torch build it compiled against ({extra.get('torch_build')!r})")
-    rev = str(extra.get("source_rev") or "")
-    rep.check(bool(rev) and rev.lower() not in ("main", "master", "head"),
-              f"records a non-floating source_rev ({rev!r})")
+    # ---- compiler provenance ------------------------------------------------
+    # What compiled each shipped binary, read from the binary. On Linux every
+    # object records its compiler in `.comment`; the linked module carries the
+    # union. On win-64 there is no such section, and the PE optional header's
+    # linker version is the toolset that produced it.
+    if elfs:
+        foreign, no_cf, cf_majors = [], [], set()
+        for n in elfs:
+            entries = elf_comment(files[n])
+            cf = [e for e in entries if COMMENT_CONDA_FORGE.match(e)]
+            other = [e for e in entries
+                     if not COMMENT_CONDA_FORGE.match(e) and not COMMENT_SYSROOT.match(e)]
+            if not cf:
+                no_cf.append(n)
+            for e in cf:
+                cf_majors.add(COMMENT_CONDA_FORGE.match(e).group("ver"))
+            for e in other:
+                foreign.append((n.rsplit("/", 1)[-1], e))
+        rep.check(not foreign and not no_cf,
+                  f"every ELF was compiled by conda-forge's gcc and nothing else "
+                  f"(foreign compilers: {foreign[:3]}; no conda-forge mark: {no_cf[:3]})")
+        if args.expect_gcc:
+            rep.check(cf_majors == {str(args.expect_gcc)},
+                      f"the conda-forge gcc in .comment is the cell's gcc {args.expect_gcc} "
+                      f"(found majors {sorted(cf_majors)})")
+    if pes:
+        bad_linker = []
+        for n, (maj, mino, _) in pes.items():
+            lo, hi = MSVC_LINKER.get(args.expect_msvc or "", (20, 50))
+            if maj != 14 or not (lo <= mino < hi):
+                bad_linker.append((n.rsplit("/", 1)[-1], f"{maj}.{mino}"))
+        rep.check(not bad_linker,
+                  f"every PE was linked by the conda MSVC toolset "
+                  f"({args.expect_msvc or 'vs2019/vs2022'}: linker 14.{MSVC_LINKER.get(args.expect_msvc or '', (20, 50))[0]}-"
+                  f"{MSVC_LINKER.get(args.expect_msvc or '', (20, 50))[1] - 1}; "
+                  f"offenders: {bad_linker[:3]})")
 
     # ---- L3: the compile ledger -------------------------------------------
-    # What this CAN establish, and what it cannot.
-    #
-    # The ledger is a list of translation units the nvcc wrapper actually
-    # compiled -- source paths like ".../torchvision/csrc/ops/cuda/nms_kernel.cu".
-    # The shipped artifact contains linked MODULES, named for the extension
-    # (_C.so, image.so). There is no general mapping between the two: _C.so is
-    # linked from dozens of TUs and none of them is called "_C".
-    #
-    # This check used to compare those two name sets directly and require
-    # every module stem to appear as a compiled file name. That can only pass
-    # for a package whose TU happens to share its module's name, which is none
-    # of them -- every artifact this repo has ever built fails it. It never
-    # fired because the workflow calls verify_conda.py without --ledger, so
-    # the whole branch was dead: L3 was documented as a publish gate, was
-    # never run, and could not have passed if it were.
-    #
-    # So it asserts the two things the ledger genuinely proves:
-    #   1. an artifact that ships compiled modules must have compiled
-    #      something -- an empty ledger beside a .so means the binary came
-    #      from somewhere this build did not look (a vendored blob, or a
-    #      prebuilt wheel that L1 failed to stop);
-    #   2. every TU came from THIS build's work tree, so nothing was compiled
-    #      out of a system path or a foreign checkout.
-    # Neither proves a particular .so was linked only from ledger TUs; that
-    # needs link-line capture, which the wrapper does not do. Stated plainly
-    # rather than implied by a check that looks stronger than it is.
-    if ledger is not None and exts:
-        rep.check(bool(ledger),
-                  f"compile ledger is non-empty for an artifact shipping "
-                  f"{len(exts)} extension module(s)")
-        # Only ABSOLUTE paths can be judged. cmake invokes nvcc from a build
-        # subdirectory inside the work tree and passes the source relatively
-        # ("../../../../../src/libtorchaudio/cuctc/src/..."), so a relative
-        # entry is by construction under the compiler's cwd, which is the
-        # work tree. Rejecting those flagged torchaudio -- a package built
-        # entirely from our own source -- so the check was wrong, not the
-        # artifact. setuptools-driven builds pass absolute paths and are
-        # still covered.
-        def _absolute(x):
-            # A Windows TU path is "C:\\...\\work\\..." and starts with a
-            # drive letter, not "/". Testing startswith("/") alone made this
-            # assertion inert on win-64: it judged nothing and still printed
-            # ok, which is worse than not running.
-            return x.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", x) is not None
+    # What the ledger genuinely proves: (1) an artifact shipping compiled
+    # modules compiled SOMETHING, so the binaries did not arrive from a
+    # vendored blob or a prebuilt wheel L1 failed to stop; (2) every TU came
+    # from THIS build's work tree. It does not prove a particular .so was
+    # linked only from ledger TUs -- that needs link-line capture, which the
+    # wrapper does not do. Stated plainly rather than implied.
+    ledger_ok = None
+    if args.ledger is not None and exts and not noarch:
+        ledger = args.ledger
+        ledger_ok = rep.check(bool(ledger),
+                              f"compile ledger is non-empty for an artifact shipping "
+                              f"{len(exts)} extension module(s)")
+        # "/work/" matched every GitHub runner path (/home/runner/work/...),
+        # so the old anchor could not fail. The anchor is now the actual
+        # rattler-build work directory, passed in explicitly.
+        if rep.check(bool(args.work_dir),
+                     "--work-dir given: the build's work tree is known, so 'foreign TU' can be judged"):
+            wd = _norm_dir(str(args.work_dir)).lower()
 
-        def _in_work(x):
-            return "/work/" in x.replace("\\", "/")
+            def _absolute(x):
+                return x.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", x) is not None
 
-        foreign = sorted(x for x in ledger if _absolute(x) and not _in_work(x))
-        rep.check(not foreign,
-                  f"no compiled TU came from outside the build work tree "
-                  f"({len(ledger)} TUs; foreign: {foreign[:2]})")
+            def _in_work(x):
+                return _norm_dir(x).lower().startswith(wd + "/")
+
+            foreign_tu = sorted(x for x in ledger if _absolute(x) and not _in_work(x))
+            ledger_ok = rep.check(not foreign_tu,
+                                  f"no compiled TU came from outside {args.work_dir} "
+                                  f"({len(ledger)} TUs; foreign: {foreign_tu[:2]})") and ledger_ok
+    elif exts and not noarch:
+        rep.warn("no --ledger: L3 (compile ledger) not judged; the publish workflow always passes one")
+
+    # ---- provenance: DERIVED, then compared with what about.json claims -----
+    # `built_from_source: true` / `prebuilt_wheel_used: false` are template
+    # constants; a constant cannot be evidence. The evidence is (a) the
+    # ledger -- non-empty, every TU inside the work tree -- and (b) every
+    # shipped binary carrying conda-forge's compiler mark, which a wheel
+    # fetched from PyPI (manylinux devtoolset, `GCC: (GNU) x.y (Red Hat`
+    # alone) or built on the runner (`Ubuntu`) does not. about.json must
+    # AGREE with the derivation, so the claim is checked, not copied.
+    extra = about.get("extra") or {}
+    if not noarch and exts:
+        compiled_here = all(
+            any(COMMENT_CONDA_FORGE.match(e) for e in elf_comment(files[n])) for n in elfs
+        ) if elfs else all(h[0] == 14 for h in pes.values())
+        derived_built = bool(compiled_here and (ledger_ok is None or ledger_ok))
+        derived_prebuilt = not compiled_here or ledger_ok is False
+        rep.check(derived_built,
+                  f"derived: built from source (compiler marks on every module: {compiled_here}, "
+                  f"ledger: {ledger_ok if ledger_ok is not None else 'not judged'})")
+        rep.check(extra.get("built_from_source") is derived_built,
+                  f"about.extra.built_from_source agrees with the derivation "
+                  f"(claims {extra.get('built_from_source')!r}, derived {derived_built})")
+        rep.check(extra.get("prebuilt_wheel_used") is derived_prebuilt,
+                  f"about.extra.prebuilt_wheel_used agrees with the derivation "
+                  f"(claims {extra.get('prebuilt_wheel_used')!r}, derived {derived_prebuilt})")
+    else:
+        rep.check(extra.get("built_from_source") is True,
+                  f"about.extra.built_from_source is true (got {extra.get('built_from_source')!r})")
+        rep.check(extra.get("prebuilt_wheel_used") is False,
+                  f"about.extra.prebuilt_wheel_used is false (got {extra.get('prebuilt_wheel_used')!r})")
+
+    # The torch it compiled against: a real build string of the cell's flavour
+    # for a torch-linked package, the literal `none` for a torch-free one.
+    # `unrecorded` is the template's default and was passing as truthy.
+    tb = str(extra.get("torch_build") or "")
+    if noarch:
+        pass
+    elif links_torch is False or (m and not m.group("torch")):
+        rep.check(tb == "none",
+                  f"torch-free package records torch_build: none (got {tb!r})")
+    else:
+        ok_tb = bool(m) and bool(re.match(rf"^cuda{m.group('cu')}_\w+_py{m.group('py')}_h[0-9a-f]+_\d+$", tb))
+        rep.check(ok_tb,
+                  f"records the exact torch build it compiled against, of the cell's flavour "
+                  f"and python (got {tb!r})")
+    rev = str(extra.get("source_rev") or "")
+    rep.check(bool(re.fullmatch(r"[0-9a-f]{40}", rev)),
+              f"source_rev is a 40-hex commit, not a tag or branch ({rev!r})")
 
     # ---- SASS arch census ---------------------------------------------------
-    # The census is taken over the UNION of every shipped extension module,
-    # not over the largest one. This used to inspect only the biggest .so,
-    # which asks the wrong question of any package that splits its kernels
-    # by architecture: sageattention builds _qattn_sm89 for sm_89/90/120 only
-    # (its FP8 QMMA path is nothing but __brkpt() traps below Ada, so the
-    # patch filters those gencodes out on purpose) beside _qattn_sm80 and
-    # _fused carrying the whole list -- and the sm89 module is the largest
-    # of the four. The cell's promise is "this ARTIFACT carries SASS for
-    # every arch in the list"; a per-module reading of it fails an artifact
-    # that keeps the promise. For a single-module package the two readings
-    # are identical, so nothing is loosened there.
-    if expect_arch and exts:
-        want = {a.replace(".", "").replace("+PTX", "") for a in expect_arch.split()}
+    # Over the UNION of every shipped module: sageattention splits kernels by
+    # architecture and keeps the cell's promise as an artifact, not per file.
+    if args.expect_arch and exts and not noarch:
+        want = {a.replace(".", "").replace("+PTX", "") for a in args.expect_arch.split()}
         got, per_module = set(), {}
-        for n in exts:
-            p = tmp / "sass.so"
-            p.write_bytes(ptf.extractfile(n).read())
-            out = subprocess.run(["cuobjdump", "--list-elf", str(p)],
+        cuobjdump = shutil.which(os.environ.get("CUW_CUOBJDUMP", "cuobjdump"))
+        if not rep.check(bool(cuobjdump), "cuobjdump is available for the SASS census (fail closed without it)"):
+            exts_for_census = []
+        else:
+            exts_for_census = exts
+        for n in exts_for_census:
+            out = subprocess.run([cuobjdump, "--list-elf", str(files[n])],
                                  capture_output=True, text=True).stdout
             archs = set(re.findall(r"sm_(\d+)", out))
             if archs:
                 per_module[n.rsplit("/", 1)[-1]] = sorted(archs)
             got |= archs
-        # A package may declare `verify.no_sass: <reason>` -- cumm's core_cc
-        # is C++ against the CUDA runtime and compiles its kernels through
-        # NVRTC at run time, so it carries no device code by design. For such
-        # a package "covers the arch list" has no meaning, and the question
-        # becomes the opposite one: any SASS at all means the artifact is not
-        # the one the declaration describes. Stated by the package, asserted
-        # here, so the census never passes it by finding nothing to count.
-        no_sass = _verify_field(index.get("name", ""), "no_sass")
-        if no_sass:
+        no_sass = _verify_field(name, "no_sass")
+        if not cuobjdump:
+            pass
+        elif no_sass:
+            # cumm's core_cc is C++ against the runtime and compiles its
+            # kernels through NVRTC at run time; "covers the arch list" has no
+            # meaning, and the question becomes the opposite one.
             rep.check(not got,
                       f"ships no SASS, as package.yml declares ({str(no_sass).strip()[:60]}...); "
                       f"found {sorted(got)} in {per_module}")
         else:
-            rep.check(want <= got or not got,
+            # `want <= got or not got` passed an artifact with ZERO SASS -- an
+            # extension whose kernels were never compiled in. Empty is a
+            # failure unless the package declares verify.no_sass.
+            rep.check(bool(got) and want <= got,
                       f"SASS archs cover the cell's arch list (want {sorted(want)}, "
                       f"got {sorted(got)} over {len(exts)} module(s): {per_module})")
+
+    # ---- linkage against the DECLARED closure ------------------------------
+    # Two questions, both answered from a prefix holding the declared run
+    # closure (the workflow solves one from the local output + the live
+    # channels; clean_verify does the same from the live channel alone):
+    #   * resolvability: every DT_NEEDED / PE import is found through the
+    #     binary's own RPATH inside the artifact or the prefix, through the
+    #     torch preloader contract (only if pytorch is declared), or is
+    #     glibc / the OS -- anything else fails to load on the user's box;
+    #   * overdepending: every declared run dep that provides a shared
+    #     library is linked by something in the artifact, unless package.yml
+    #     `verify.allow_unlinked` names it with a reason (a dlopen'd library,
+    #     a run_export the package needs for headers only).
+    if exts and not noarch:
+        if args.dep_prefix is None:
+            rep.warn("no --dep-prefix: DT_NEEDED resolvability and overdepending not judged; "
+                     "the publish workflow always passes one")
+        else:
+            prefix = Path(args.dep_prefix)
+            owner, provides = closure_providers(prefix)
+            pfiles = closure_files(prefix)
+            rep.check(bool(owner),
+                      f"--dep-prefix {prefix} holds an installed closure "
+                      f"({len(provides)} package(s) providing shared libraries)")
+            torch_declared = bool({"pytorch", "libtorch"} & dep_names)
+            torch_libdirs = [d for d in pfiles if d.endswith("torch/lib")] if torch_declared else []
+            allow_transitive = {str(x).split()[0].lower()
+                                for x in (_verify_field(name, "allow_transitive") or [])}
+            unresolved, transitive = [], []
+
+            def _undeclared(so: str) -> str | None:
+                """The provider of a resolvable library when NONE of them is declared."""
+                provs = owner.get(so.lower(), set())
+                if not provs or provs & dep_names or name in provs:
+                    return None
+                if TORCH_PRELOADED.match(so) and torch_declared:
+                    return None
+                return "/".join(sorted(provs))
+
+            for n in exts:
+                here = n.rsplit("/", 1)[0] if "/" in n else ""
+                if n in dyn:
+                    needed, rpaths = dyn[n]
+                    search = []
+                    for r in rpaths:
+                        if r.startswith("$ORIGIN"):
+                            search.append(_norm_dir(here + r[len("$ORIGIN"):]))
+                    for so in needed:
+                        key = so.lower()
+                        if so in GLIBC_SONAMES:
+                            continue
+                        found = any(
+                            (f"{d}/{so}" if d else so) in files or key in pfiles.get(d, ())
+                            for d in search)
+                        if not found and torch_libdirs and TORCH_PRELOADED.match(so):
+                            found = any(key in pfiles[d] for d in torch_libdirs)
+                        if not found:
+                            unresolved.append((n.rsplit("/", 1)[-1], so, search))
+                        elif _undeclared(so) and key not in allow_transitive:
+                            transitive.append((so, _undeclared(so)))
+                else:
+                    _, _, imports = pes[n]
+                    # Windows search: the .pyd's own directory, the env root
+                    # (python3XX.dll), Library/bin (on PATH once activated),
+                    # torch/lib (os.add_dll_directory in `import torch`).
+                    search = [here, "", "Library/bin"] + torch_libdirs
+                    for dll in imports:
+                        key = dll.lower()
+                        if WIN_SYSTEM_DLLS.match(dll):
+                            continue
+                        found = any((f"{d}/{dll}" if d else dll) in files or key in pfiles.get(d, ())
+                                    for d in search)
+                        if not found:
+                            unresolved.append((n.rsplit("/", 1)[-1], dll, search[:3]))
+                        elif _undeclared(dll) and key not in allow_transitive:
+                            transitive.append((dll, _undeclared(dll)))
+            rep.check(not unresolved,
+                      f"every DT_NEEDED / PE import resolves through the artifact, the declared "
+                      f"closure or the torch preloader contract (unresolved: {unresolved[:3]})")
+            # Underlinking, the other direction: a library the binary needs that
+            # arrives only because some OTHER dependency happens to drag it in.
+            # It loads today and stops loading the day that dependency drops it,
+            # which is conda-build's overlinking error and conda-forge's reason
+            # for `error_overlinking: true`. `verify.allow_transitive` names a
+            # soname with a reason when the indirection is the design.
+            rep.check(not transitive,
+                      f"every linked library is provided by a DECLARED run dep, not only a "
+                      f"transitive one (underlinked: {sorted(set(transitive))[:4]})")
+
+            allow = {str(x).split()[0] for x in (_verify_field(name, "allow_unlinked") or [])}
+            needed_low = {x.lower() for x in needed_all}
+            over = []
+            for dep in sorted(dep_names):
+                if dep.startswith("__") or dep in ("python", "python_abi", "pytorch", "libtorch"):
+                    continue
+                sonames = provides.get(dep)
+                if not sonames or dep in allow:
+                    continue
+                if not (sonames & needed_low):
+                    over.append(dep)
+            rep.check(not over,
+                      f"every declared run dep that provides a shared library is linked "
+                      f"(overdepending: {over}; add to verify.allow_unlinked with a reason if "
+                      f"it is dlopen'd or header-only)")
 
     print(f"--- {path.name}: {'FAIL' if rep.failed else 'PASS'}")
     return not rep.failed
@@ -516,18 +885,34 @@ def main() -> int:
     ap.add_argument("artifacts", nargs="+", type=Path)
     ap.add_argument("--ledger", type=Path,
                     help="compile ledger written by the nvcc wrapper (one TU per line)")
+    ap.add_argument("--work-dir", default="",
+                    help="rattler-build's work directory for this build "
+                         "(.../bld/rattler-build_<name>/work); required with --ledger")
     ap.add_argument("--expect-arch", default="", help="the cell's arch list")
+    ap.add_argument("--expect-gcc", default="",
+                    help="linux: the cell's gcc major, which .comment must name")
+    ap.add_argument("--expect-msvc", default="",
+                    help="win-64: vs2019 or vs2022, which the PE linker version must match")
+    ap.add_argument("--dep-prefix", type=Path, default=None,
+                    help="a prefix holding the package's declared run closure "
+                         "(for DT_NEEDED resolvability and overdepending)")
+    ap.add_argument("--noarch", action="store_true",
+                    help="a pure-python noarch artifact: run the packaging gates only")
     ap.add_argument("--tmp", type=Path, default=Path("/tmp/verify-conda"))
     args = ap.parse_args()
     args.tmp.mkdir(parents=True, exist_ok=True)
 
-    ledger = set()
-    if args.ledger and args.ledger.is_file():
-        ledger = {ln.strip() for ln in args.ledger.read_text().splitlines() if ln.strip()}
+    if args.ledger is not None:
+        if not args.ledger.is_file():
+            print(f"FAIL --ledger {args.ledger} does not exist")
+            return 1
+        args.ledger = {ln.strip() for ln in args.ledger.read_text().splitlines() if ln.strip()}
+    if args.expect_msvc and args.expect_msvc not in MSVC_LINKER:
+        sys.exit(f"--expect-msvc must be one of {sorted(MSVC_LINKER)}")
 
     allok = True
     for a in args.artifacts:
-        allok &= verify(a, ledger, args.expect_arch, args.tmp)
+        allok &= verify(a, args, args.tmp)
     return 0 if allok else 1
 
 
