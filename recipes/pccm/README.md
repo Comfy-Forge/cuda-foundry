@@ -32,12 +32,23 @@ What it keeps from the rules that do apply:
 
 ## Building and publishing it
 
-There is no matrix cell for it, so it is built by hand and published to the
-`noarch` release, with its fragment committed under `meta/noarch/`:
+The published `pccm-0.4.16-pyh4616a5c_0` is the one artifact on the channel
+built on a developer box (`run_id: "local"` in its fragment), which the
+audit flagged and which the "builds happen in CI" rule now forbids. So
+`scripts/generate_matrix.py --package pccm` emits a single `noarch` job
+(`platform: noarch`, no CUDA/torch/python axes, `recipe:
+recipes/pccm/recipe.yaml`, `--skip-published` honoured against
+`meta/noarch/`), and the workflow builds it like this, on the linux-64 runner:
 
     rattler-build build --recipe recipes/pccm/recipe.yaml \
-        --output-dir out --test native -c conda-forge
-    gh release upload noarch out/noarch/pccm-0.4.16-*.conda
+        --output-dir "$RUNNER_TEMP/out" --test native --no-build-id \
+        -c conda-forge
+    python tools/fragment.py "$RUNNER_TEMP"/out/noarch/pccm-*.conda noarch
+    gh release upload noarch "$RUNNER_TEMP"/out/noarch/pccm-*.conda
+
+No source tarball: the recipe's `git:` source is fetched by rattler-build
+itself, outside the build script, which still runs under nonet.py. Bump
+`CUW_BUILD_NUMBER` to republish (the fragment name carries it).
     python tools/fragment.py out/noarch/pccm-0.4.16-*.conda noarch
 
 `--test native` runs the recipe's import tests inside a fresh solve of the

@@ -29,6 +29,12 @@ source:
 build:
   number: ${{ env.get("CUW_BUILD_NUMBER", default="0") }}
   noarch: python
+  # The same packaging-time gate every generated recipe carries.
+  files:
+    exclude:
+      - "**/*.dist-info/RECORD"
+      - "**/*.dist-info/REQUESTED"
+      - "**/*.dist-info/direct_url.json"
   script:
     content: |
       set -euo pipefail
@@ -40,7 +46,8 @@ build:
       # `pip uninstall` deletes files conda owns. direct_url.json names this
       # machine's checkout and must not ship.
       SITE="$($PYTHON -c 'import sysconfig;print(sysconfig.get_paths()["purelib"])')"
-      rm -f "$SITE"/pccm-*.dist-info/RECORD "$SITE"/pccm-*.dist-info/direct_url.json
+      rm -f "$SITE"/pccm-*.dist-info/RECORD "$SITE"/pccm-*.dist-info/direct_url.json \
+            "$SITE"/pccm-*.dist-info/REQUESTED
       # Whether the package IMPORTS is asked in tests: below, in a fresh solve
       # of the built artifact with its run deps -- not here, where cwd is the
       # source tree and ccimport is deliberately absent from host.
@@ -66,15 +73,23 @@ requirements:
     - portalocker >=2.3.2
 
 tests:
+  - package_contents:
+      files:
+        not_exists:
+          - "**/*.dist-info/RECORD"
+          - "**/*.dist-info/REQUESTED"
+          - "**/*.dist-info/direct_url.json"
   - python:
       imports:
         - pccm
         - pccm.builder
         - pccm.extension
+      pip_check: true
 
 about:
   homepage: https://github.com/FindDefinition/PCCM
   license: MIT
+  license_file: LICENSE
   summary: Python C++ code manager -- the code generator behind cumm and spconv
   repository: https://github.com/FindDefinition/PCCM
 

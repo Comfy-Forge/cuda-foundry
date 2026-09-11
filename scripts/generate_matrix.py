@@ -236,7 +236,19 @@ def main() -> int:
     arch_policy = pl.load_arch_policy()
     pkg_dir = pl.PACKAGES_DIR / args.package
     if not pkg_dir.is_dir():
-        sys.exit(f"unknown package {args.package!r} (packages/{args.package} not found)")
+        noarch = noarch_job(args.package, policy, args.build_number, args.skip_published)
+        if noarch is None:
+            sys.exit(f"unknown package {args.package!r} (packages/{args.package} not "
+                     f"found, and recipes/{args.package} is not a noarch recipe)")
+        jobs = [noarch] if noarch else []
+        payload = json.dumps(jobs, indent=1)
+        if args.output:
+            args.output.write_text(payload + "\n")
+        else:
+            print(payload)
+        print(f"{args.package}: noarch, {len(jobs)} job(s)"
+              + ("" if jobs else " (already published; fragment exists)"), file=sys.stderr)
+        return 0
     cfg = pl.load_package(pkg_dir)
 
     platforms = policy["platforms"] if args.platform == "all" else [args.platform]
@@ -418,6 +430,56 @@ def main() -> int:
 
 def _ver(v: str):
     return tuple(int(x) for x in re.findall(r"\d+", v))
+
+
+def noarch_job(name: str, policy: dict, build_number: int, skip_published: bool):
+    """One job for a hand-written `noarch: python` recipe (pccm), or None.
+
+    pccm has no package.yml -- recipes/pccm/README.md says why -- so it has no
+    cell either: no CUDA, torch or python axis, one artifact for every cell.
+    It was the one artifact on the channel built on a developer box
+    (`run_id: "local"`), which the 2026-09 audits flagged; this gives the
+    workflow a job to build it in CI with provenance like everything else.
+    The job carries `platform: noarch` and the recipe path, and the fields a
+    compile cell would have are absent rather than faked, so a workflow step
+    that expects a CUDA cell fails loudly on it instead of building nonsense.
+    What the job needs from the workflow: check out, install rattler-build,
+    `rattler-build build --recipe <recipe> --output-dir $RUNNER_TEMP/out
+    --test native --no-build-id -c conda-forge` on the linux-64 runner (the
+    recipe's git: source is fetched by rattler-build outside the build
+    script, which still runs under nonet.py), then tools/fragment.py with
+    subdir `noarch` and an upload to the `noarch` release.
+
+    Returns None if there is no such recipe, {} if --skip-published found its
+    fragment, and the job otherwise.
+    """
+    recipe = Path(__file__).resolve().parent.parent / "recipes" / name / "recipe.yaml"
+    if not recipe.is_file():
+        return None
+    text = recipe.read_text()
+    if not re.search(r"^\s*noarch:\s*python\s*$", text, re.M):
+        return None
+    m = re.search(r'^\s*version:\s*"?([0-9][^"\s]*)"?\s*$', text, re.M)
+    version = m.group(1) if m else ""
+    if not version:
+        sys.exit(f"{recipe}: could not read a context.version to name the job")
+    meta = recipe.parent.parent.parent / "meta" / "noarch"
+    if skip_published and any(meta.glob(f"{name}-{version}-*_{build_number}.conda.json")):
+        return {}
+    return {
+        "package": name,
+        "folder": name,
+        "version": version,
+        "platform": "noarch",
+        "noarch": True,
+        "recipe": str(recipe.relative_to(recipe.parent.parent.parent)),
+        "runner": policy["runners"]["linux-64"],
+        "build_number": build_number,
+        "build_string": f"pyh*_{build_number}",
+        "sharding": 1, "shard_index": 1, "shard_count": 1,
+        "links_torch": False,
+        "family": False,
+    }
 
 
 if __name__ == "__main__":
