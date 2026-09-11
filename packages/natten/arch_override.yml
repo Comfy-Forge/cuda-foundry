@@ -29,11 +29,12 @@ arch_list_by_cuda:
 
 # ---------------------------------------------------------------------------
 # win-64 rows: the same lists without 10.0. Enabling Blackwell DC sets
-# NATTEN_WITH_BLACKWELL_FNA, which pulls in CUTLASS's
-# sm100_fmha_bwd_kernel_tma_warpspecialized.hpp, and MSVC rejects that header
-# with C2061 (syntax error: identifier) -- the farm measured it on every
-# natten Windows shard at this same revision and toolset (VS2022), and there
-# is no __CUDA_ARCH__ guard or shim that makes cl parse it. A compiler
+# NATTEN_WITH_BLACKWELL_FNA, which compiles NATTEN's own
+# csrc/include/natten/cuda/fna_blackwell/kernel/sm100_fna_bwd_kernel_tma_warpspecialized.hpp,
+# and MSVC rejects it: measured here on run 34587897208, 22 of 23 shards,
+# `(1772): error C2061: syntax error: identifier 'PipelineState'`, at this
+# revision and toolset (VS2022 19.44), matching what the farm saw on the same
+# header's FMHA sibling. No __CUDA_ARCH__ guard or shim makes cl parse it. A compiler
 # limitation on one header, not a knob. sm_120 (Blackwell consumer) is
 # unaffected -- it compiles through the regular CUTLASS-FNA path -- and
 # stays; only the datacentre parts (B200/GB200) are absent, on Windows only,

@@ -15,8 +15,8 @@
   their own kernel families and are built as sm_90a / sm_100a in separate
   object libraries; 12.0 carries the PTX tail. win-64 has its own rows
   (`arch_list_by_cuda_win`, read by generate_matrix.py) without 10.0: MSVC
-  rejects CUTLASS's sm_100 FMHA backward header with C2061, measured by the
-  farm at this revision and toolset.
+  rejects NATTEN's sm_100 FNA backward kernel header with C2061 (run
+  34587897208, 22 of 23 shards, at this revision and toolset).
 
 ## Sharding: the package partitions itself
 
