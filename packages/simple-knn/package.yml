@@ -16,13 +16,31 @@ version: "1.0.0"
 # "free for non-commercial, research and evaluation use under the terms of the
 # LICENSE.md file" -- the Inria/MPII Gaussian-Splatting License the code was
 # extracted from (graphdeco-inria/gaussian-splatting, submodules/simple-knn).
-# Named as a LicenseRef, same as diff-gaussian-rasterization.
+# Named as a LicenseRef, same as diff-gaussian-rasterization; the TEXT is
+# fetched from graphdeco-inria by the patch (see license_files).
 license: LicenseRef-Gaussian-Splatting-License
 homepage: https://github.com/camenduru/simple-knn
 summary: 3DGS's mean nearest-neighbour distance kernel (distCUDA2), compiled against the conda-torch channel
+repository: https://github.com/camenduru/simple-knn
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# The repo carries no licence text at all; every source header points at the
+# Gaussian-Splatting LICENSE.md it was extracted from, so the patch fetches
+# that file from graphdeco-inria/gaussian-splatting (commit- and
+# sha256-pinned) and writes it here, where both outputs pick it up.
+license_files:
+  - LICENSE.md
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# PyPI's `simple_knn` (2.0.1, Chaitanya Kasaraneni) is an unrelated kNN library.
+pypi_project: null
 
 source_repo: camenduru/simple-knn
 source_rev: 60f461f4a56b7967e5d8045bf92f8c33f36976d0
+# The one thing the patch does is write LICENSE.md (commit- and sha256-pinned
+# from graphdeco-inria/gaussian-splatting); no source is touched.
+patch_script: packages/simple-knn/patches/simple_knn.py
 
 links_torch: true
 
@@ -44,8 +62,7 @@ run_deps: []
 # spatial.cu / simple_knn.cu include cuda_runtime.h, cub/cub.cuh and
 # thrust/device_vector.h (both in cuda-cccl, already in build:), and
 # cooperative_groups.h (cuda-cudart-dev).
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 
