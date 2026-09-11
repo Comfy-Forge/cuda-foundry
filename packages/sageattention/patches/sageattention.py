@@ -65,6 +65,20 @@ content = sub_once(
     '    for item in arch_list_env.replace(",", " ").replace(";", " ").split():',
     "arch parser accepts space-separated TORCH_CUDA_ARCH_LIST")
 
+# 1b. deterministic gencode order --------------------------------------------
+# compute_capabilities is a SET of strings, and setup.py iterates it to build
+# the -gencode list, so the order on nvcc's command line follows python's
+# per-process hash seed: the same cell printed {'12.0+PTX','8.9','9.0',...}
+# in one process and {'8.9','9.0','8.6',...} in the next. ccache hashes the
+# argument list in order, so the link job replayed 1 of 10 translation
+# units and missed 9 (run 34586313326) -- the caches were byte-identical in
+# content and unreachable by key. Sorting is the whole fix.
+content = sub_once(
+    content,
+    "    for capability in compute_capabilities:",
+    "    for capability in sorted(compute_capabilities):",
+    "gencode list emitted in a deterministic order (ccache replay)")
+
 # 2. platform-aware host flags ---------------------------------------------
 content = sub_once(
     content,
