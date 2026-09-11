@@ -361,6 +361,40 @@ The honest limit: the gate covers the **72 nvcc** translation units, not the
 one C++ one, because nothing caches that one. It is recompiled in the link job
 and it appears in the ledger like everything else.
 
+### Measured, run 34536935639
+
+The first green win-64 flash-attn cell. Everything above this line was design
+or inference until this run; these are the numbers it produced.
+
+| | |
+|---|---|
+| link job ccache | **72 hit(s) / 0 miss(es) over 72 nvcc translation unit(s)** |
+| shard caches merged | 25 of 25 |
+| declaration check | `shard_sources matches ninja exactly (73 TUs)`, in every shard and in the link job |
+| ledger | `ninja recorded 73 output(s), 73 object(s), for 1 extension module`; 73 TUs written |
+| slice balance | 3 / 3 / 2 …, no shard empty (`compiles 3 of 73 declared translation unit(s); 70 stubbed`) |
+| shard wall clock | ~15 min end to end, against a 6-hour limit |
+| published | `flash-attn-2.8.3-cuda128_torch28_py312_h6651153_1.conda`, `flash_attn-2.8.3+cu128torch2.8-1-cp312-cp312-win_amd64.whl` |
+| gates | every `verify_conda` and `verify_wheel` check passed, including the SASS census (`want ['100','120','80','90'], got ['100','120','80','90']`) and the PE import-table torch linkage |
+
+For contrast, the monolithic attempt this replaces — run 34195844795 — reached
+**41 of 73** translation units in six hours and was killed by the job limit,
+which extrapolates to about 10.5 hours.
+
+Two things the first attempt (run 34535550849, then 34535747572) cost, both
+worth keeping written down because neither is about compilers:
+
+- **`sha256sum` with a filename on the command line cannot pass on Windows.**
+  GNU coreutils escapes a backslash in the filename by prefixing the whole
+  output line with a backslash, and `RUNNER_TEMP` is `D:\a\_temp` — so the
+  digest read back as `\2568347a…` and never matched the pin. Hash from
+  **stdin**, where there is no filename in the output.
+- **git-bash's `tar` reads `D:\a\_temp/x.tar.gz` as a REMOTE archive** — host
+  `D`, path the rest — and tries to rsh to it: `tar (child): Cannot connect to
+  D: resolve failed`. Every shard died there after a build that had already
+  succeeded. `cygpath -u` on both the archive and the `-C` directory is the
+  fix; the conversion is guarded on cygpath existing, so Linux is untouched.
+
 ### What is NOT sharded on win-64, and why
 
 `sharding: 1` means one shard, not none, so on linux-64 every cell runs a
