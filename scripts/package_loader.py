@@ -45,6 +45,31 @@ PREBUILT_FETCHING_UPSTREAMS = {
 
 CARRY_VALUES = {"complete", "distinct-name"}
 
+# Platform selectors a conditional run dep may use. rattler-build's own
+# vocabulary, so the template renders them as `- if: <sel>` unchanged.
+PLATFORM_SELECTORS = {"linux", "win", "unix", "osx"}
+
+
+def resolve_run_deps(run_deps, platform: str) -> list:
+    """Flatten conditional run deps for one target platform (conda subdir).
+
+    `{if: linux, then: triton}` contributes "triton" on linux-64/aarch64 and
+    nothing on win-64; plain strings pass through. The wheel side needs this
+    because its sidecar is written from package.yml, not from the rendered
+    recipe, and must say the same thing the .conda says for that platform.
+    """
+    fam = "win" if platform.startswith("win") else (
+        "osx" if platform.startswith("osx") else "linux")
+    out = []
+    for d in run_deps or []:
+        if isinstance(d, dict):
+            sel = d["if"]
+            if sel == fam or (sel == "unix" and fam != "win"):
+                out.append(d["then"])
+        else:
+            out.append(d)
+    return out
+
 
 def load_policy() -> dict:
     """Owned axes: supported_cudas, python_min, platforms, runners, defaults."""
@@ -170,6 +195,24 @@ def _check_dependencies_declared(cfg: dict, pkg_dir: Path) -> None:
             raise SystemExit(
                 f"ERROR: {pkg_dir.name}/package.yml: {key} must be a list, "
                 f"got {type(v).__name__}.")
+    # A run dep may be platform-conditional: `{if: linux, then: triton}`.
+    # Needed because a dependency can exist on one subdir and nowhere on
+    # another -- `triton` has no win-64 build on conda-forge or conda-torch
+    # (measured), so an unconditional `triton` makes every win-64 cell of a
+    # triton-using package UNSAT, while omitting it everywhere makes the
+    # linux-64 metadata a lie. The selector vocabulary is rattler-build's own
+    # (`if: linux` / `if: win` / `if: unix`), rendered verbatim into `run:`,
+    # and tools/make_wheel.py resolves the same entries for the sidecar.
+    for d in cfg.get("run_deps") or []:
+        if isinstance(d, str):
+            continue
+        if (not isinstance(d, dict) or set(d) != {"if", "then"}
+                or d["if"] not in PLATFORM_SELECTORS
+                or not isinstance(d["then"], str) or not d["then"].strip()):
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}/package.yml: run_deps entry {d!r} must "
+                f"be a conda spec string or a mapping {{if: <selector>, then: "
+                f"<spec>}} with selector in {sorted(PLATFORM_SELECTORS)}.")
 
 
 def _check_force_source_build(cfg: dict, pkg_dir: Path) -> None:

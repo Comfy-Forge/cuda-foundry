@@ -884,3 +884,149 @@ def exclude_top_level_packages(names, path: str | Path = "setup.py") -> int:
     p.write_text(new, encoding="utf-8", errors="surrogateescape")
     print(f"{p}: excluded top-level package(s) {wanted} from the wheel")
     return len(wanted)
+
+
+# --------------------------------------------------------------------------
+# Header-only third-party trees that upstream expects at a fixed path but
+# does not carry -- Eigen, for every package in the TRELLIS family. Upstream
+# pins it as a gitlab submodule; visualbruno's forks committed the parent
+# tree flat and lost the submodule; DPVO's README says "download it".
+#
+# Fetched HERE, at patch time, because the fetch step is the only place with
+# network: the build runs under the seccomp filter and cannot download
+# anything, which is the whole point. As a release TARBALL rather than a git
+# clone, because a tarball can be pinned by sha256 and a shallow clone of a
+# rate-limited host (gitlab returns 403 to GitHub runners often enough that
+# the farm switched) cannot. The hash is checked before anything is
+# extracted; a drift in what the URL serves fails loudly instead of quietly
+# compiling against different headers.
+# --------------------------------------------------------------------------
+
+
+def vendor_tarball(url: str, sha256: str, dst: str | Path,
+                   marker_file: str, strip: int = 1) -> bool:
+    """Download `url`, verify its sha256, extract it into `dst`.
+
+    `strip` leading path components are removed (the archive's own top-level
+    directory). Idempotent: if `dst/marker_file` already exists nothing is
+    fetched. Returns True when a fetch happened.
+    """
+    import hashlib
+    import io
+    import shutil
+    import tarfile
+    import urllib.request
+
+    dst = Path(dst)
+    if (dst / marker_file).is_file():
+        print(f"patch_lib: {dst} already present ({marker_file}); not fetched")
+        return False
+    last = None
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r:
+                data = r.read()
+            break
+        except Exception as e:  # noqa: BLE001 - retried, then reported
+            last = e
+            import time
+            time.sleep(2 ** attempt)
+    else:
+        raise SystemExit(f"PATCH FAILED: could not download {url}: {last}")
+    got = hashlib.sha256(data).hexdigest()
+    require(got == sha256,
+            f"{url}: sha256 {got} does not match the pinned {sha256}. The "
+            f"archive served at this URL changed; re-verify it by hand before "
+            f"updating the pin.")
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        for m in tf.getmembers():
+            parts = Path(m.name).parts[strip:]
+            if not parts or any(p in ("..", "") for p in parts):
+                continue
+            m.name = str(Path(*parts))
+            if m.isdir() or m.isfile():
+                tf.extract(m, dst)
+    require((dst / marker_file).is_file(),
+            f"{url}: extracted into {dst} but {marker_file} is not there -- the "
+            f"archive layout is not what strip={strip} expects")
+    print(f"patch_lib: {url} -> {dst} (sha256 verified, {len(data)} bytes)")
+    return True
+
+
+# Eigen, the two pins this repo uses. Both are gitlab release archives.
+EIGEN_3_4_0 = ("https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz",
+               "8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72")
+# The commit JeffreyXiang/cubvh @ ce92267 pins as its own third_party/eigen
+# submodule (2024-03-29 master). Post-3.4.0 on purpose: 3.4.0's
+# arg_default_impl reaches `arg` through EIGEN_USING_STD, which expands to
+# `using ::arg;` on the nvcc device pass, and MSVC has no global ::arg -- the
+# break that took out every Windows torch>=2.12 (C++20) cell in the farm.
+# This commit hardcodes `using std::arg;` on the MSVC>=1920 branch. Do not
+# track master either: current master hard-#errors below sm_70.
+EIGEN_E63D9F6 = ("https://gitlab.com/libeigen/eigen/-/archive/"
+                 "e63d9f6ccb7f6f29f31241b87c542f3f0ab3112b/"
+                 "eigen-e63d9f6ccb7f6f29f31241b87c542f3f0ab3112b.tar.gz",
+                 "4474797c3b711dc23d010c25f6fb448715920ddf2fb6b3d8fff89f2cf4ab4911")
+
+
+def vendor_eigen(dst: str | Path, pin=EIGEN_3_4_0) -> bool:
+    """Put an Eigen tree at `dst` (so that dst/Eigen/Dense exists)."""
+    url, sha = pin
+    return vendor_tarball(url, sha, dst, marker_file="Eigen/Dense")
+
+
+# --------------------------------------------------------------------------
+# Packages that live in a SUBDIRECTORY of their repository: o-voxel/ inside
+# microsoft/TRELLIS.2, extensions/vox2seq/ inside microsoft/TRELLIS. The farm
+# had a `build_subdir` knob for these; here the build script runs `pip wheel .`
+# at the root of whatever the source tarball unpacks to, and there is no
+# second place to say otherwise -- so the patch step, which is the only step
+# that sees the whole checkout, makes the subdirectory BE the root.
+#
+# Everything outside the subdirectory is deleted, not merely ignored: the
+# rest of TRELLIS.2 is a research pipeline with assets and configs that
+# would otherwise ride along in every source tarball and inflate the ledger's
+# idea of the work tree for nothing. The repository's LICENSE is carried in
+# first, because the subdirectory usually has none of its own and the wheel's
+# dist-info should say what the artifact is licensed under.
+# --------------------------------------------------------------------------
+
+
+def hoist_subdir(subdir: str | Path, carry=("LICENSE", "LICENSE.md", "LICENSE.txt")) -> None:
+    """Replace the working tree with the contents of `subdir`. Idempotent:
+    if `subdir` is gone and the tree already looks hoisted, do nothing."""
+    import shutil
+
+    sub = Path(subdir)
+    marker = Path(".cuw-hoisted-from")
+    if marker.is_file():
+        require(marker.read_text().strip() == str(sub),
+                f"hoist_subdir: tree was already hoisted from "
+                f"{marker.read_text().strip()!r}, not {str(sub)!r}")
+        print(f"patch_lib: tree already hoisted from {sub}")
+        return
+    require(sub.is_dir(), f"hoist_subdir: {sub} is not a directory in this checkout")
+    for name in carry:
+        src = Path(name)
+        if src.is_file() and not (sub / name).exists():
+            shutil.copy2(src, sub / name)
+            print(f"patch_lib: carried {name} into {sub}")
+    tmp = Path("._cuw_hoist_tmp")
+    require(not tmp.exists(), f"hoist_subdir: {tmp} already exists")
+    shutil.move(str(sub), str(tmp))
+    for p in Path(".").iterdir():
+        if p.name in (tmp.name, ".git"):
+            continue
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
+    for p in tmp.iterdir():
+        shutil.move(str(p), p.name)
+    tmp.rmdir()
+    marker.write_text(str(sub) + "\n")
+    print(f"patch_lib: hoisted {sub} to the source root; the rest of the "
+          f"checkout is gone")

@@ -580,7 +580,9 @@ def main() -> int:
     import package_loader as pl
     cfg = pl.load_package(pl.PACKAGES_DIR / args.package)
     links_torch = cfg.get("links_torch", True)
-    run_deps = cfg.get("run_deps") or []
+    # Conditional entries (`{if: linux, then: triton}`) resolved for THIS
+    # platform, so the sidecar says what the .conda for the same subdir says.
+    run_deps = pl.resolve_run_deps(cfg.get("run_deps") or [], args.platform)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     print(f"== {args.package}: {args.wheel.name}")
