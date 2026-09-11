@@ -1,0 +1,50 @@
+{
+ "arch": "x86_64",
+ "build": "cuda128_py312_h550930f_1",
+ "build_number": 1,
+ "depends": [
+  "python",
+  "__cuda",
+  "cuda-cudart >=12.8,<13.0a0",
+  "pccm >=0.4.16",
+  "ccimport >=0.4.4",
+  "sympy",
+  "cuda-cudart-dev",
+  "cuda-cccl",
+  "cuda-nvcc-tools",
+  "cuda-version >=12.8,<13",
+  "__glibc >=2.28,<3.0.a0",
+  "libgcc-ng >=12",
+  "libstdcxx-ng >=12",
+  "python_abi 3.12.* *_cp312",
+  "cuda-nvrtc >=12.8.93,<13.0a0",
+  "numpy >=1.25,<3"
+ ],
+ "license": "Apache-2.0",
+ "md5": "36ff00d655c8f2a308ddae1795d4b541",
+ "name": "cumm",
+ "platform": "linux",
+ "provenance": {
+  "arch_list": "7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "12.8",
+  "prebuilt_wheel_used": false,
+  "run_id": "34628405570",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34628405570",
+  "source_rev": "b8d83b6511b70746d04485d0d2ec00896b735430",
+  "torch_build": "none"
+ },
+ "purls": [
+  "pkg:pypi/cumm@0.7.11"
+ ],
+ "run_exports": {
+  "weak": [
+   "cumm >=0.7.11,<0.8.0 cuda128_*"
+  ]
+ },
+ "sha256": "8c344e0cdb25957f3a2f2d5f835a4dda58f16211918235bd1a267f2ad4a29db2",
+ "size": 1591377,
+ "subdir": "linux-64",
+ "timestamp": 1789148770662,
+ "version": "0.7.11"
+}
