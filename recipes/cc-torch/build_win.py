@@ -815,14 +815,26 @@ def main() -> int:
         os.environ["PYTORCH_NVCC"] = launcher
         log(f"=== PYTORCH_NVCC={launcher}")
         # The same cache, through cmake's door. A CMake-driven package (natten)
-        # never reads PYTORCH_NVCC; cmake >= 3.17 takes the initial value of
-        # every target's CUDA_COMPILER_LAUNCHER property from this variable
-        # and runs `<launcher> <nvcc> <args>` -- the same command line as the
-        # two-token PYTORCH_NVCC above, reached from the other build system.
-        # Whichever driver the package uses picks up its own hook; the other
-        # is inert, so both are set rather than declaring which one applies.
-        os.environ["CMAKE_CUDA_COMPILER_LAUNCHER"] = ccache
-        log(f"=== CMAKE_CUDA_COMPILER_LAUNCHER={ccache}")
+        # never reads PYTORCH_NVCC; cmake's CUDA_COMPILER_LAUNCHER target
+        # property runs `<launcher> <nvcc> <args>` -- the same command line as
+        # the two-token PYTORCH_NVCC above, reached from the other build
+        # system. NOT the CMAKE_CUDA_COMPILER_LAUNCHER environment variable,
+        # although cmake reads it: an environment variable also initialises
+        # every try_compile() test project, so cmake's own CUDA ABI probe went
+        # through ccache too -- 6 lookups for 5 translation units, measured on
+        # natten run 34588033649, 7 of 7 finished shards -- and a probe lives
+        # in a random CMakeScratch/TryCompile-XXXXXX/ directory that no cache
+        # key can ever match again, so the link job's zero-miss gate could
+        # never pass. The Linux wrapper sends probes straight to the real
+        # compiler for exactly this reason. Here the launcher is handed to the
+        # package as a cmake ARGUMENT for its main configure only: try_compile
+        # does not propagate CMAKE_<LANG>_COMPILER_LAUNCHER into its test
+        # project, so the probe compiles bare and the real targets are cached.
+        # A cmake-driven package's setup.py appends CUW_CMAKE_ARGS to its
+        # cmake invocation (natten's patch does); torch-driven packages never
+        # read it.
+        os.environ["CUW_CMAKE_ARGS"] = f"-DCMAKE_CUDA_COMPILER_LAUNCHER={ccache}"
+        log(f"=== CUW_CMAKE_ARGS={os.environ['CUW_CMAKE_ARGS']}")
         subprocess.run([ccache, "-z"], capture_output=True)
 
     if mode == "shard":

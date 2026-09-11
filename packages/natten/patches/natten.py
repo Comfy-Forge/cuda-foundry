@@ -399,6 +399,12 @@ t = sub_once(t, AUTOGEN_ANCHOR, AUTOGEN_NEW, "shard partition injected after aut
 CMAKE_ARGS_ANCHOR = '''            cmake_args = [
                 f"-DPYTHON_PATH={sys.executable}",'''
 CMAKE_ARGS_NEW = '''            cmake_args = [
+                # cuda-foundry: the win-64 shard/link lane hands the ccache
+                # launcher over as a cmake argument (CUW_CMAKE_ARGS) rather than
+                # the CMAKE_CUDA_COMPILER_LAUNCHER environment variable, which
+                # would also reach cmake's own try_compile probes and put an
+                # uncacheable TU in every job. Empty everywhere else.
+                *__import__("shlex").split(os.environ.get("CUW_CMAKE_ARGS", "")),
                 # cuda-foundry: the C++ standard the torch being built against
                 # needs. torch's own cpp_extension flipped its MSVC default to
                 # /std:c++20 at 2.12 (its headers require it from 2.13); torch
@@ -415,6 +421,7 @@ final = setup_file.read_text()
 for needle, what in (("CUW_NATTEN_PTX_ARCH", "the PTX shim"),
                      ("CUW_SHARD_COUNT", "the shard partition"),
                      ("-DCXX_STD=", "the C++ standard switch"),
+                     ("CUW_CMAKE_ARGS", "the cmake-argument hook"),
                      ('os.environ["NATTEN_BUILD_DIR"]', "the build-dir pin")):
     require(needle in final, f"natten: {what} is NOT PRESENT in setup.py on disk")
 import ast  # noqa: E402
