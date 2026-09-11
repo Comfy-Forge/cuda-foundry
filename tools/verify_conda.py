@@ -368,6 +368,28 @@ def _credited(pkg: str) -> set[str]:
     return out
 
 
+def is_link_target(rel: str) -> bool:
+    """Whether a file at this prefix-relative path can be a LINK target.
+
+    A dependency provides a shared library only where the dynamic loader
+    can be pointed at it: lib/ (and the CUDA packages' targets/<arch>/lib/)
+    on linux, Library/bin on win-64. A Python package that ships extension
+    modules -- numpy, pillow -- or a Python package's private libraries
+    (torchvision-extra-decoders' *.libs/) live under site-packages, are
+    imported by the interpreter, and are never DT_NEEDED by anything; the
+    first torchvision cell of the rebuilt pipeline was refused as
+    "overdepending on numpy, pillow, torchvision-extra-decoders" because
+    the census counted them. Excluding site-packages does not weaken the
+    torch preloader contract: that resolves through torch/lib by path, not
+    through this census.
+    """
+    p = rel.replace("\\", "/")
+    if "/site-packages/" in p or p.startswith("site-packages/"):
+        return False
+    return (p.startswith("lib/") or re.match(r"^targets/[^/]+/lib/", p) is not None
+            or p.startswith("Library/bin/") or "/" not in p)
+
+
 def closure_providers(prefix: Path) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     """(soname/dll basename -> packages credited with it, package -> its sonames).
 
@@ -388,6 +410,8 @@ def closure_providers(prefix: Path) -> tuple[dict[str, set[str]], dict[str, set[
             continue
         name = d.get("name") or rec.stem.rsplit("-", 2)[0]
         for f in d.get("files") or []:
+            if not is_link_target(f):
+                continue
             base = f.rsplit("/", 1)[-1]
             if re.search(r"\.(so(\.\d+)*|dll)$", base, re.I):
                 for credited in _credited(name):

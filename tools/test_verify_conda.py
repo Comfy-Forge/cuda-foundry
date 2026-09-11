@@ -463,6 +463,37 @@ def main() -> int:
     tree = good_tree(td / "gomp", needed=NEEDED + ["libgomp.so.1"])
     ok, out = run_verify(make_conda(td / "out-gomp", tree, base_index(), base_about()), tmp, **common)
     check(ok, "(j) libgomp.so.1 is credited to the declared libgcc (delivered via _openmp_mutex)")
+    # A Python package that ships extension modules or private libraries is
+    # imported, never linked: declaring it is not overdepending (torchvision
+    # cell 34624209472 was refused for numpy, pillow and
+    # torchvision-extra-decoders). A lib/ provider nothing links still is.
+    py_prefix = make_prefix(td / "prefix-py", {
+        "pytorch": ["lib/python3.12/site-packages/torch/lib/libc10.so"],
+        "cuda-cudart": ["lib/libcudart.so.12"],
+        "libstdcxx": ["lib/libstdc++.so.6"],
+        "libgcc": ["lib/libgcc_s.so.1"],
+        "numpy": ["lib/python3.12/site-packages/numpy/_core/_multiarray_umath.cpython-312-x86_64-linux-gnu.so",
+                  "lib/python3.12/site-packages/numpy.libs/libscipy_openblas64_-ff651d7f.so"],
+        "torchvision-extra-decoders": ["lib/python3.12/site-packages/torchvision_extra_decoders/extra_decoders_lib.so",
+                                       "lib/python3.12/site-packages/torchvision_extra_decoders.libs/libavif-1a2b3c4d.so.16"],
+        "libfoo": ["lib/libfoo.so.1"],
+    })
+    idx = base_index(depends=base_index()["depends"] + ["numpy >=1.25", "torchvision-extra-decoders"])
+    ok, out = run_verify(make_conda(td / "out-pydep", good_tree(td / "pydep"), idx, base_about()), tmp,
+                         **dict(common, dep_prefix=py_prefix))
+    check(ok, "(j) declared numpy / torchvision-extra-decoders (site-packages DSOs only) are NOT overdepending")
+    if not ok:
+        print(out)
+    idx = base_index(depends=base_index()["depends"] + ["numpy >=1.25", "libfoo"])
+    ok, out = run_verify(make_conda(td / "out-libfoo", good_tree(td / "libfoo"), idx, base_about()), tmp,
+                         **dict(common, dep_prefix=py_prefix))
+    check(not ok and fails_on(out, "overdepending: ['libfoo']"),
+          "(j) ...while a declared lib/libfoo.so.1 that nothing links IS flagged, and numpy still is not")
+    tree = good_tree(td / "pyprivate", needed=NEEDED + ["libavif.so.16"])
+    ok, out = run_verify(make_conda(td / "out-pyprivate", tree, base_index(), base_about()), tmp,
+                         **dict(common, dep_prefix=py_prefix))
+    check(not ok and fails_on(out, "resolves through the artifact") and not fails_on(out, "underlinked"),
+          "(j) a DT_NEEDED on a Python package's private DSO is unresolvable, not 'underlinked against it'")
     ok, out = run_verify(good, tmp, **dict(common, dep_prefix=td / "empty-prefix"))
     check(not ok and fails_on(out, "holds an installed closure"),
           "(f/j) a --dep-prefix with no conda-meta FAILS rather than resolving nothing")
