@@ -42,9 +42,23 @@ permissions:
   actions: read
 
 concurrency:
-  # Serialised per subdir: two jobs uploading into one release race on the
-  # asset list, and the existence check below would read a stale one.
-  group: publish-wheels-${{ inputs.subdir }}
+  # Serialised per ARTIFACT, not per subdir. This used to be keyed on the
+  # subdir alone ("two jobs uploading into one release race on the asset
+  # list"), and GitHub keeps only ONE pending run per group -- so a burst of
+  # link jobs finishing within seconds of each other had their queued
+  # dispatches silently evicted: runs 34586630528 (o-voxel-vb-ap linux-64)
+  # and 34587089070 (o-voxel-vb win-64) were cancelled before a job started,
+  # and the .conda from each build published while the wheel that passed
+  # every gate in the same job did not. `cancel-in-progress: false` does
+  # not protect against that; it governs the running run, not the queue.
+  #
+  # The stale-listing race the old comment describes needs two runs to
+  # carry the SAME filename. Different artifacts never do -- they upload
+  # different files into the release, and `gh release upload` without
+  # --clobber refuses a duplicate name loudly rather than overwriting -- so
+  # only a second dispatch of one artifact needs serialising, and this key
+  # still does exactly that.
+  group: publish-wheels-${{ inputs.subdir }}-${{ inputs.artifact }}
   cancel-in-progress: false
 
 jobs:
@@ -90,8 +104,10 @@ jobs:
           done
           [ "$missing" -eq 0 ] || exit 1
 
-          # One listing for the whole run; the concurrency group above is
-          # what makes it safe to reuse.
+          # One listing for the whole run. Other artifacts may be uploading
+          # into this release concurrently, but with different filenames;
+          # only a second dispatch of THIS artifact could race on a name,
+          # and the concurrency group serialises exactly that.
           gh release view "$SUBDIR" -R "$REPO" \
             --json assets --jq '.assets[].name' > /tmp/existing.txt
 
