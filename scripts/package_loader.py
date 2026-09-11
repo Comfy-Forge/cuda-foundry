@@ -15,6 +15,11 @@ What changed for conda:
   * `force_source_build` guards the no-prebuilt-wheel rule: an upstream whose
     build can fetch a binary must say how it is turned off.
   * `host_deps`, `pypi_name`, `import_name`, `carry` are new and owned here.
+  * `license_files` (required), `pypi_project`, `repository`,
+    `documentation`, `distribution_restriction`, `keep_run_exports`,
+    `run_exports` and `verify.allow_dso` / `verify.op_requires` came out of
+    the 2026-09 audits of the published channel; each check below says which
+    finding it closes.
 
 Layout:
     defaults/policy.yml              owned axes (cudas, python floor, platforms)
@@ -44,6 +49,31 @@ PREBUILT_FETCHING_UPSTREAMS = {
 }
 
 CARRY_VALUES = {"complete", "distinct-name"}
+
+# Host packages whose run_exports the template IGNORES by default. Every
+# torch-linked extension needs their HEADERS (ATen/cuda/CUDAContextLight.h
+# includes <cusparse.h>, and the CUDAContext.h chain pulls the rest), so they
+# sit in host: -- but their run_exports then declare libcublas, libcufft,
+# libcurand, libcusolver and libcusparse on every artifact, and not one binary
+# in the channel links any of them (measured on the published artifacts: the
+# DT_NEEDED sets carry libcudart and libtorch's own libraries, nothing else;
+# the four audits of the 88 published artifacts all cited this). cuda-nvtx is
+# header-only since v3, and libnvrtc is linked by exactly one package (cumm).
+# A package whose binary GENUINELY links one of these names it in
+# `keep_run_exports:` and the template leaves that export in place.
+IGNORED_CUDA_RUN_EXPORTS = [
+    "libcublas-dev", "libcufft-dev", "libcurand-dev", "libcusolver-dev",
+    "libcusparse-dev", "cuda-nvtx-dev", "cuda-nvrtc-dev",
+]
+
+# Host packages whose run_export SUBSUMES a bare run dep of the same name.
+# numpy's own export is `numpy >=1.25,<3` (its ABI window), so a package that
+# lists `numpy` in host_deps AND a bare `numpy` in run_deps would ship both --
+# cumm did -- and the bare one adds nothing. The template drops the bare entry
+# for these names only; anything else in run_deps is rendered verbatim, because
+# most host packages export nothing and dropping a bare run dep for one of
+# those would silently lose a real dependency (sympy, for one).
+HOST_RUN_EXPORT_SUBSUMES = {"numpy"}
 
 # Platform selectors a conditional run dep may use. rattler-build's own
 # vocabulary, so the template renders them as `- if: <sel>` unchanged.
@@ -413,6 +443,225 @@ def _check_build_env(cfg: dict, pkg_dir: Path) -> None:
     # and the typo it was guarding against fails the build loudly anyway.
 
 
+def _check_license_files(cfg: dict, pkg_dir: Path) -> None:
+    """`license_files` is mandatory: the paths rattler-build ships into
+    info/licenses/.
+
+    An artifact that redistributes a compiled upstream without its licence
+    text is the same defect conda-torch had when it repacked NVIDIA binaries
+    with the EULA stripped, and every one of the six audits of this channel
+    flagged that no artifact here carries info/licenses/ at all. Paths are
+    relative to the source root (the fetched, patched tree), one entry per
+    file, and a vendored third-party licence counts:
+
+        license_files: [LICENSE]
+        license_files: [LICENSE, third_party/cutlass/LICENSE.txt]
+    """
+    v = cfg.get("license_files")
+    if v is None or (isinstance(v, list) and not v):
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml does not declare license_files. "
+            f"List the licence file(s) rattler-build must ship into "
+            f"info/licenses/, as paths relative to the source root, e.g. "
+            f"`license_files: [LICENSE]` or "
+            f"`license_files: [LICENSE, third_party/cutlass/LICENSE.txt]`. "
+            f"Read the pinned revision to find them; an artifact that "
+            f"redistributes upstream without its licence text may not be "
+            f"published.")
+    if not isinstance(v, list) or not all(isinstance(x, str) and x.strip() for x in v):
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: license_files must be a list of "
+            f"non-empty relative paths, got {v!r}.")
+    for x in v:
+        if x.startswith("/") or x.startswith("..") or "\\" in x:
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}/package.yml: license_files entry {x!r} "
+                f"must be a forward-slash path relative to the source root.")
+
+
+def _check_about_links(cfg: dict, pkg_dir: Path) -> None:
+    """`repository` / `documentation`: optional URLs for about: in the recipe.
+
+    `repository` defaults to the GitHub URL of source_repo; `documentation`
+    has no default because guessing one (docs.<name>.io) invents a link.
+    """
+    for key in ("repository", "documentation"):
+        v = cfg.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, str) or not re.match(r"https?://\S+$", v.strip()):
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}/package.yml: {key} must be an http(s) "
+                f"URL, got {v!r}.")
+
+
+def _check_cuda_host_deps(cfg: dict, pkg_dir: Path) -> None:
+    """The CUDA runtime -dev package may not be a host dep, and here is why.
+
+    The toolkit is pinned to the cell in build:, where the solve has no torch
+    in it. host: is a different solve: it holds pytorch, and pytorch's triton
+    pin drags host's `cuda-version` to whatever triton was built for (12.9
+    for the cu128 line, measured). A `cuda-cudart-dev` listed in host_deps
+    therefore resolves to 12.9 and its run_export stamps
+    `cuda-cudart >=12.9.79` onto an artifact labelled cuda128 -- which is
+    what every artifact in the channel carried before this check, and what
+    every audit cited first. Nothing needs it there: the headers come from
+    the build env (build.sh bridges $BUILD_PREFIX/targets/<arch>/include into
+    $CUDA_HOME/include and puts it FIRST on the include path; on win-64
+    nvcc.profile and build_win.py's INCLUDE/LIB prepend do the same), the
+    link resolves libcudart.so through the build env's dev symlink, and the
+    runtime dep is declared explicitly by the template with the cell's own
+    floor (`cuda-cudart >=<cuda_compiler_version>,<<major+1>.0a0`).
+
+    `keep_run_exports:` is the escape for the OTHER ignored -dev packages
+    (IGNORED_CUDA_RUN_EXPORTS): a package whose binary genuinely links one of
+    them keeps that export. cumm links libnvrtc, and is the only one today.
+    """
+    for key in ("host_deps", "host_deps_linux", "host_deps_win"):
+        for dep in cfg.get(key) or []:
+            if isinstance(dep, str) and dep.split()[0] == "cuda-cudart-dev":
+                raise SystemExit(
+                    f"ERROR: {pkg_dir.name}/package.yml lists cuda-cudart-dev in "
+                    f"{key}. Remove it: host's cuda-version floats to whatever "
+                    f"pytorch's triton needs (12.9 for the cu128 line), so a host "
+                    f"cuda-cudart-dev exports `cuda-cudart >=12.9.x` onto a "
+                    f"cuda128 artifact. The CUDA headers and the libcudart link "
+                    f"stub come from build: (cuda-cudart-dev is already there, "
+                    f"pinned to the cell), and the template declares the "
+                    f"`cuda-cudart` run dep itself with the cell's floor.")
+    keep = cfg.get("keep_run_exports")
+    if keep is None:
+        return
+    if not isinstance(keep, list) or not keep or not all(
+            isinstance(x, str) and x.strip() for x in keep):
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: keep_run_exports must be a "
+            f"non-empty list of package names, got {keep!r}.")
+    unknown = [x for x in keep if x not in IGNORED_CUDA_RUN_EXPORTS]
+    if unknown:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: keep_run_exports names "
+            f"{unknown}, which the template does not ignore in the first place "
+            f"(it ignores exactly {IGNORED_CUDA_RUN_EXPORTS}). A host package "
+            f"outside that list keeps its run_exports by default.")
+
+
+def normalize_pypi(name: str) -> str:
+    """PEP 503 normalisation: case-folded, runs of [-_.] collapsed to '-'."""
+    return re.sub(r"[-_.]+", "-", str(name)).lower()
+
+
+def _check_pypi_project(cfg: dict, pkg_dir: Path) -> None:
+    """`pypi_project`: the PyPI project this artifact GENUINELY provides.
+
+    tools/fragment.py and tools/make_repodata.py emit a `pkg:pypi/<project>`
+    purl only from this field. It used to be derived from pypi_name for every
+    package, and about 20 of those purls were false: 404 on PyPI, or a
+    DIFFERENT project that happens to share the name (`nunchaku` on PyPI is a
+    data-segmentation library, `drtk` is a squatted junk package, `cumesh` is
+    someone else's, `mmcv` on PyPI is the ops-less distribution). A purl is a
+    claim that pixi's conda->pypi map may act on -- it stops a second copy
+    being installed from PyPI -- so a wrong one is worse than none.
+
+    Unset (null) means "no purl": the safe default until the owner has checked
+    PyPI. When set it must match pypi_name after PEP 503 normalisation, or the
+    package must say why in `pypi_project_differs_because:`.
+    """
+    proj = cfg.get("pypi_project")
+    why = cfg.get("pypi_project_differs_because")
+    if proj is None:
+        if why:
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}/package.yml sets "
+                f"pypi_project_differs_because but no pypi_project.")
+        return
+    if not isinstance(proj, str) or not proj.strip():
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: pypi_project must be a PyPI "
+            f"project name or null, got {proj!r}.")
+    if normalize_pypi(proj) != normalize_pypi(cfg.get("pypi_name") or ""):
+        if not isinstance(why, str) or not why.strip():
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}/package.yml: pypi_project {proj!r} does "
+                f"not match pypi_name {cfg.get('pypi_name')!r} (PEP 503 "
+                f"normalised). If that is deliberate, say why in "
+                f"`pypi_project_differs_because:`; otherwise fix one of them.")
+
+
+def _check_distribution_restriction(cfg: dict, pkg_dir: Path) -> None:
+    """`distribution_restriction`: free text, rendered into about.extra and
+    surfaced in the README package table.
+
+    For a licence that forbids distribution somewhere (custom-rasterizer-hy3d2's
+    forbids the EU, the UK and South Korea). Whether such a package may be on
+    the channel at all is the owner's legal decision; this field makes the
+    restriction visible in the artifact and the README rather than deciding it.
+    """
+    v = cfg.get("distribution_restriction")
+    if v is None:
+        return
+    if not isinstance(v, str) or not v.strip():
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: distribution_restriction must "
+            f"be a non-empty string (or absent), got {v!r}.")
+
+
+def _check_run_exports(cfg: dict, pkg_dir: Path) -> None:
+    """`run_exports`: what a package this repo builds exports to ITS consumers.
+
+    Either a list (rendered as weak exports) or a mapping with `weak:` and/or
+    `strong:` lists. cumm is the case: `cumm >=0.7.11,<0.8.0 cuda128_*` as a
+    weak export lets spconv -- and anyone else -- inherit the flavour glob
+    instead of hand-writing it, the same argument ARCHITECTURE.md makes about
+    conda-torch's pytorch. Written as recipe jinja if it must follow the cell.
+    """
+    v = cfg.get("run_exports")
+    if v is None:
+        return
+    if isinstance(v, list):
+        v = {"weak": v}
+    if (not isinstance(v, dict) or not v
+            or set(v) - {"weak", "strong"}
+            or not all(isinstance(lst, list) and lst and all(
+                isinstance(s, str) and s.strip() for s in lst) for lst in v.values())):
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: run_exports must be a list of "
+            f"specs (weak) or a mapping of weak:/strong: -> non-empty lists of "
+            f"specs, got {cfg.get('run_exports')!r}.")
+
+
+def _check_verify(cfg: dict, pkg_dir: Path) -> None:
+    """The parts of `verify` the recipe renders (the rest is verify_conda's).
+
+    `verify.op` becomes tests/verify_op.py INSIDE the artifact, so
+    `rattler-build test --package-file` can run it anywhere; `verify.import`
+    feeds the imports test; `verify.allow_dso` is rattler-build's
+    missing_dso_allowlist (a binary that links libcuda.so.1 / nvcuda.dll
+    links a driver library no conda package provides); `verify.op_requires`
+    lists packages the op needs beyond the artifact's own run deps.
+    """
+    v = cfg.get("verify") or {}
+    if not isinstance(v, dict):
+        raise SystemExit(f"ERROR: {pkg_dir.name}/package.yml: verify must be a mapping.")
+    for key in ("allow_dso", "op_requires"):
+        lst = v.get(key)
+        if lst is None:
+            continue
+        if not isinstance(lst, list) or not lst or not all(
+                isinstance(s, str) and s.strip() for s in lst):
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}/package.yml: verify.{key} must be a "
+                f"non-empty list of strings, got {lst!r}.")
+    op = v.get("op")
+    if op is not None and (not isinstance(op, str) or not op.strip()):
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: verify.op must be python source.")
+    imp = v.get("import")
+    if imp is not None and (not isinstance(imp, str) or not imp.strip()):
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: verify.import must be a module name.")
+
+
 def load_package(pkg_dir: Path) -> dict:
     """One package's flat config dict, overrides merged in."""
     cfg = yaml.safe_load((pkg_dir / "package.yml").read_text()) or {}
@@ -423,6 +672,13 @@ def load_package(pkg_dir: Path) -> dict:
     _check_force_source_build(cfg, pkg_dir)
     _check_constrains(cfg, pkg_dir)
     _check_carry(cfg, pkg_dir)
+    _check_license_files(cfg, pkg_dir)
+    _check_about_links(cfg, pkg_dir)
+    _check_cuda_host_deps(cfg, pkg_dir)
+    _check_pypi_project(cfg, pkg_dir)
+    _check_distribution_restriction(cfg, pkg_dir)
+    _check_run_exports(cfg, pkg_dir)
+    _check_verify(cfg, pkg_dir)
 
     for extra in ("arch_override.yml",):
         p = pkg_dir / extra
