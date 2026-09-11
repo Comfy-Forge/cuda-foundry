@@ -257,7 +257,18 @@ build:
           # the "build" completes in seconds having compiled only its share. In link
           # mode it is a pure ccache pass-through and every compile should hit.
           if [ "$CUW_MODE" = "shard" ]; then
-            export CUW_PARTITION=1
+            # package.yml `shard_partition: source`: the package's own build reads
+            # CUW_SHARD_INDEX / CUW_SHARD_COUNT and compiles only its slice (natten
+            # deletes the generated kernels outside it before cmake runs). The seat
+            # wrapper then stays a pure ccache pass-through: running BOTH partitions
+            # compiles the intersection, ~1/N^2 of the tree per shard, and the link
+            # job's zero-miss gate is what catches a package that claims this and
+            # then partitions nothing.
+            if [ "${CUW_SHARD_PARTITION:-}" = "source" ]; then
+              echo "shard partition: by the package's own build (shard_partition: source); nvcc seat passes everything through"
+            else
+              export CUW_PARTITION=1
+            fi
             # The matrix numbers shards from 1 ("shard 1/1"), the partition arithmetic
             # is 0-based. Without this conversion the comparison never matches, the
             # wrapper stubs out EVERY translation unit, and the build still succeeds --

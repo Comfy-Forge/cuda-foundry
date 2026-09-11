@@ -107,6 +107,14 @@ build:
       # wrong build.
       CUW_SHARD_SOURCES: << shard_sources | join(";") | tojson >>
 <%- endif %>
+<%- if shard_partition %>
+      # package.yml `shard_partition: source`: this package's own build reads
+      # CUW_SHARD_INDEX / CUW_SHARD_COUNT and compiles only its slice, because
+      # its translation units are generated during the build and no glob can
+      # name them beforehand. build.sh leaves the nvcc-seat partition off and
+      # build_win.py stubs nothing; both still cache and ledger every TU.
+      CUW_SHARD_PARTITION: << shard_partition | tojson >>
+<%- endif %>
 <%- if build_subdir %>
       # package.yml `build_subdir`: the directory INSIDE the source tree that
       # holds the setup.py to build. Some upstreams keep the extension in a

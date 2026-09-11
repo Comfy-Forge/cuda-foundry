@@ -346,7 +346,11 @@ def ninja_cuda_units(src_dir: Path) -> list[str]:
     units = []
     for out in ninja_log_entries(src_dir):
         hit = edges.get(_norm(out))
-        if hit and "cuda" in hit[0]:
+        # Case-insensitive on purpose: torch names its rule `cuda_compile`,
+        # cmake's Ninja generator names its `CUDA_COMPILER__<target>_...`.
+        # Both are nvcc; only one of them reached this test before natten,
+        # the first cmake-driven package to shard here.
+        if hit and "cuda" in hit[0].lower():
             units.append(hit[1])
     return units
 
@@ -783,6 +787,13 @@ def main() -> int:
     shard_index = int(env("CUW_SHARD_INDEX", "0") or "0")
     patterns = [x for x in env("CUW_SHARD_SOURCES", "").replace(";", "\n").split("\n")
                 if x.strip()]
+    # package.yml `shard_partition: source`: the package's own build reads
+    # CUW_SHARD_INDEX / CUW_SHARD_COUNT and compiles only its slice, because its
+    # translation units are generated during the build and no glob evaluated
+    # before `pip wheel` can name them (natten). Nothing is stubbed here; what
+    # replaces the declared-set check is the cache accounting below, which in
+    # shard mode requires every nvcc TU ninja built to have been STORED.
+    self_partition = env("CUW_SHARD_PARTITION", "") == "source"
 
     announce_sandbox_gap()
     check_single_msvc(build_prefix)
@@ -794,14 +805,24 @@ def main() -> int:
     # the environment. Only a package that actually shards pays for any of it.
     ccache = ""
     if mode in ("shard", "link"):
-        if not patterns:
+        if not patterns and not self_partition:
             die("CUW_SHARD_SOURCES is empty, so there is nothing to partition. "
-                "A sharded package must declare `shard_sources` in package.yml; "
-                "the recipe template passes it through.")
+                "A sharded package must declare `shard_sources` in package.yml "
+                "(or `shard_partition: source`); the recipe template passes it "
+                "through.")
         ccache = ccache_bin()
         launcher = ccache_launcher(build_prefix, ccache)
         os.environ["PYTORCH_NVCC"] = launcher
         log(f"=== PYTORCH_NVCC={launcher}")
+        # The same cache, through cmake's door. A CMake-driven package (natten)
+        # never reads PYTORCH_NVCC; cmake >= 3.17 takes the initial value of
+        # every target's CUDA_COMPILER_LAUNCHER property from this variable
+        # and runs `<launcher> <nvcc> <args>` -- the same command line as the
+        # two-token PYTORCH_NVCC above, reached from the other build system.
+        # Whichever driver the package uses picks up its own hook; the other
+        # is inert, so both are set rather than declaring which one applies.
+        os.environ["CMAKE_CUDA_COMPILER_LAUNCHER"] = ccache
+        log(f"=== CMAKE_CUDA_COMPILER_LAUNCHER={ccache}")
         subprocess.run([ccache, "-z"], capture_output=True)
 
     if mode == "shard":
@@ -811,7 +832,12 @@ def main() -> int:
         # build.sh converts in the same place and for the same reason: without
         # it the comparison never matches, every TU is stubbed, and the build
         # still succeeds -- having compiled nothing.
-        my_slice = partition_sources(src_dir, patterns, shard_index - 1, shard_count)
+        if self_partition:
+            my_slice = []
+            log(f"=== partition: shard {shard_index}/{shard_count} is dealt by the "
+                f"package's own build (shard_partition: source); nothing stubbed here")
+        else:
+            my_slice = partition_sources(src_dir, patterns, shard_index - 1, shard_count)
         # A shard whose real sources are all stubbed still has to LINK, and
         # /EXPORT:PyInit_<name> is not the only symbol that can go missing --
         # a package whose entry point is not in a PYBIND11_MODULE C++ file
@@ -847,15 +873,17 @@ def main() -> int:
 
     # ---- what the cache did, and the gate that makes it mean something ---
     if mode in ("shard", "link"):
-        check_declared_tus(src_dir, patterns)
+        if not self_partition:
+            check_declared_tus(src_dir, patterns)
         hits, misses = ccache_stats(ccache)
         cuda_tus = len(ninja_cuda_units(src_dir))
         log(f"=== ccache: {hits} hit(s) / {misses} miss(es) over {cuda_tus} nvcc "
             f"translation unit(s)")
         if hits + misses == 0:
-            die("ccache saw zero lookups -- PYTORCH_NVCC did not reach ninja, so "
-                "nothing was cached and nothing can be replayed. Check the "
-                "`nvcc = ` line in build.ninja.")
+            die("ccache saw zero lookups -- neither PYTORCH_NVCC nor "
+                "CMAKE_CUDA_COMPILER_LAUNCHER reached the compile, so nothing "
+                "was cached and nothing can be replayed. Check the `nvcc = ` "
+                "line (torch) or the CUDA_COMPILER rule (cmake) in build.ninja.")
         if hits + misses != cuda_tus:
             subprocess.run([ccache, "--show-stats", "-v"])
             die(f"ccache saw {hits + misses} lookup(s) for {cuda_tus} nvcc "
@@ -870,6 +898,24 @@ def main() -> int:
         # and cannot fail. Run 34535747572 is the evidence: shard 21 drew an
         # empty slice and still reported 72 misses. The slice size is now the
         # denominator, and an empty slice is refused in partition_sources.
+        if self_partition:
+            # No declared slice to count against, so the denominator is what
+            # ninja actually compiled: every nvcc TU of this shard must be a
+            # stored miss, and there must be some. A package that claims to
+            # partition itself and then compiles everything is not wrong here
+            # -- it is merely slow -- but one that compiles nothing is.
+            if cuda_tus == 0:
+                die(f"shard {shard_index}/{shard_count} compiled no nvcc "
+                    f"translation unit at all; the package's own partition "
+                    f"dealt it nothing, or cmake never reached nvcc.")
+            if misses != cuda_tus:
+                die(f"shard {shard_index}/{shard_count} compiled {cuda_tus} nvcc "
+                    f"translation unit(s) but ccache stored {misses}. Some of "
+                    f"this shard's slice never reached the cache, and the link "
+                    f"job would recompile it as a miss.")
+            log(f"shard {shard_index}/{shard_count} done; {cuda_tus} "
+                f"translation unit(s) stored. Exiting before install.")
+            return 0
         if misses < len(my_slice):
             die(f"shard {shard_index}/{shard_count} owns {len(my_slice)} "
                 f"translation unit(s) but ccache stored only {misses}. Some of "

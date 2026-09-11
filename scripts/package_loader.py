@@ -150,13 +150,38 @@ def _check_shard_sources(cfg: dict, pkg_dir: Path) -> None:
     """
     shards = int(cfg.get("sharding") or 1)
     declared = cfg.get("shard_sources") or []
-    if shards > 1 and not declared:
+    partition = cfg.get("shard_partition")
+    # `shard_partition: source` is the other way a sharded package can be
+    # partitioned: its OWN build reads CUW_SHARD_INDEX / CUW_SHARD_COUNT and
+    # compiles only its slice, on both platforms. It exists for the package
+    # whose translation units do not exist until the build generates them --
+    # natten stamps out ~150 CUTLASS kernels from templates inside setup.py
+    # and a source-file glob evaluated before `pip wheel` matches nothing. The
+    # Linux nvcc-seat partition is then switched OFF (running both would
+    # compile the intersection, ~1/N^2 per shard), and win-64 skips the file
+    # stubbing and instead asserts that every nvcc TU ninja built was stored
+    # in the cache. It is a declaration the build honours, not a default.
+    if partition not in (None, "source"):
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: shard_partition: {partition!r} "
+            f"is not understood; the only value is 'source' (the package's own "
+            f"build partitions its translation units), or omit it.")
+    if partition == "source" and declared:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml declares both shard_sources and "
+            f"shard_partition: source -- one partition mechanism, not two.")
+    if partition == "source" and shards <= 1:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml declares shard_partition: source "
+            f"but sharding is {shards} -- nothing reads it.")
+    if shards > 1 and not declared and partition != "source":
         raise SystemExit(
             f"ERROR: {pkg_dir.name}/package.yml sets sharding: {shards} but "
             f"declares no shard_sources. win-64 partitions on source files and "
             f"cannot infer the translation unit list; list the globs (relative "
             f"to the source root, one entry per pattern, EVERY translation "
-            f"unit including the C++ ones).")
+            f"unit including the C++ ones), or declare `shard_partition: "
+            f"source` if the package's own build partitions itself.")
     if declared and shards <= 1:
         raise SystemExit(
             f"ERROR: {pkg_dir.name}/package.yml declares shard_sources but "

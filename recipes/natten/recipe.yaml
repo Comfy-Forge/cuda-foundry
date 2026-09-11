@@ -1,6 +1,6 @@
 context:
-  name: torch-spline-conv
-  version: "1.2.2"
+  name: natten
+  version: "0.21.6"
   cuda_short: ${{ cuda_compiler_version | replace('.', '') }}
   torch_nodot: ${{ pytorch | replace('.', '') }}
   py_nodot: ${{ python | replace('.', '') }}
@@ -49,7 +49,7 @@ build:
       # every compiler flag are unaffected -- so a machine with more memory
       # raising them cannot produce a different artifact.
       MAX_JOBS: ${{ env.get("CUW_MAX_JOBS", default="1") }}
-      CUW_NVCC_THREADS: ${{ env.get("CUW_NVCC_THREADS", default="3") }}
+      CUW_NVCC_THREADS: ${{ env.get("CUW_NVCC_THREADS", default="1") }}
       # ---- ccache: config must live HERE, not in the outer shell -------
       CUW_MODE: ${{ env.get("CUW_MODE", default="full") }}
       CUW_SHARD_INDEX: ${{ env.get("CUW_SHARD_INDEX", default="0") }}
@@ -57,6 +57,12 @@ build:
       CUW_LEDGER: ${{ env.get("CUW_LEDGER", default="/tmp/cuw/ledger.txt") }}
       CUW_RSS_LOG: ${{ env.get("CUW_RSS_LOG", default="/tmp/cuw/rss.log") }}
       CUW_CCACHE_BIN: ${{ env.get("CUW_CCACHE_BIN", default="ccache") }}
+      # package.yml `shard_partition: source`: this package's own build reads
+      # CUW_SHARD_INDEX / CUW_SHARD_COUNT and compiles only its slice, because
+      # its translation units are generated during the build and no glob can
+      # name them beforehand. build.sh leaves the nvcc-seat partition off and
+      # build_win.py stubs nothing; both still cache and ledger every TU.
+      CUW_SHARD_PARTITION: "source"
       # Where the ONE compile leaves its wheel. Outside the work dir and
       # outside $PREFIX, because rattler-build deletes the first and packages
       # the second -- the caller collects the wheel here after the build and
@@ -584,6 +590,7 @@ requirements:
     # python cannot import from the build prefix -- so anything import-time
     # belongs in host_deps instead. Worth stating because the two read alike
     # in package.yml and only one of them works from here.
+    - cmake
   host:
     - python ${{ python }}.*
     # python_abi's run_export is what puts a real interpreter-ABI bound on the
@@ -670,12 +677,12 @@ requirements:
 tests:
   - python:
       imports:
-        - torch_spline_conv
+        - natten
 
 about:
-  homepage: "https://github.com/rusty1s/pytorch_spline_conv"
+  homepage: "https://github.com/SHI-Labs/NATTEN"
   license: "MIT"
-  summary: "Spline-based convolution operators for PyTorch, compiled against the conda-torch channel"
+  summary: "NATTEN, neighborhood attention with CUTLASS FNA kernels, compiled against the conda-torch channel"
 
 extra:
   # Provenance: the from-source guarantee, recorded in the artifact so it is
@@ -684,10 +691,10 @@ extra:
   prebuilt_wheel_used: false
   # Flat, because that is what tools/verify_conda.py gates on: an artifact
   # whose source_rev is empty or a branch name cannot be rebuilt identically.
-  source_rev: "986b41c8d8149635e748bd369e998effff10099e"
+  source_rev: "4472b95f46f55a8ba2c5f9869eba252bbf5a22f5"
   source:
-    repo: "rusty1s/pytorch_spline_conv"
-    commit: "986b41c8d8149635e748bd369e998effff10099e"
+    repo: "SHI-Labs/NATTEN"
+    commit: "4472b95f46f55a8ba2c5f9869eba252bbf5a22f5"
   torch_build: ${{ env.get("CUW_TORCH_BUILD", default="unrecorded") }}
   cuda_compiler_version: ${{ cuda_compiler_version }}
   arch_list: ${{ env.get("CUW_ARCH_LIST", default="") }}

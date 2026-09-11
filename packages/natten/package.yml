@@ -1,0 +1,105 @@
+name: natten
+pypi_name: natten
+import_name: natten
+# src/natten/version.py: __version__ = "0.21.6". setup.py appends a
+# +torch<ver>cu<ver> tag only when NATTEN_IS_BUILDING_DIST=1, which is never
+# set here, so the wheel carries exactly this. The patch also lowercases the
+# pyproject [project] name ("NATTEN" upstream) so the distribution is
+# `natten` whichever setuptools resolves the metadata.
+version: "0.21.6"
+
+# MIT, read from the repo's own LICENSE at the pinned rev.
+license: MIT
+homepage: https://github.com/SHI-Labs/NATTEN
+summary: NATTEN, neighborhood attention with CUTLASS FNA kernels, compiled against the conda-torch channel
+
+source_repo: SHI-Labs/NATTEN
+# v0.21.6, dereferenced to the commit (git ls-remote --tags, 2026-09-11).
+source_rev: 4472b95f46f55a8ba2c5f9869eba252bbf5a22f5
+clone_recursive: true             # third_party/cutlass
+patch_script: packages/natten/patches/natten.py
+free_disk_space: true
+
+links_torch: true
+
+# ── parallelism ────────────────────────────────────────────────────────────
+# jobs 1, from the farm: "max_jobs=4 OOM'd (exit 143 + runner shutdown
+# signal) ~3min into Blackwell FMHA compile on 16GB Linux runner -- each .cu
+# peaks above the assumed 3.5GB ... two simultaneous CUTLASS peaks is still
+# the shape that OOM'd outright". setup.py reads NATTEN_N_WORKERS, which the
+# patch bridges from MAX_JOBS, and hands it to `cmake --build -j`.
+jobs: 1
+# nvcc_threads 1. The farm's file carries 3 next to a comment arguing for 1
+# ("nvcc --threads stays at the farm default of 1 (owner order 2026-08-26)
+# ... this package compiles serially by design; wall clock is bought with
+# shard count instead"); the two disagree and the comment is the reasoned
+# one. flash-attn measured the same CUTLASS-on-16GB workload here at 1 after
+# 3 and 2 both tripped the swap gate. --threads forks one cicc PER GENCODE
+# inside a TU, and the general FNA target carries six gencodes; the Hopper
+# and Blackwell object libraries carry one each, so it would buy them
+# nothing anyway.
+nvcc_threads: 1
+# 23, the farm's structural ceiling: the partition deals ~158 .cu files
+# round-robin (~144 autogen kernels + 14 hand-written dispatch TUs under
+# csrc/src) and the Hopper family has ~22 members, so at 23 every shard
+# receives 0 or 1 Hopper TU -- maximally sharded there. Going higher adds
+# shards holding zero Hopper files and buys no wall clock on that family.
+sharding: 23
+# The translation units do not exist until the build generates them:
+# setup.py stamps ~144 CUTLASS kernel instantiations out of templates
+# (scripts/autogen_*.py) INSIDE build_ext, so no `shard_sources` glob
+# evaluated before `pip wheel` can name them. The patched setup.py partitions
+# them itself, right after autogen: it deletes the .cu files outside this
+# shard's round-robin slice when CUW_SHARD_COUNT > 0, on both platforms,
+# and cmake builds what remains. The link job (CUW_SHARD_COUNT=0) builds
+# everything and replays it from the merged cache. build.sh keeps the nvcc
+# seat as a pure pass-through in this mode (running both partitions would
+# compile the intersection) and build_win.py stubs nothing; both still
+# require every nvcc TU a shard built to have been stored.
+shard_partition: source
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py declares no install_requires and pyproject.toml no dependencies;
+# the farm's sidecar agrees (Requires-Dist: none). Read against the
+# imports: `import natten` reaches torch and the standard library only.
+# rich and tqdm are imported inside try/except in natten/profiling_utils/
+# pretty_printer.py for the profiler CLI and are optional there.
+run_deps: []
+
+# csrc includes the CUDA runtime and torch; CUTLASS is the vendored
+# submodule. libnatten links cudart (cmake target_link_libraries).
+host_deps:
+  - cuda-cudart-dev
+
+# setup.py shells out to cmake (checks `cmake --version` at build time) and,
+# on Windows, asks for the Ninja generator; on Linux it uses the default
+# generator, which is Makefiles, driven by `cmake --build -j`.
+build_deps:
+  - cmake
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: natten
+  # na2d is the fused neighborhood attention kernel (csrc/autogen fna
+  # instantiations, reached through libnatten), so a mis-arch'd build fails
+  # here with cudaErrorNoKernelImageForDevice rather than passing a bare
+  # import. Checked against a dense reference: with the kernel size equal to
+  # the whole window, neighborhood attention IS full attention.
+  op: |
+    import torch
+    import torch.nn.functional as F
+    from natten import na2d
+    torch.manual_seed(0)
+    B, H, W, heads, D = 1, 8, 8, 2, 32
+    q = torch.randn(B, H, W, heads, D, dtype=torch.float16, device="cuda")
+    k = torch.randn(B, H, W, heads, D, dtype=torch.float16, device="cuda")
+    v = torch.randn(B, H, W, heads, D, dtype=torch.float16, device="cuda")
+    out = na2d(q, k, v, kernel_size=(8, 8))
+    assert out.shape == q.shape, out.shape
+    qf = q.reshape(B, H * W, heads, D).transpose(1, 2)
+    kf = k.reshape(B, H * W, heads, D).transpose(1, 2)
+    vf = v.reshape(B, H * W, heads, D).transpose(1, 2)
+    ref = F.scaled_dot_product_attention(qf, kf, vf).transpose(1, 2).reshape(B, H, W, heads, D)
+    err = (out.float() - ref.float()).abs().max().item()
+    assert err < 0.05, f"na2d with a full-window kernel deviates from dense attention by {err}"

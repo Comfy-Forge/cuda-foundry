@@ -198,6 +198,7 @@ def render(folder: str, cfg: dict, env) -> str:
         run_deps=cfg.get("run_deps") or [],
         build_deps=cfg.get("build_deps") or [],
         shard_sources=cfg.get("shard_sources") or [],
+        shard_partition=cfg.get("shard_partition") or "",
         build_subdir=cfg.get("build_subdir") or "",
         import_name=cfg.get("import_name") or cfg["name"],
         homepage=cfg.get("homepage", f"https://github.com/{cfg.get('source_repo','')}"),

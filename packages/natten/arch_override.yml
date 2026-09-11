@@ -1,0 +1,34 @@
+# Overrides of the shared arch policy (defaults/arch_policy.yml) for this
+# package only. Ported from cuda-wheels; see README.md.
+#
+# NATTEN's documented build floor is sm_80 (Ampere): pre-Ampere archs are not
+# valid NATTEN_CUDA_ARCH values on natten.org/install, even though the
+# runtime check in backends/configs/checks.py is permissive to sm_60. This
+# tracks NATTEN's own supported matrix, not the runtime gate, so the shared
+# policy row's 7.0/7.5 are dropped.
+#
+# Hopper (9.0) auto-enables -DNATTEN_WITH_HOPPER_FNA=1 in setup.py and is
+# built as sm_90a; Blackwell DC (10.0) auto-enables -DNATTEN_WITH_BLACKWELL_FNA=1,
+# needs CUDA >= 12.8 (hence absent from the cu12.4/12.6 rows) and is built as
+# sm_100a. The patch compiles each of those families for its own arch ONLY,
+# in a separate object library; the general FNA/FMHA kernels carry the whole
+# row. 10.3 (B300) is deliberately not requested: cu12.8's nvcc has no
+# compute_103a and the patch's object library targets sm_100a alone.
+# Blackwell consumer (12.0, sm_120) needs no arch flag -- it compiles through
+# the regular CUTLASS-FNA path -- and carries the +PTX tail, which the patch
+# turns into a `120-virtual` cmake target for exactly that arch.
+#
+# One list for both platforms. The farm carried a SEPARATE Windows row
+# without 10.0, because MSVC rejects the sm_100 FMHA backward kernel header
+# (sm100_fmha_bwd_kernel_tma_warpspecialized.hpp, C2061) -- a compiler
+# limitation on that header, not a knob. This repo has no per-platform arch
+# row today, so the win-64 cell is dispatched with this list and the
+# outcome recorded in the batch report; if C2061 reproduces, a per-platform
+# row is the next thing to add rather than a narrower shared one.
+arch_list_by_cuda:
+  '12.4': 8.0 8.6 8.9 9.0+PTX
+  '12.6': 8.0 8.6 8.9 9.0+PTX
+  '12.8': 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+  '12.9': 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+  '13.0': 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+  '13.2': 8.0 8.6 8.9 9.0 10.0 12.0+PTX
