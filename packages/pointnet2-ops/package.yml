@@ -10,6 +10,20 @@ version: "3.0.0"
 license: Unlicense
 homepage: https://github.com/erikwijmans/Pointnet2_PyTorch
 summary: PointNet++ CUDA ops (furthest point sampling, ball query, grouping, interpolation) for PyTorch, compiled against the conda-torch channel
+repository: https://github.com/erikwijmans/Pointnet2_PyTorch
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# The repo's UNLICENSE lives at the repo root, outside the build_subdir the
+# wheel is built from, so the patch copies it to pointnet2_ops_lib/LICENSE
+# (a name setuptools' default license_files glob picks up), and that copy is
+# what both outputs ship. Path relative to the source root, not the subdir.
+license_files:
+  - pointnet2_ops_lib/LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no pointnet2_ops project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: erikwijmans/Pointnet2_PyTorch
 # master @ 2021-07-30; the repo is dormant and has no release tags.
@@ -38,8 +52,7 @@ nvcc_threads: 1
 run_deps: []
 
 # _ext-src/src/*.cu include <cuda.h>, <cuda_runtime.h> and torch headers.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 
