@@ -22,13 +22,13 @@
 
 ## Windows
 
-The farm recorded (2026-08-23) that 0.18.0 produced a pure-python wheel on
-every Windows cell, because its only CUDA sources are CUTLASS-based and
-`setup.py` gates those on `not IS_WINDOWS`. 0.13.0 still has non-CUTLASS
-CUDA sources that would reach nvcc on Windows, so the cell is dispatched
-rather than assumed dead; `activation24/*.cu` include CUTLASS headers without
-"cutlass" in their names and are the likely first failure. The outcome is
-recorded in the batch report, not guessed here.
+Upstream ships no CUDA build for Windows: `setup.py` withholds the CUTLASS
+include directories on `not IS_WINDOWS`, while its Windows source filter drops
+only files with "cutlass" in the name. `activation24/sparsify24.cu` includes
+`<cutlass/bfloat16.h>` and stays, so the first win-64 cell died with C1083
+(run 34586352085). The patch gives Windows the include directories and the
+MSVC host flags CUTLASS documents, decided at build time; whether MSVC then
+compiles these kernels is recorded in the batch report from the run.
 
 ## Patch
 
