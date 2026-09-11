@@ -397,3 +397,19 @@ and the reason string reaches the user. Verified live: unpinned, pip reports
 linux-64 first, for the same reason as before: prove the machinery where the
 compiler story is simplest. `target_platform` stays in the build string and the
 templates keep an unwired `win` branch; linux-aarch64 is platform two.
+
+## Builds happen in CI, never on a developer box
+
+Every artifact on the channel and the index comes from a workflow run, and
+that is the only place a build is allowed to happen. Do not run
+`rattler-build`, `pip wheel`, `setup.py build_ext`, `ninja` or `nvcc` for a
+package locally — not to reproduce a failure, not to "pre-diagnose", not to
+verify. Three concurrent local rattler-build trees pushed the load average
+past 30 on 2026-09-11 and took down the session driving the port.
+
+A developer box has exactly one job here: install a *published* `.conda`
+(via pixi, from the live channel URL) or a *published* wheel (into a clean
+venv against PyPI torch) and run the package's verify op on real hardware —
+the one check CI cannot do. A failure is diagnosed from the run log
+(`gh run view <id> --log-failed`) and fixed by changing the recipe and
+re-dispatching, which is also the only path that leaves provenance behind.
