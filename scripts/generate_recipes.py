@@ -196,6 +196,7 @@ def render(folder: str, cfg: dict, env) -> str:
         host_deps_linux=cfg.get("host_deps_linux") or [],
         host_deps_win=cfg.get("host_deps_win") or [],
         run_deps=cfg.get("run_deps") or [],
+        constrains=cfg.get("constrains") or [],
         build_deps=cfg.get("build_deps") or [],
         shard_sources=cfg.get("shard_sources") or [],
         shard_partition=cfg.get("shard_partition") or "",

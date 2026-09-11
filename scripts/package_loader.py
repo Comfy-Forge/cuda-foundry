@@ -251,6 +251,35 @@ def _check_dependencies_declared(cfg: dict, pkg_dir: Path) -> None:
                 f"<spec>}} with selector in {sorted(PLATFORM_SELECTORS)}.")
 
 
+def _check_constrains(cfg: dict, pkg_dir: Path) -> None:
+    """`constrains`: conda specs this package must never be installed beside.
+
+    For two packages that install the SAME files -- a fork published under
+    its own name without a Python-level rename (gsplat and gsplat-maskgaussian
+    both ship gsplat/) -- a conda solve would otherwise let both in and the
+    second silently overwrite the first's files. A `run_constraints` entry
+    of the form `<other> <0.0a0` is unsatisfiable by any real version, so
+    the solver refuses the pair outright instead. It is deliberately not a
+    dependency: a constraint only bites when the other package is ALSO
+    requested. Each entry must name a package (a bare spec string); the
+    template renders the list verbatim into `requirements.run_constraints`.
+    """
+    v = cfg.get("constrains")
+    if v is None:
+        return
+    if not isinstance(v, list) or not v or not all(
+            isinstance(s, str) and s.strip() and " " in s.strip() for s in v):
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: constrains must be a non-empty "
+            f"list of conda match specs WITH a version clause (e.g. "
+            f"'gsplat-maskgaussian <0.0a0' to forbid co-installation), got {v!r}.")
+    for s in v:
+        if s.split()[0] == cfg.get("name"):
+            raise SystemExit(
+                f"ERROR: {pkg_dir.name}/package.yml: constrains names the package "
+                f"itself ({s!r}).")
+
+
 def _check_force_source_build(cfg: dict, pkg_dir: Path) -> None:
     """An upstream that can download a binary must say how that is disabled.
 
@@ -392,6 +421,7 @@ def load_package(pkg_dir: Path) -> dict:
     _check_dependencies_declared(cfg, pkg_dir)
     _check_shard_sources(cfg, pkg_dir)
     _check_force_source_build(cfg, pkg_dir)
+    _check_constrains(cfg, pkg_dir)
     _check_carry(cfg, pkg_dir)
 
     for extra in ("arch_override.yml",):
