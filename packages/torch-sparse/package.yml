@@ -6,9 +6,22 @@ import_name: torch_sparse
 version: "0.6.18"
 
 # MIT, read from the repo's own LICENSE at the pinned rev.
-license: MIT
+license: MIT AND Apache-2.0
 homepage: https://github.com/rusty1s/pytorch_sparse
 summary: PyTorch extension library of optimized autograd sparse matrix operations, compiled against the conda-torch channel
+repository: https://github.com/rusty1s/pytorch_sparse
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# MIT LICENSE plus parallel-hashmap's Apache-2.0 (header-only submodule on
+# include_dirs, compiled into the extensions).
+license_files:
+  - LICENSE
+  - third_party/parallel-hashmap/LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (rusty1s/pytorch_sparse, Matthias Fey).
+pypi_project: torch_sparse
 
 source_repo: rusty1s/pytorch_sparse
 source_rev: 2be752eb2e12d4c76d29c7a11d0f0b77cfd9ff45
@@ -43,15 +56,27 @@ nvcc_threads: 3
 # runtime import -- torch_sparse/tensor.py converts to and from
 # scipy.sparse -- not a build tool. torch is supplied by the recipe's
 # flavour-locked pytorch dep.
+#
+#   torch-scatter   upstream never declares it and `import torch_sparse`
+#                   cannot happen without it: storage.py:5, spmm.py:2,
+#                   add.py:5, mul.py:5, index_select.py:4, reduce.py:4 and
+#                   tensor.py:7 all `from torch_scatter import ...` at
+#                   module scope. This channel builds it for every cell
+#                   (packages/torch-scatter), flavour-locked through the
+#                   same pytorch glob, so a bare name is enough for the
+#                   solve; the published artifact's run: list omitted it
+#                   and the package did not import (audit finding). The
+#                   wheel sidecar resolves torch_scatter from the /deps/
+#                   index.
 run_deps:
   - scipy
+  - torch-scatter
 
 # csrc/cuda/*.cu include <cuda.h> and torch headers; no CUDA library beyond
 # the runtime. (The cuSPARSE the name suggests is never used: spmm is
 # upstream's own kernel, and the torch-implied libcusparse-dev the template
 # adds is there for ATen's headers, not for this package's sources.)
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 
