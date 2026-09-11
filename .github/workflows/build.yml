@@ -222,6 +222,12 @@ jobs:
             COMPILER_ARGS=(--variant c_compiler_version="${{ matrix.cell.gcc_version }}"
                            --variant cxx_compiler_version="${{ matrix.cell.gcc_version }}")
           fi
+          # This repo's OWN channel comes first: a package may depend on another
+          # this repo publishes -- spconv's setup.py imports cumm to generate
+          # its translation units, and both need the noarch pccm carried in
+          # recipes/pccm -- so the build's host solve has to be able to see
+          # them. It holds nothing conda-torch or conda-forge also ship, so
+          # putting it first shadows nothing in the build env.
           rattler-build build --recipe "$RECIPE" \
             --variant-config "$VARIANT_CONFIG" \
             --variant cuda_compiler_version="${{ matrix.cell.cuda }}" \
@@ -230,6 +236,7 @@ jobs:
             "${COMPILER_ARGS[@]}" \
             --target-platform "${{ matrix.cell.platform }}" \
             --output-dir "$RUNNER_TEMP/out" --test skip --no-build-id \
+            -c https://comfy-forge.github.io/cuda-foundry \
             -c https://comfy-forge.github.io/conda-torch -c conda-forge
       - name: Package shard cache
         run: |
@@ -402,6 +409,7 @@ jobs:
             --target-platform "${{ matrix.cell.platform }}" \
             --output-dir "$RUNNER_TEMP/out" --test skip --no-build-id \
             --keep-build \
+            -c https://comfy-forge.github.io/cuda-foundry \
             -c https://comfy-forge.github.io/conda-torch -c conda-forge
       - name: Provenance report
         # Printed unconditionally, before verification, because this is the

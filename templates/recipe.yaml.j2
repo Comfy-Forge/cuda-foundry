@@ -47,7 +47,17 @@ source:
 
 build:
   number: ${{ env.get("CUW_BUILD_NUMBER", default="0") }}
+<%- if links_torch %>
   string: cuda${{ cuda_short }}_torch${{ torch_nodot }}_py${{ py_nodot }}_h${{ hash }}_${{ build_number }}
+<%- else %>
+  # No torch axis: a links_torch: false package (cumm, spconv) is one build
+  # per (cuda, python), and its build string says so. This is the string
+  # generate_matrix.build_string() computes and --skip-published globs for;
+  # with torch in it a torch-free cell would never match its own fragment,
+  # and verify_conda would demand a pytorch dependency the package must not
+  # have.
+  string: cuda${{ cuda_short }}_py${{ py_nodot }}_h${{ hash }}_${{ build_number }}
+<%- endif %>
   script:
     env:
       # ---- what the build is ------------------------------------------

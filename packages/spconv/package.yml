@@ -1,0 +1,145 @@
+name: spconv
+pypi_name: spconv
+import_name: spconv
+# version.txt at the v2.3.8 tag: 2.3.8; the built wheel carries exactly that
+# (CUMM_CUDA_VERSION is unset, so no -cu128 suffix on the distribution name).
+version: "2.3.8"
+
+# Apache-2.0, read from the repo's own LICENSE at the pinned rev.
+license: Apache-2.0
+homepage: https://github.com/traveller59/spconv
+summary: Spatially sparse convolution (spconv v2), compiled against conda-forge's CUDA toolkit and this channel's cumm
+
+source_repo: traveller59/spconv
+# The v2.3.8 tag, dereferenced. No .gitmodules at this rev.
+source_rev: 263d6b47425ef843c82f997b12d8b714013d216c
+clone_recursive: false
+patch_script: packages/spconv/patches/spconv.py
+
+# Torch-independent (CW-ADR-0011 in the farm). pccm/PCCMExtension build;
+# setup.py's deps are [cumm]. Torch is imported by spconv's Python layer
+# only -- core_cc carries no DT_NEEDED on libtorch. One build per
+# (cuda, python), and python_abi declared directly by the template because
+# no pytorch is there to mask an unbounded `python`.
+links_torch: false
+
+# Ported verbatim from cuda-wheels. spconv generates several hundred .cu
+# translation units, one per kernel instantiation, each small; jobs 3 is the
+# farm's standard pair on a 16 GB runner.
+jobs: 3
+nvcc_threads: 1
+
+# UNSHARDED (farm owner order 2026-08-26). Was sharding 10 via the nvcc-seat
+# wrapper. The seat wrapper stubs out-of-slice TUs with an EMPTY object, and
+# an empty object still leaves its symbols undefined, so every shard died at
+# its link step on `undefined reference to cumm::conv::main::...conv_kernel`.
+# spconv is not big enough to need the machinery; it is unsharded rather
+# than carrying extra jobs plus a cache handoff for a compile that fits in
+# one job. (sharding: 1 is one shard, not none -- linux-64 still runs the
+# shard/link pair the repo runs for every cell.)
+
+# ── dependencies: read from the imports, not copied from upstream ────────
+# setup.py REQUIRED = pccm, ccimport, pybind11, fire, numpy, cumm<0.8.0.
+# spconv/build.py and spconv/constants.py `import pccm` and `from ccimport
+# ...` at module level -- so, exactly as for cumm, both are runtime deps
+# and not the "build stack leak" the farm's curation called them. numpy is
+# used throughout; fire only by the benchmark/gencode CLIs, pybind11 by
+# nothing at runtime -- both dropped.
+#
+# cumm: the same version window upstream states, PLUS the CUDA flavour lock
+# this channel expresses in the build string. The cumm cumm build imports at
+# runtime must be the one compiled for this cell's CUDA line; without the
+# glob the solver may pair a cuda128 spconv with a cuda130 cumm. The wheel
+# side cannot carry the glob (make_wheel.py drops it) and says the same
+# thing through both wheels' +cu128 local tag.
+run_deps:
+  - numpy
+  - pccm >=0.4.16
+  - ccimport >=0.4.4
+  - cumm >=0.7.11,<0.8.0 cuda${{ cuda_short }}_*
+
+# Import-time build deps -- setup.py imports pccm, ccimport and cumm's
+# codegen (cumm.gemm.main, cumm.conv.main, cumm.common) to GENERATE the
+# translation units before anything compiles -- plus pybind11's headers for
+# the ccimport build, and the CUDA runtime library core_cc links. cumm is
+# OUR OWN .conda from this channel, flavour-locked, which is why the build's
+# channel list includes the channel this repo publishes to. cuda-version is
+# pinned to the cell for the reason cumm's package.yml gives: a torch-free
+# host inherits no CUDA window from anywhere.
+host_deps:
+  - pccm >=0.4.16
+  - ccimport >=0.4.4
+  - pybind11
+  - numpy
+  - cumm >=0.7.11,<0.8.0 cuda${{ cuda_short }}_*
+  - cuda-version ${{ cuda_compiler_version }}.*
+  - cuda-cudart-dev
+
+build_deps: []
+
+# Upstream's switches, read by setup.py / cumm.common at build time:
+#   SPCONV_DISABLE_JIT=1   build core_cc as a PCCMExtension.
+#   CUMM_CUDA_ARCH_LIST    the cell's arch list, read by the cumm the build
+#                          imports (get_cuda_arch_flags) -- this is where
+#                          spconv's gencode list actually comes from, so the
+#                          bridge from TORCH_CUDA_ARCH_LIST is declared here
+#                          exactly as in cumm's package.yml.
+# CUMM_CUDA_VERSION deliberately unset (see cumm's package.yml): set, it
+# renames the distribution to spconv-cu128 and its dep to cumm-cu128.
+build_env:
+  SPCONV_DISABLE_JIT: "1"
+  CUMM_CUDA_ARCH_LIST: $TORCH_CUDA_ARCH_LIST
+
+# gcc 8, below the policy's 13 for CUDA 12.8 (nvcc's floor is >=6, so this
+# is legal) -- and below torchaudio's 10, for a reason measured on the first
+# local cumm build. auditwheel refused the wheel for FOUR symbols the conda
+# gcc 13 emitted: std::ios_base_library_init@GLIBCXX_3.4.32 (GCC 13's
+# <iostream> init), __throw_bad_array_new_length@3.4.29 (GCC 11+),
+# exception_ptr::_M_addref/_M_release@CXXABI_1.3.13 (GCC 11+) and
+# basic_stringstream::basic_stringstream()@GLIBCXX_3.4.26 (GCC 9+, where the
+# default constructor became an exported symbol). manylinux_2_28 allows
+# GLIBCXX <= 3.4.24 / CXXABI <= 1.3.11 (read from auditwheel's policy file,
+# not from memory), so gcc 10 would still trip the stringstream one; pccm-
+# generated code builds a std::stringstream in every tv::check. gcc 8's
+# libstdc++ instantiates that constructor inline and references nothing
+# above 3.4.24. The .conda is unaffected either way (it declares libstdcxx
+# and gets it). spconv shares the setting: it compiles the same cumm headers
+# and must load beside this cumm.
+gcc_version: "8"
+
+# Not on conda-forge (checked 2026-09-11); nothing to shadow.
+carry: complete
+
+verify:
+  import: spconv
+  # The real thing: a sparse 3-D convolution on CUDA through spconv.pytorch
+  # (which loads cumm's core_cc, then spconv's), against torch's dense
+  # conv3d on the same voxels. A 1x1x1 SubMConv3d is exactly a linear layer
+  # on the features -- that reference is unarguable -- and a 3x3x3
+  # SparseConv3d is compared against F.conv3d over the densified grid at
+  # every output voxel, which is the whole implicit-GEMM path the AOT kernels
+  # exist for. A mis-arch'd core_cc fails here with
+  # cudaErrorNoKernelImageForDevice rather than passing a bare import.
+  op: |
+    import torch, torch.nn.functional as F
+    import spconv.pytorch as spconv
+    torch.manual_seed(0)
+    D = 8
+    coords = torch.unique(torch.randint(0, D, (300, 3)), dim=0)
+    n = coords.size(0)
+    bidx = torch.zeros(n, 1, dtype=coords.dtype)
+    coords_b = torch.cat([bidx, coords], 1).int().cuda()      # [batch, z, y, x]
+    feats = torch.randn(n, 4, device="cuda")
+    x = spconv.SparseConvTensor(feats, coords_b, [D, D, D], 1)
+    sub1 = spconv.SubMConv3d(4, 6, 1, bias=False).cuda()
+    y = sub1(x)
+    ref = feats @ sub1.weight.view(6, 4).t()
+    assert torch.allclose(y.features, ref, atol=1e-4), (y.features - ref).abs().max()
+    conv = spconv.SparseConv3d(4, 5, 3, padding=1, bias=False).cuda()
+    y3 = conv(x)
+    dense_in = x.dense()                                        # [1, 4, D, D, D]
+    w = conv.weight.permute(0, 4, 1, 2, 3).contiguous()         # [out, k, k, k, in] -> [out, in, k, k, k]
+    dense_ref = F.conv3d(dense_in, w, padding=1)
+    got = y3.dense()
+    assert got.shape == dense_ref.shape, (got.shape, dense_ref.shape)
+    assert torch.allclose(got, dense_ref, atol=1e-3), (got - dense_ref).abs().max()

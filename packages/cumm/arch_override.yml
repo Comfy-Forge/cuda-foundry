@@ -1,0 +1,31 @@
+# Overrides of the shared arch policy (defaults/arch_policy.yml)
+# for this package only. Ported from cuda-wheels' packages/cumm, respelled
+# in the space-separated form this repo's overrides use.
+#
+# RESTORED 2026-08-26 in the farm: 10.0 (Blackwell DC), 12.0 (Blackwell
+# consumer) and 11.0 (Thor, ARM 13.x). The rows used to read
+# "7.5;8.0;8.6;8.9;9.0+PTX" flat, on the justification that cumm 0.7.11's
+# arch table ends at 9.0 and Blackwell tokens crash setup with "Unknown CUDA
+# arch". That was true, and it stopped being true when packages/cumm/patches
+# added exactly '10.0', '11.0', '12.0' to cumm/common.py's supported_arches
+# (what 0.8.2 carries) and asserted the result.
+#
+# Per-CUDA rather than flat, because the tokens are not universally valid --
+# measured from NVIDIA's nvcc binaries, `nvcc --list-gpu-code` gives
+#   12.8 -> sm_100 sm_101 sm_120            12.9 -> + sm_103 sm_121
+#   13.0 -> sm_100 sm_103 sm_110 sm_120 sm_121 (Thor arrives here)
+# so Blackwell starts at 12.8 and Thor at 13.0, matching arch_policy_aarch64.
+#
+# Near-inert for THIS package's content -- core_cc compiles no kernel (C++
+# against the CUDA runtime; the GEMM/conv kernels are generated and
+# NVRTC-compiled at run time, see package.yml verify.no_sass) -- so the list
+# only has to parse. Kept per-CUDA anyway, because it is the same table
+# spconv reads through cumm's get_cuda_arch_flags(), and a narrowed list
+# that nothing checks is how spconv once lost its Blackwell SASS.
+arch_list_by_cuda:
+  "12.4": 7.5 8.0 8.6 8.9 9.0+PTX
+  "12.6": 7.5 8.0 8.6 8.9 9.0+PTX
+  "12.8": 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+  "12.9": 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+  "13.0": 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+  "13.2": 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX

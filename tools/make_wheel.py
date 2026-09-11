@@ -86,6 +86,11 @@ ALWAYS_EXCLUDE = ["libcuda.so", "libcuda.so.1"]
 # math library, where the transitive closure runs to hundreds of megabytes.
 EXPECTED_VENDORED = {
     "libnvrtc", "libnvrtc-builtins",          # runtime JIT, deliberately kept
+    # A torch-free package (cumm, spconv) has no `import torch` preloading
+    # the CUDA runtime, so repair() vendors it on purpose -- see the
+    # links_torch branch there. Expected for those; a torch-linked package
+    # vendoring it would mean the exclude list stopped applying.
+    "libcudart",
     "libjpeg", "libpng16", "libpng", "libwebp", "libwebpmux", "libwebpdemux",
     "libsharpyuv", "libz", "libzlib", "libnvjpeg",   # torchvision's codecs
     "libsox", "libavutil", "libavcodec", "libavformat", "libavdevice",
@@ -137,7 +142,14 @@ def conda_spec_to_pep508(spec: str) -> str | None:
     Conda separates name and constraint with whitespace; PEP 508 does not
     allow that separation to be meaningful, so it is simply removed.
     """
-    parts = spec.strip().split(None, 1)
+    # A conda MatchSpec is `name [version [build]]`, three whitespace-separated
+    # fields. Only the first two have a PEP 508 counterpart: a build glob
+    # (`cumm >=0.7.11,<0.8.0 cuda128_*`, spconv's flavour lock on our own
+    # cumm) is a conda-only statement, and the wheel side says the same thing
+    # through its local version tag, which pip ignores for resolution. It is
+    # dropped here rather than glued onto the constraint, where it produced
+    # `cumm>=0.7.11,<0.8.0cuda128_*` -- a requirement no resolver can parse.
+    parts = spec.strip().split(None, 2)
     name = parts[0]
     if name.startswith("__"):          # virtual package (__cuda, __glibc)
         return None
@@ -149,7 +161,7 @@ def conda_spec_to_pep508(spec: str) -> str | None:
     constraint = parts[1].strip()
     if constraint in ("", "*"):
         return pypi
-    return f"{pypi}{constraint.replace(' ', '')}"
+    return f"{pypi}{constraint}"
 
 
 def intra_wheel_sonames(wheel: Path) -> list[str]:
@@ -416,9 +428,76 @@ def set_header(text: str, name: str, value: str) -> str:
     return "\n".join(lines)
 
 
+def resolve_vendor_extra(patterns: list[str], lib_paths: list[str]) -> list[tuple[str, Path]]:
+    """package.yml `wheel_vendor_extra` -> [(soname, real file)] to carry.
+
+    auditwheel vendors what DT_NEEDED names and nothing else. A library that
+    a vendored library dlopens BY NAME is invisible to it, and the one case
+    here is exact: libnvrtc.so.12 opens "libnvrtc-builtins.so.<major.minor>"
+    itself (measured -- a lone libnvrtc compiles nothing without it), and
+    cumm links libnvrtc only, on purpose, because linking the builtins would
+    record an exact-minor soname the .conda cannot satisfy across the CUDA
+    line. So the wheel carries the file under the name the dlopen uses --
+    its own SONAME, unhashed -- beside the vendored libnvrtc, and that
+    library gets an $ORIGIN RPATH so the by-name lookup lands in <pkg>.libs.
+
+    A pattern that matches nothing in the host prefix is an error: it is a
+    declaration about a runtime need, and a wheel published without the file
+    fails only on the user's machine.
+    """
+    out: list[tuple[str, Path]] = []
+    for pat in patterns:
+        hits, seen = [], set()
+        for lp in lib_paths:
+            # A conda prefix's lib/ holds symlink chains into targets/<arch>/lib
+            # (libnvrtc-builtins.so.12.8 -> ../targets/.../libnvrtc-builtins.so.
+            # 12.8.93); resolve to the real file and keep each one once.
+            for cand in sorted(Path(lp).glob(pat)):
+                real = cand.resolve()
+                if real.is_file() and real not in seen:
+                    seen.add(real)
+                    hits.append(real)
+        if not hits:
+            sys.exit(f"make_wheel: wheel_vendor_extra pattern {pat!r} matched no real "
+                     f"file under {lib_paths} -- the host prefix does not hold the "
+                     f"library the wheel was declared to carry")
+        for cand in hits:
+            soname = subprocess.run(["patchelf", "--print-soname", str(cand)],
+                                    capture_output=True, text=True).stdout.strip()
+            if not soname:
+                sys.exit(f"make_wheel: {cand} has no SONAME; wheel_vendor_extra "
+                         f"needs one to know the name it is dlopen'd by")
+            if soname not in {s for s, _ in out}:
+                out.append((soname, cand))
+    return out
+
+
+def add_vendor_extra(root: Path, extra: list[tuple[str, Path]]) -> list[str]:
+    """Copy the extras into <pkg>.libs and give every vendored lib $ORIGIN."""
+    if not extra:
+        return []
+    libs = next(iter(root.glob("*.libs")), None)
+    if libs is None:
+        sys.exit("make_wheel: wheel_vendor_extra declared but the repaired wheel "
+                 "has no <pkg>.libs directory -- nothing was vendored for the "
+                 "extras to sit beside")
+    lines = []
+    for soname, src in extra:
+        shutil.copy2(src, libs / soname)
+        lines.append(f"{libs.name}/{soname} (from {src.name})")
+    for so in sorted(libs.glob("*.so*")):
+        cur = subprocess.run(["patchelf", "--print-rpath", str(so)],
+                             capture_output=True, text=True).stdout.strip()
+        if not cur:
+            subprocess.run(["patchelf", "--set-rpath", "$ORIGIN", str(so)], check=True)
+            lines.append(f"{libs.name}/{so.name}: RPATH set to $ORIGIN (for by-name dlopen of a sibling)")
+    return lines
+
+
 def finalize(wheel: Path, version_tag: str, arch_list: str,
              run_deps: list[str], expect_version: str = "",
-             build_number: str = "") -> tuple[Path, Path, int]:
+             build_number: str = "",
+             vendor_extra: list[tuple[str, Path]] | None = None) -> tuple[Path, Path, int]:
     """Apply the local version and build tag, strip deps, write the sidecar."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -427,6 +506,8 @@ def finalize(wheel: Path, version_tag: str, arch_list: str,
         di = next(iter(root.glob("*.dist-info")), None)
         if di is None:
             sys.exit(f"make_wheel: no .dist-info in {wheel.name}")
+        for line in add_vendor_extra(root, vendor_extra or []):
+            print(f"  extra   : {line}")
         meta_p = di / "METADATA"
         text = meta_p.read_text(encoding="utf-8")
 
@@ -625,9 +706,10 @@ def main() -> int:
               "Either add them to EXPECTED_VENDORED with a reason, or find "
               "out what started linking them.")
 
+    extra = resolve_vendor_extra(cfg.get("wheel_vendor_extra") or [], args.lib_path)
     final, side, n = finalize(repaired, local_tag(args.cuda, args.pytorch),
                               args.arch_list, run_deps, args.expect_version,
-                              args.build_number)
+                              args.build_number, vendor_extra=extra)
     print(f"  wheel   : {final.name}")
     print(f"  sidecar : {side.name}  ({n} Requires-Dist)")
     return 0

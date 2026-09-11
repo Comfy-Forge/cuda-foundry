@@ -1,0 +1,33 @@
+# Overrides of the shared arch policy (defaults/arch_policy.yml)
+# for this package only. Ported from cuda-wheels' packages/spconv,
+# respelled in the space-separated form this repo's overrides use.
+#
+# CORRECTED 2026-08-24 in the farm. This file previously trimmed the arch
+# list to "7.5;8.0;8.6;8.9;9.0+PTX" on the grounds that cumm 0.7.11 rejects
+# Blackwell tokens and that "spconv bakes no AOT SASS at all ... trimming
+# changes nothing about the shipped wheel". Both halves were wrong: cuobjdump
+# finds 478 sm_80 + 478 sm_90 real cubins per wheel, and the legacy farm --
+# which built against cumm 0.8.2 -- shipped sm_100 and sm_120 as well. So the
+# trim was a silent Blackwell coverage regression, not a no-op.
+#
+# The parse limitation is fixed at the source: packages/cumm/patches/cumm.py
+# restores '10.0'/'11.0'/'12.0' to cumm's supported_arches (what 0.8.2
+# carries), so the 0.7.11 pin no longer costs coverage. ORDERING: spconv's
+# build imports the cumm installed in its host env, so the cumm .conda with
+# the patched table must be published before spconv can use these rows.
+# Until then a spconv build fails loudly with "Unknown CUDA arch (10.0)",
+# which is the correct failure -- never re-trim this file to make it green.
+# 8.9 (Ada / RTX 40-series) was accidentally dropped from the x86 rows when
+# Blackwell was restored and is back.
+#
+# The SASS census wants every arch here in the biggest .so; spconv compiles
+# every listed gencode into core_cc (the farm's build log shows exactly the
+# resolved list, 478 times each), so the census is meaningful here in the
+# way it is not for cumm.
+arch_list_by_cuda:
+  "12.4": 7.5 8.0 8.6 8.9 9.0+PTX
+  "12.6": 7.5 8.0 8.6 8.9 9.0+PTX
+  "12.8": 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+  "12.9": 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+  "13.0": 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+  "13.2": 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX

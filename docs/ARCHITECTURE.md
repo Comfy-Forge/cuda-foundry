@@ -237,6 +237,84 @@ ccache disables itself when it is the one invoking the compiler, so the
 wrapper's own `ccache` call inside a launcher-driven compile reports
 `Result: disabled` and never becomes a second lookup.
 
+### Where the nvcc seat sees nothing at all
+
+The seat wrapper is both the ledger and the cache, and it sees nvcc only. A
+package whose extension is C++ against the CUDA runtime never reaches it:
+cumm's `core_cc` is 39 `.cc` translation units through g++ and zero `.cu`
+(measured — ccimport's generated `build.ninja` has `compiler__cu = nvcc`
+and no edge that uses it). The seat ledger comes out empty and ccache saw no
+lookup, which reads exactly like "the wrapper never occupied the seat", and
+the shard job refused it.
+
+The two are told apart by evidence, not by a declaration: ninja's own
+`.ninja_log`, the same record `build_win.py` reads for L3 on win-64. If ninja
+compiled real translation units and **none of them is a `.cu`**, those TUs
+become the ledger and the lookup assertions are skipped as inapplicable
+(`build.sh`, via `build_win.py --ninja-ledger`, which is copied beside every
+recipe on both platforms). A `.cu` that ninja built and the seat never saw
+still fails, so a missing wrapper cannot hide behind this. The shard and link
+jobs both compile such a package in full — there is nothing to hand off — and
+`verify_conda`'s "ledger non-empty" and "no foreign TU" checks run on the
+ninja-derived list.
+
+Two parser facts found on the way, both of which had produced a ledger that
+was non-empty and *wrong* — which no downstream gate can tell from a right
+one: ccimport writes `build.ninja` through `ninja_syntax.Writer`, which wraps
+edges with a trailing `$`, so an edge's first input sits on the next line;
+and torch's `BuildExtension` overwrites one `build.ninja` per extension in a
+shared `build_temp` while `.ninja_log` there accumulates, so for
+torch_scatter's four extensions only the last one's edges survive. The
+parser now joins continuation lines and maps an object with no surviving
+edge back through its path (distutils keeps the source's relative path under
+`build_temp`), refusing to guess when zero or several candidates exist.
+
+### A package that depends on another package this repo builds
+
+spconv's `setup.py` imports cumm to *generate* its translation units, and
+both import `pccm` at build time and at import time. pccm is on PyPI and on
+no conda channel, so it is carried here as a hand-written noarch recipe
+(`recipes/pccm`, the one recipe not generated from a `package.yml`; its
+README says why), and the build's host solve lists this repo's own channel
+first so a package can depend on a sibling. spconv's dep on cumm carries the
+flavour glob, `cumm >=0.7.11,<0.8.0 cuda128_*`, written as recipe jinja in
+`package.yml` so it follows the cell; `make_wheel.py` drops the build field
+when it writes the sidecar, because PEP 508 has nowhere to put it and the
+wheel says the same thing through its local version tag.
+
+A torch-free package's host env inherits **no CUDA window from anywhere** —
+a torch-linked one gets it from pytorch's pin — so `cuda-version
+${{ cuda_compiler_version }}.*` goes in its `host_deps`, or the host resolves
+the newest `cuda-nvrtc-dev` (13.x) against a 12.8 toolkit in `build:`.
+
+### Exact-minor sonames, and where the two outputs disagree
+
+cumm links `libnvrtc-builtins` explicitly so that its wheel's vendored
+libnvrtc can find it. The soname is exact-minor, `libnvrtc-builtins.so.12.8`
+(libnvrtc's own is `libnvrtc.so.12`), and that is poison for the `.conda`: an
+env whose torch pulls `cuda-nvrtc` 12.9 — conda-torch's cu128 triton pins
+`cuda-version` 12.9, measured in a live solve — has `.so.12.9` and no
+`.so.12.8`, so the artifact fails to load beside the torch it is for, and a
+`cuda-nvrtc 12.8.*` run dep makes it UNSAT instead. libnvrtc needs no help
+in a conda env: it dlopens `libnvrtc-builtins.so.<major.minor>` by name
+through its own `$ORIGIN` RPATH, and both ship in one package (measured — a
+lone copy of libnvrtc with the builtins beside it compiles; without them it
+fails with "failed to open libnvrtc-builtins.so.12.9"). So the link is
+patched out, and the wheel gets the builtins through `wheel_vendor_extra`,
+which copies the file under its own SONAME beside the vendored libnvrtc and
+gives every vendored library an `$ORIGIN` RPATH — the one case where the two
+packaging contracts want *different binaries* and the answer is to post-
+process the wheel rather than compromise the `.conda`.
+
+Also measured on cumm, and worth more than the earlier "3.4.25" above:
+auditwheel 6.8.2's policy file allows `GLIBCXX <= 3.4.24` and `CXXABI <=
+1.3.11` for manylinux_2_28. gcc 13 emitted four symbols above that, and gcc
+10 would still have emitted `basic_stringstream::basic_stringstream()@
+GLIBCXX_3.4.26` (GCC 9 made the default constructor an exported symbol, and
+pccm-generated code builds a stringstream in every `tv::check`). gcc 8, the
+oldest conda-forge ships, instantiates it inline and references nothing
+above 3.4.24; cumm and spconv pin `gcc_version: "8"`.
+
 ## Known per-package facts, carried forward
 
 - **ninja is required in `build:`.** Without it torch's `BuildExtension` falls

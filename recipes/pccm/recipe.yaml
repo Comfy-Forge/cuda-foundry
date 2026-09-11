@@ -1,0 +1,93 @@
+# pccm -- a HAND-WRITTEN recipe, and the only pure-python one in this repo.
+# README.md beside this file says why it is not generated; the short form:
+# pccm is the code generator cumm and spconv import at build time AND at
+# import time, it is on PyPI but on no conda channel, and it compiles
+# nothing -- so the shared template (CUDA toolkit, torch flavour lock, nvcc
+# seat, SASS census) has nothing to say about it, while cumm's and spconv's
+# .conda packages are UNSAT without it.
+#
+# It still follows the repo's rules where they apply: source pinned to a
+# commit (the v0.4.16 tag, dereferenced), the build runs under nonet.py with
+# pip's --no-index so nothing can be fetched, and the artifact is a noarch
+# python package built from that checkout and nothing else.
+context:
+  name: pccm
+  version: "0.4.16"
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  - git: https://github.com/FindDefinition/PCCM.git
+    rev: 66b17a365f3b1ea9c0142020baafe93b5dabb509   # tag v0.4.16
+  # The no-network guard, the same file every generated recipe carries as a
+  # sibling; taken from its one source of truth rather than copied here.
+  - path: ../../scripts/build_snippets
+    target_directory: _snippets
+
+build:
+  number: ${{ env.get("CUW_BUILD_NUMBER", default="0") }}
+  noarch: python
+  script:
+    content: |
+      set -euo pipefail
+      # pure python, from the checkout, with no index and no network: the
+      # build backend is setuptools from host:, and pip may not go anywhere.
+      $PYTHON _snippets/nonet.py -- $PYTHON -m pip install . --no-deps --no-index \
+          --no-build-isolation -vv
+      # RECORD goes for the reason conda-forge drops it: with it present,
+      # `pip uninstall` deletes files conda owns. direct_url.json names this
+      # machine's checkout and must not ship.
+      SITE="$($PYTHON -c 'import sysconfig;print(sysconfig.get_paths()["purelib"])')"
+      rm -f "$SITE"/pccm-*.dist-info/RECORD "$SITE"/pccm-*.dist-info/direct_url.json
+      # Whether the package IMPORTS is asked in tests: below, in a fresh solve
+      # of the built artifact with its run deps -- not here, where cwd is the
+      # source tree and ccimport is deliberately absent from host.
+
+requirements:
+  host:
+    - python >=3.10
+    - pip
+    - setuptools
+    - wheel
+  run:
+    - python >=3.10
+    # setup.py REQUIRED, verbatim: pccm imports ccimport (core, builder,
+    # targets), lark (core/parsers.py), portalocker (builder/inliner.py)
+    # and fire (main.py); pybind11 is what ccimport-driven builds compile
+    # against and upstream lists it, so it stays. All five are on
+    # conda-forge; ccimport there is patched to use `ninja_syntax` and
+    # brings it along.
+    - ccimport >=0.3.1
+    - pybind11 >=2.6.0
+    - fire
+    - lark >=1.0.0
+    - portalocker >=2.3.2
+
+tests:
+  - python:
+      imports:
+        - pccm
+        - pccm.builder
+        - pccm.extension
+
+about:
+  homepage: https://github.com/FindDefinition/PCCM
+  license: MIT
+  summary: Python C++ code manager -- the code generator behind cumm and spconv
+  repository: https://github.com/FindDefinition/PCCM
+
+extra:
+  # What tools/fragment.py turns into the purl (pkg:pypi/pccm@0.4.16), so
+  # pixi's conda->pypi mapping recognises this as the PyPI project it is and
+  # does not install a second copy from PyPI on top.
+  pypi_name: pccm
+  built_from_source: true
+  prebuilt_wheel_used: false
+  source_rev: 66b17a365f3b1ea9c0142020baafe93b5dabb509
+  source:
+    repo: FindDefinition/PCCM
+    commit: 66b17a365f3b1ea9c0142020baafe93b5dabb509
+  run_id: ${{ env.get("GITHUB_RUN_ID", default="local") }}
+  run_url: ${{ env.get("CUW_RUN_URL", default="local") }}

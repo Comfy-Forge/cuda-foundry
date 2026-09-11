@@ -330,10 +330,18 @@ def _finish(rep, z, names, meta, args, tmp: Path, is_win: bool) -> bool:
                 if archs:
                     per_module[Path(n).name] = sorted(archs)
                 got |= archs
-            rep.check(want <= got or not got,
-                      f"SASS covers the cell's arch list "
-                      f"(want {sorted(want)}, got {sorted(got)} over "
-                      f"{len(exts)} module(s): {per_module})")
+            # Same declaration verify_conda honours: a package that says it
+            # ships no device code (cumm: NVRTC at run time) is asserted to
+            # ship none, instead of passing a census that found nothing.
+            if getattr(args, "no_sass", None):
+                rep.check(not got,
+                          f"ships no SASS, as package.yml declares; found "
+                          f"{sorted(got)} in {per_module}")
+            else:
+                rep.check(want <= got or not got,
+                          f"SASS covers the cell's arch list "
+                          f"(want {sorted(want)}, got {sorted(got)} over "
+                          f"{len(exts)} module(s): {per_module})")
 
     print(f"--- {rep.artifact}: {'FAIL' if rep.failed else 'PASS'}")
     return not rep.failed
@@ -354,10 +362,12 @@ def main() -> int:
     args.tmp.mkdir(parents=True, exist_ok=True)
 
     args.links_torch = True
+    args.no_sass = None
     if args.package:
         import package_loader as pl
-        args.links_torch = pl.load_package(
-            pl.PACKAGES_DIR / args.package).get("links_torch", True)
+        cfg = pl.load_package(pl.PACKAGES_DIR / args.package)
+        args.links_torch = cfg.get("links_torch", True)
+        args.no_sass = (cfg.get("verify") or {}).get("no_sass")
 
     allok = True
     for w in args.wheels:

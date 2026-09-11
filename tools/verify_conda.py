@@ -165,6 +165,21 @@ def pe_imports(data: bytes) -> set[str] | None:
     return names
 
 
+def _verify_field(pkg_name: str, key: str):
+    """`verify.<key>` from the package's own package.yml, raw, or None."""
+    if not pkg_name:
+        return None
+    cfg = Path(__file__).resolve().parent.parent / "packages" / pkg_name / "package.yml"
+    if not cfg.is_file():
+        return None
+    try:
+        import yaml
+    except ImportError:
+        return None
+    data = yaml.safe_load(cfg.read_text()) or {}
+    return (data.get("verify") or {}).get(key)
+
+
 def _expect_linked(pkg_name: str, key: str = "expect_linked") -> list:
     """`verify.<key>` from the package's own package.yml, if present.
 
@@ -475,9 +490,22 @@ def verify(path: Path, ledger: set, expect_arch: str, tmp: Path) -> bool:
             if archs:
                 per_module[n.rsplit("/", 1)[-1]] = sorted(archs)
             got |= archs
-        rep.check(want <= got or not got,
-                  f"SASS archs cover the cell's arch list (want {sorted(want)}, "
-                  f"got {sorted(got)} over {len(exts)} module(s): {per_module})")
+        # A package may declare `verify.no_sass: <reason>` -- cumm's core_cc
+        # is C++ against the CUDA runtime and compiles its kernels through
+        # NVRTC at run time, so it carries no device code by design. For such
+        # a package "covers the arch list" has no meaning, and the question
+        # becomes the opposite one: any SASS at all means the artifact is not
+        # the one the declaration describes. Stated by the package, asserted
+        # here, so the census never passes it by finding nothing to count.
+        no_sass = _verify_field(index.get("name", ""), "no_sass")
+        if no_sass:
+            rep.check(not got,
+                      f"ships no SASS, as package.yml declares ({str(no_sass).strip()[:60]}...); "
+                      f"found {sorted(got)} in {per_module}")
+        else:
+            rep.check(want <= got or not got,
+                      f"SASS archs cover the cell's arch list (want {sorted(want)}, "
+                      f"got {sorted(got)} over {len(exts)} module(s): {per_module})")
 
     print(f"--- {path.name}: {'FAIL' if rep.failed else 'PASS'}")
     return not rep.failed

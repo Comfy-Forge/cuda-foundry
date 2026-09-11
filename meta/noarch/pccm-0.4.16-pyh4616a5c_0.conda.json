@@ -1,0 +1,32 @@
+{
+ "build": "pyh4616a5c_0",
+ "build_number": 0,
+ "depends": [
+  "python >=3.10",
+  "ccimport >=0.3.1",
+  "pybind11 >=2.6.0",
+  "fire",
+  "lark >=1.0.0",
+  "portalocker >=2.3.2",
+  "python"
+ ],
+ "license": "MIT",
+ "md5": "93cb1e95ee99a8a88180d61cdc59c607",
+ "name": "pccm",
+ "noarch": "python",
+ "provenance": {
+  "built_from_source": true,
+  "prebuilt_wheel_used": false,
+  "run_id": "local",
+  "run_url": "local",
+  "source_rev": "66b17a365f3b1ea9c0142020baafe93b5dabb509"
+ },
+ "purls": [
+  "pkg:pypi/pccm@0.4.16"
+ ],
+ "sha256": "6f7b8fd22f36fd5dd14e5d293578c789a01c03bc9f017eabeb78d1cbc7f9b488",
+ "size": 67416,
+ "subdir": "noarch",
+ "timestamp": 1789121355125,
+ "version": "0.4.16"
+}

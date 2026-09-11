@@ -58,8 +58,14 @@ def read_index_json(conda_path: Path) -> tuple[dict, dict, dict]:
 # conda->pypi map and a pack declaring the same name as a pypi dependency
 # gets a SECOND copy installed from PyPI on top of ours -- the failure
 # conda-torch proved with torch.
-def purl_for(name: str, version: str) -> str | None:
+def purl_for(name: str, version: str, about: dict | None = None) -> str | None:
     import yaml
+    # A hand-written recipe (recipes/pccm, noarch) has no package.yml; it
+    # states its PyPI identity in about.extra.pypi_name instead, and the
+    # artifact is the authority on itself here.
+    pypi = str(((about or {}).get("extra") or {}).get("pypi_name") or "").strip()
+    if pypi:
+        return f"pkg:pypi/{pypi}@{version}"
     pkgs = Path(__file__).resolve().parent.parent / "packages"
     for d in sorted(pkgs.iterdir()) if pkgs.is_dir() else []:
         y = d / "package.yml"
@@ -100,7 +106,7 @@ def main() -> None:
     sha256, md5, size = hashes(args.conda_file)
     entry = dict(index)
     entry.update({"sha256": sha256, "md5": md5, "size": size, "subdir": args.subdir})
-    purl = purl_for(index["name"], index["version"])
+    purl = purl_for(index["name"], index["version"], about)
     if purl:
         entry["purls"] = [purl]
     if run_exports:
