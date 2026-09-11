@@ -13,10 +13,10 @@
 - **`arch_override.yml`** — NATTEN's documented floor is sm_80, so the shared
   row's 7.0/7.5 are dropped. Hopper (9.0) and Blackwell DC (10.0) enable
   their own kernel families and are built as sm_90a / sm_100a in separate
-  object libraries; 12.0 carries the PTX tail. See the file for the Windows
-  caveat (the farm kept 10.0 off its Windows row because MSVC rejects the
-  sm_100 FMHA backward header with C2061; this repo dispatches the shared row
-  and records what happens).
+  object libraries; 12.0 carries the PTX tail. win-64 has its own rows
+  (`arch_list_by_cuda_win`, read by generate_matrix.py) without 10.0: MSVC
+  rejects CUTLASS's sm_100 FMHA backward header with C2061, measured by the
+  farm at this revision and toolset.
 
 ## Sharding: the package partitions itself
 

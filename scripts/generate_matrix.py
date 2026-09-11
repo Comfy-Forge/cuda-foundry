@@ -157,6 +157,16 @@ def stable_pythons(subdir: str, cache: Path) -> set:
 def arch_list_for(cfg: dict, arch_policy: dict, cuda: str, torch_version: str,
                   subdir: str) -> str:
     """Arch list for a cell: per-package override, then exception, then policy."""
+    # win-64 may carry its own rows. Not a convenience: the one package that
+    # needs it (natten) has a kernel header MSVC cannot parse -- CUTLASS's
+    # sm100_fmha_bwd_kernel_tma_warpspecialized.hpp, C2061 under cl -- so
+    # sm_100 is buildable on linux-64 and not on win-64 from the same source,
+    # and one shared row would either lose Blackwell DC on Linux or fail
+    # every win-64 shard. Ported from the farm's arch_list_by_cuda_windows.
+    if subdir == "win-64":
+        by_cuda_win = cfg.get("arch_list_by_cuda_win") or {}
+        if cuda in by_cuda_win:
+            return str(by_cuda_win[cuda])
     by_cuda = cfg.get("arch_list_by_cuda") or {}
     if cuda in by_cuda:
         return str(by_cuda[cuda])

@@ -18,13 +18,7 @@
 # the regular CUTLASS-FNA path -- and carries the +PTX tail, which the patch
 # turns into a `120-virtual` cmake target for exactly that arch.
 #
-# One list for both platforms. The farm carried a SEPARATE Windows row
-# without 10.0, because MSVC rejects the sm_100 FMHA backward kernel header
-# (sm100_fmha_bwd_kernel_tma_warpspecialized.hpp, C2061) -- a compiler
-# limitation on that header, not a knob. This repo has no per-platform arch
-# row today, so the win-64 cell is dispatched with this list and the
-# outcome recorded in the batch report; if C2061 reproduces, a per-platform
-# row is the next thing to add rather than a narrower shared one.
+# These rows are linux-64's (and the fallback); win-64 has its own below.
 arch_list_by_cuda:
   '12.4': 8.0 8.6 8.9 9.0+PTX
   '12.6': 8.0 8.6 8.9 9.0+PTX
@@ -32,3 +26,23 @@ arch_list_by_cuda:
   '12.9': 8.0 8.6 8.9 9.0 10.0 12.0+PTX
   '13.0': 8.0 8.6 8.9 9.0 10.0 12.0+PTX
   '13.2': 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+
+# ---------------------------------------------------------------------------
+# win-64 rows: the same lists without 10.0. Enabling Blackwell DC sets
+# NATTEN_WITH_BLACKWELL_FNA, which pulls in CUTLASS's
+# sm100_fmha_bwd_kernel_tma_warpspecialized.hpp, and MSVC rejects that header
+# with C2061 (syntax error: identifier) -- the farm measured it on every
+# natten Windows shard at this same revision and toolset (VS2022), and there
+# is no __CUDA_ARCH__ guard or shim that makes cl parse it. A compiler
+# limitation on one header, not a knob. sm_120 (Blackwell consumer) is
+# unaffected -- it compiles through the regular CUTLASS-FNA path -- and
+# stays; only the datacentre parts (B200/GB200) are absent, on Windows only,
+# a combination that barely exists. Linux keeps 10.0. Delete these rows the
+# day MSVC or NATTEN can parse that header.
+arch_list_by_cuda_win:
+  '12.4': 8.0 8.6 8.9 9.0+PTX
+  '12.6': 8.0 8.6 8.9 9.0+PTX
+  '12.8': 8.0 8.6 8.9 9.0 12.0+PTX
+  '12.9': 8.0 8.6 8.9 9.0 12.0+PTX
+  '13.0': 8.0 8.6 8.9 9.0 12.0+PTX
+  '13.2': 8.0 8.6 8.9 9.0 12.0+PTX
