@@ -104,6 +104,38 @@ for line in ('set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=-Wconversion"
              'set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=-fno-strict-aliasing")'):
     t = sub_once(t, line + "\n", "", f"GCC-only flag removed: {line.split()[-1].rstrip(')')}", "csrc/CMakeLists.txt")
 
+# Torch's headers and import libraries, from torch itself rather than from a
+# hardcoded layout. Upstream assumes ${TORCH_DIR}/include, which is the pip
+# wheel's layout and conda-torch's repack; the conda-forge-mirrored builds
+# (pytorch 2.8.0 cuda128_mkl_*_302, which the solver prefers as the higher
+# build number) keep every header under %PREFIX%\Library\include and ship
+# no site-packages/torch/include at all. Measured on win-64 run 34587044404:
+# cl found Library\include\torch\extension.h through INCLUDE and then could
+# not find <torch/all.h>, because that lives in .../csrc/api/include, which
+# only the hardcoded (nonexistent) path would have added. torch's own
+# cpp_extension.include_paths() / library_paths() know the installed layout
+# -- conda-forge patches them for exactly this -- and are what every
+# setuptools-driven torch extension already compiles with.
+t = sub_once(
+    t,
+    'set(TORCH_INCLUDE_DIRS "${TORCH_DIR}/include" "${TORCH_DIR}/include/torch/csrc/api/include")',
+    '''execute_process(COMMAND ${PYTHON_PATH} "-c" "import torch.utils.cpp_extension as c; print(';'.join(c.include_paths()), end='')"
+                RESULT_VARIABLE _PYTHON_SUCCESS
+                OUTPUT_VARIABLE TORCH_INCLUDE_DIRS)
+if (NOT _PYTHON_SUCCESS MATCHES 0)
+    message(FATAL_ERROR "torch.utils.cpp_extension.include_paths() failed.")
+endif()
+execute_process(COMMAND ${PYTHON_PATH} "-c" "import torch.utils.cpp_extension as c; print(';'.join(c.library_paths()), end='')"
+                RESULT_VARIABLE _PYTHON_SUCCESS
+                OUTPUT_VARIABLE TORCH_LIBRARY_DIRS)
+if (NOT _PYTHON_SUCCESS MATCHES 0)
+    message(FATAL_ERROR "torch.utils.cpp_extension.library_paths() failed.")
+endif()
+message("cuda-foundry: torch library dirs: ${TORCH_LIBRARY_DIRS}")
+link_directories(${TORCH_LIBRARY_DIRS})''',
+    "torch include/library dirs taken from torch.utils.cpp_extension, not a hardcoded layout",
+    "csrc/CMakeLists.txt")
+
 t = sub_once(
     t,
     'set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -std=c++17")',
@@ -389,6 +421,7 @@ import ast  # noqa: E402
 ast.parse(final)
 cmf = cm.read_text()
 for needle, what in (("BUILD_WITH_INSTALL_RPATH TRUE", "the $ORIGIN RPATH"),
+                     ("c.include_paths()", "the torch include-dir lookup"),
                      ('CUDA_ARCHITECTURES "100a-real"', "the Blackwell object library"),
                      ('CUDA_ARCHITECTURES "90a-real"', "the Hopper object library"),
                      ("-std=c++${CXX_STD}", "the tracked host standard")):
