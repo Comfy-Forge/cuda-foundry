@@ -97,6 +97,12 @@ jobs:
         # not exist when the first cell solved -- which is how "gcc 16
         # appeared" mid-wave and half the cells were built against a
         # different toolchain than the other half.
+        #
+        # The cutoff filters on repodata timestamps across EVERY channel,
+        # ours included: a sibling published by another dispatch after this
+        # run started is invisible to this run's solves. A chain
+        # (pccm -> cumm -> spconv) is therefore dispatched one link at a
+        # time, each with its own cutoff -- which is how it is built today.
         run: |
           set -euo pipefail
           if [ -n "$IN_EXCLUDE_NEWER" ]; then

@@ -213,9 +213,13 @@ def _tail(text: str, n: int = 40) -> str:
 def _first_error(text: str) -> str:
     """The line a human would point at, from a failing command's output."""
     lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
-    for pat in (r"^\w*Error\b", r"Error:", r"error:", r"ERROR", r"No matching",
-                r"cannot", r"Cannot", r"failed", r"Failed", r"AssertionError",
-                r"ModuleNotFoundError", r"ImportError", r"OSError"):
+    # A Python exception line names the cause; rattler-build's trailing
+    # "Error: x failed to run test" only says that there was one, so the
+    # specific patterns come first.
+    for pat in (r"^(ModuleNotFoundError|ImportError|AttributeError|RuntimeError|AssertionError|"
+                r"OSError|TypeError|ValueError|KeyError|NameError|SyntaxError)\b",
+                r"^\w*Error\b", r"ERROR:", r"No matching", r"cannot", r"Cannot",
+                r"Error:", r"error:", r"failed", r"Failed"):
         for ln in reversed(lines):
             if re.search(pat, ln):
                 return ln.strip()[:200]
