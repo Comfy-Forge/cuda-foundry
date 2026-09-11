@@ -2,6 +2,10 @@ context:
   name: torchsparse
   version: "2.0.0b0"
   cuda_short: ${{ cuda_compiler_version | replace('.', '') }}
+  # The upper bound of the cudart run dep: the next CUDA major. libcudart's
+  # soname is per major (libcudart.so.12), so a 12.8-compiled extension runs
+  # on any 12.x >= 12.8 and on no 13.x.
+  cuda_major_next: ${{ (cuda_compiler_version | split('.') | first | int) + 1 }}
   torch_nodot: ${{ pytorch | replace('.', '') }}
   py_nodot: ${{ python | replace('.', '') }}
 
@@ -19,7 +23,49 @@ source:
 build:
   number: ${{ env.get("CUW_BUILD_NUMBER", default="0") }}
   string: cuda${{ cuda_short }}_torch${{ torch_nodot }}_py${{ py_nodot }}_h${{ hash }}_${{ build_number }}
+  # Declarative, applied by rattler-build at packaging time, so it holds on
+  # every path out of the build -- including one that exits before the script
+  # reaches its own cleanup. The script still removes these itself (a build
+  # env that keeps its RECORD is what makes `pip uninstall` delete conda's
+  # files, and a prefix that keeps nvcc.real is what shipped a 27.5 MB
+  # compiler inside torchvision); this is the gate behind the habit.
+  files:
+    exclude:
+      - "**/*.dist-info/RECORD"
+      - "**/*.dist-info/REQUESTED"
+      - "**/*.dist-info/direct_url.json"
+      - bin/nvcc*
+      - Library/bin/nvcc*
+  dynamic_linking:
+    # Both checks are LEFT AT ignore, deliberately, and not because they are
+    # unwanted: overdepending is exactly the torchvision no-codec trap, caught
+    # at packaging instead of two gates later. They cannot be `error` under
+    # rattler-build 0.75.0 on linux-64 because its attribution does not follow
+    # conda-forge's CUDA layout or conda-torch's pytorch. Measured on the
+    # runs that published pyg-lib (34594865610), cumesh-vb (34592422001) and
+    # spconv (34601407550): every artifact linking libcudart.so.12 is reported
+    # as BOTH "Overdepending against cuda-cudart" and "Overlinking against
+    # targets/x86_64-linux/lib/libcudart.so.12.x" -- the symlink in lib/
+    # belongs to cuda-cudart and resolves into cuda-cudart_linux-64, and the
+    # checks look at the resolved file; likewise "Overdepending against
+    # libtorch" and "pytorch" on every torch-linked artifact, and "Overlinking
+    # against lib/libstdc++.so.6" wherever gcc 8's run_exports are spelled
+    # libstdcxx-ng. `error` would fail every linux-64 build in the channel on
+    # attribution, not on a real defect. The five math-library warnings that
+    # were genuine are removed at the source (ignore_run_exports below), so
+    # the win-64 log -- where the checks attribute correctly -- should read
+    # clean after the rebuild wave; flipping win-64 to `error` then is a
+    # one-line change here.
+    overdepending_behavior: ignore
+    overlinking_behavior: ignore
   script:
+    # File-backed and platform-selected: build.sh is the shared script with
+    # this package's build_env substituted in, build_win.py the win-64
+    # counterpart (interpreter inferred from the extension). Neither is
+    # rendered by minijinja, so neither has to avoid brace-hash. Both are
+    # generated beside the recipe by scripts/generate_recipes.py and covered
+    # by --check.
+    file: ${{ "build_win.py" if win else "build.sh" }}
     env:
       # ---- what the build is ------------------------------------------
       # Per-CELL, not per-package: the arch list depends on the CUDA version
@@ -80,450 +126,6 @@ build:
       TORCH_EXTENSION_SKIP_NVCC_GEN_DEPENDENCIES: "1"
       CUW_RUN_ID: ${{ env.get("GITHUB_RUN_ID", default="local") }}
       CUW_RUN_URL: ${{ env.get("CUW_RUN_URL", default="local") }}
-    content:
-      - if: unix
-        then: |
-          # One build script, three modes. Templated verbatim into every generated
-          # recipe, so a shard job and its link job run byte-identical compiles — which
-          # is what makes the ccache handoff replay instead of recompile.
-          #
-          #   CUW_MODE=full   compile + install (unsharded packages)
-          #   CUW_MODE=shard  compile only this shard's slice, then exit 0
-          #   CUW_MODE=link   full build, every compile expected to be a cache hit
-          #
-          # The environment this relies on is set in the recipe's build.script.env,
-          # NOT by the workflow: rattler-build hands the script a clean environment and
-          # the outer shell's exports do not reach it (measured, step-0 probe).
-          set -euo pipefail
-
-          CUW_DIR="$(dirname "${CUW_LEDGER:-/tmp/cuw/ledger.txt}")"
-          mkdir -p "$CUW_DIR" "$CCACHE_DIR"
-          : > "$CUW_LEDGER"
-
-          CCACHE_BIN="$(command -v "${CUW_CCACHE_BIN:-ccache}" || echo "${CUW_CCACHE_BIN:-ccache}")"
-          if ! "$CCACHE_BIN" --version >/dev/null 2>&1; then
-            echo "::error::ccache not usable at '$CCACHE_BIN' -- the shard handoff and the compile ledger both run through it" >&2
-            exit 1
-          fi
-          # ccache 3.x has no "cu" entry in its source-language table, so every TU the
-          # build compiles as `-x cu` is passed through UNCACHED. That is not a slow
-          # cache, it is no cache, and the shard lane would silently void itself.
-          CC_MAJOR="$("$CCACHE_BIN" --version | head -1 | grep -oE '[0-9]+' | head -1)"
-          if [ "${CC_MAJOR:-0}" -lt 4 ]; then
-            echo "::error::ccache $CC_MAJOR.x found; >= 4 required (3.x cannot cache '-x cu')" >&2
-            exit 1
-          fi
-
-          # ---- $PREFIX must look untouched by the time rattler-build packages -----
-          # rattler-build ships "files that appeared in $PREFIX during the build". The
-          # nvcc seat swap below leaves `bin/nvcc.real` behind and the CUDA header
-          # bridge further down creates symlinks under `include/`; both are new paths in
-          # $PREFIX, so both get PACKAGED. Measured, not theorised: the first
-          # torchvision pilot shipped a 27.5 MB `bin/nvcc.real` -- the real CUDA
-          # compiler -- fully declared in paths.json, and every package this repo has
-          # ever built carries the same passenger.
-          #
-          # So everything this script creates inside $PREFIX is recorded here and undone
-          # on EXIT, on every path out: shard mode exits 0 early, a failed compile exits
-          # non-zero, and both must still leave a clean prefix behind.
-          CUW_PREFIX_TRACK="$CUW_DIR/prefix-added.txt"
-          : > "$CUW_PREFIX_TRACK"
-          cuw_restore_prefix() {
-            rc=$?
-            # Put the real compiler back in its seat. Guarded on the marker so this
-            # cannot clobber a real nvcc if the swap never happened.
-            if [ -e "$BUILD_PREFIX/bin/nvcc.real" ] && grep -q 'CUW_WRAPPER_MARKER' "$BUILD_PREFIX/bin/nvcc" 2>/dev/null; then
-              mv -f "$BUILD_PREFIX/bin/nvcc.real" "$BUILD_PREFIX/bin/nvcc" || true
-            fi
-            while IFS= read -r added; do
-              [ -n "$added" ] && rm -f "$added" || true
-            done < "$CUW_PREFIX_TRACK"
-            return $rc
-          }
-          trap cuw_restore_prefix EXIT
-
-          # ---- the wrapper goes in the nvcc SEAT, not on PATH ---------------------
-          # torch's cpp_extension invokes "$CUDA_HOME/bin/nvcc" by absolute path, so a
-          # PATH-based shim is simply never consulted. Move the real binary aside and
-          # occupy its filename.
-          #
-          # The guard below is not paranoia. Without it, a re-entered script (a reused
-          # prefix, a retried step) moves the WRAPPER onto nvcc.real and installs a
-          # fresh wrapper on top, so nvcc execs ccache on a script that execs ccache on
-          # itself. That does not fail — it recurses forever, and in CI it burns the
-          # whole job timeout with no error. Measured the hard way, step 0.
-          if [ -f "$BUILD_PREFIX/bin/nvcc" ]; then
-            if grep -q 'CUW_WRAPPER_MARKER' "$BUILD_PREFIX/bin/nvcc" 2>/dev/null; then
-              # already ours: leave the seat alone, and make sure the real binary is
-              # still behind it rather than silently recursing.
-              if [ ! -x "$BUILD_PREFIX/bin/nvcc.real" ] || grep -q 'CUW_WRAPPER_MARKER' "$BUILD_PREFIX/bin/nvcc.real" 2>/dev/null; then
-                echo "::error::\$BUILD_PREFIX/bin/nvcc is the cuw wrapper but nvcc.real is missing or is itself a wrapper -- the nvcc seat is corrupt and would recurse forever" >&2
-                exit 1
-              fi
-              echo "nvcc seat already wrapped; reusing"
-            elif [ ! -f "$BUILD_PREFIX/bin/nvcc.real" ]; then
-              mv "$BUILD_PREFIX/bin/nvcc" "$BUILD_PREFIX/bin/nvcc.real"
-              install -m 0755 "$RECIPE_DIR/nvcc-wrap.sh" "$BUILD_PREFIX/bin/nvcc"
-            fi
-          fi
-          # Whatever path we took, the seat must now be a wrapper over a REAL compiler.
-          if ! "$BUILD_PREFIX/bin/nvcc.real" --version >/dev/null 2>&1; then
-            echo "::error::\$BUILD_PREFIX/bin/nvcc.real does not behave like a compiler -- refusing to build with a corrupt nvcc seat" >&2
-            exit 1
-          fi
-          export CUW_REAL_NVCC="$BUILD_PREFIX/bin/nvcc.real"
-          export CUW_CCACHE_BIN="$CCACHE_BIN"
-
-          export CUDA_HOME="$BUILD_PREFIX"
-          export PYTORCH_NVCC="$BUILD_PREFIX/bin/nvcc"   # torch's ninja writer honours this
-          export CUDACXX="$BUILD_PREFIX/bin/nvcc"        # cmake honours this
-          # Trailing, so it beats any --threads a setup.py hardcodes earlier in the line.
-          export NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS:-} --threads ${CUW_NVCC_THREADS:-1}"
-
-          # ---- CUDA headers: bridge conda-forge's targets/ layout -----------------
-          # conda-forge's CUDA packages install headers under
-          # $<prefix>/targets/<arch>/include, NOT $<prefix>/include. Anything that
-          # merely COMPILES is fine, because the activation scripts add the -I.
-          # Anything that PROBES for a header by path is not: it concludes the library
-          # is absent. torchvision does exactly that for nvjpeg (it stats
-          # "$CUDA_HOME/include/nvjpeg.h") and built without GPU JPEG support while
-          # libnvjpeg-dev sat installed in host: and its run_export was already on the
-          # finished package -- which is what rattler-build's "Overdepending against
-          # libnvjpeg" warning was really saying.
-          #
-          # Sources are searched BUILD_PREFIX first, then PREFIX, and a link is only
-          # ever created where nothing exists yet. That order is load-bearing: the CUDA
-          # toolkit is pinned to the cell in the build env while host: still resolves to
-          # whatever `cuda-version` torch's triton drags in, so build's cuda.h must win.
-          # The bridge writes into $CUDA_HOME/include, which is inside BUILD_PREFIX and
-          # therefore never scanned for packaging; the EXIT trap removes it regardless.
-          mkdir -p "$CUDA_HOME/include"
-          for cuw_inc in "$BUILD_PREFIX"/targets/*/include "$PREFIX"/targets/*/include; do
-            [ -d "$cuw_inc" ] || continue
-            cuw_linked=0
-            for cuw_h in "$cuw_inc"/*; do
-              cuw_b="$(basename "$cuw_h")"
-              # -e is false for a dangling symlink, so test -L as well: without it the
-              # ln below fails on an existing-but-broken link and the loop is noisy.
-              if [ -e "$CUDA_HOME/include/$cuw_b" ] || [ -L "$CUDA_HOME/include/$cuw_b" ]; then continue; fi
-              ln -s "$cuw_h" "$CUDA_HOME/include/$cuw_b" || continue
-              echo "$CUDA_HOME/include/$cuw_b" >> "$CUW_PREFIX_TRACK"
-              cuw_linked=$((cuw_linked + 1))
-            done
-            echo "cuda header bridge: linked $cuw_linked entr(ies) from $cuw_inc"
-          done
-
-          # ---- and the cell's headers must come FIRST -----------------------------
-          # Pinning the toolkit in build: is necessary but not sufficient. The HOST
-          # env's CUDA activation prepends -I$PREFIX/targets/<arch>/include to
-          # CPPFLAGS/CFLAGS/CXXFLAGS, and host's cuda-version is dragged to whatever
-          # torch's triton needs -- so the cell's headers are on the command line but
-          # LOSE. Measured on the TU that bakes in CUDA_VERSION (torchaudio's
-          # utils.cpp): $PREFIX/targets/.../include at positions 1, 2, 4 and 6, the
-          # build prefix's headers at position 11. The result compiled 12090 into a
-          # cell labelled cuda128 and torchaudio refused to load beside its own torch.
-          # The competing -I lives in these same variables, so putting ours in front of
-          # them is the whole fix, and the order stops being anyone else's to decide.
-          export CPPFLAGS="-I$CUDA_HOME/include ${CPPFLAGS:-}"
-          export CFLAGS="-I$CUDA_HOME/include ${CFLAGS:-}"
-          export CXXFLAGS="-I$CUDA_HOME/include ${CXXFLAGS:-}"
-          export NVCC_PREPEND_FLAGS="-I$CUDA_HOME/include ${NVCC_PREPEND_FLAGS:-}"
-
-          # ---- package-declared build environment (package.yml `build_env`) -------
-          # Values computed from $PREFIX cannot live in the recipe's build.script.env:
-          # rattler-build sets those LITERALLY, with no shell expansion, so a
-          # "$PREFIX/include" written there arrives at setup.py as those exact 15
-          # characters. They are rendered here instead, where $PREFIX is real.
-          export CUW_SPARSEHASH_INCLUDE="$PREFIX/include"
-
-          echo "=== cuw build ==================================================="
-          echo "  mode        : ${CUW_MODE}"
-          echo "  shard       : ${CUW_SHARD_INDEX}/${CUW_SHARD_COUNT}"
-          echo "  ccache      : $("$CCACHE_BIN" --version | head -1)  dir=$CCACHE_DIR"
-          echo "  arch list   : ${TORCH_CUDA_ARCH_LIST:-unset}"
-          echo "  MAX_JOBS    : ${MAX_JOBS:-unset}  nvcc --threads ${CUW_NVCC_THREADS:-1}"
-          echo "  SRC_DIR     : $SRC_DIR"
-          echo "  PREFIX      : $PREFIX"
-          echo "================================================================="
-
-          # In shard mode the wrapper stubs out every TU that is not this slice's, so
-          # the "build" completes in seconds having compiled only its share. In link
-          # mode it is a pure ccache pass-through and every compile should hit.
-          if [ "$CUW_MODE" = "shard" ]; then
-            # package.yml `shard_partition: source`: the package's own build reads
-            # CUW_SHARD_INDEX / CUW_SHARD_COUNT and compiles only its slice (natten
-            # deletes the generated kernels outside it before cmake runs). The seat
-            # wrapper then stays a pure ccache pass-through: running BOTH partitions
-            # compiles the intersection, ~1/N^2 of the tree per shard, and the link
-            # job's zero-miss gate is what catches a package that claims this and
-            # then partitions nothing.
-            if [ "${CUW_SHARD_PARTITION:-}" = "source" ]; then
-              echo "shard partition: by the package's own build (shard_partition: source); nvcc seat passes everything through"
-            else
-              export CUW_PARTITION=1
-            fi
-            # The matrix numbers shards from 1 ("shard 1/1"), the partition arithmetic
-            # is 0-based. Without this conversion the comparison never matches, the
-            # wrapper stubs out EVERY translation unit, and the build still succeeds --
-            # shipping a package whose extension module is an empty object. Observed
-            # exactly that; only the compile ledger caught it.
-            export CUW_SHARD_INDEX0=$(( ${CUW_SHARD_INDEX:-1} - 1 ))
-          fi
-
-          "$CCACHE_BIN" -z >/dev/null 2>&1 || true
-
-          # The compile runs with network access permanently removed. This is the
-          # from-source guarantee (L1), and it is imposed here rather than by
-          # rattler-build's --sandbox because that flag needs unprivileged namespaces,
-          # which are unavailable both in this project's container and on
-          # GitHub-hosted runners (measured: "sandboxing failure: Operation not
-          # permitted"). The seccomp filter needs no privileges, is inherited by every
-          # child (setup.py, pip, cmake, nvcc), and cannot be removed once installed.
-          #
-          # ---- ONE compile, and it produces a WHEEL --------------------------------
-          # This was `pip install .`, which builds a wheel internally and then throws it
-          # away. Building it explicitly changes nothing about what is compiled -- pip
-          # takes the same PEP 517 path either way -- and it is what makes the second
-          # and third outputs possible: the .conda comes from installing this wheel into
-          # $PREFIX, the published manylinux wheel comes from `auditwheel repair` on the
-          # very same file. There is no second compile anywhere, so the two artifacts
-          # cannot disagree about what they contain.
-          #
-          # The wheelhouse is OUTSIDE the work dir on purpose. rattler-build deletes its
-          # work directory, and $PREFIX is packaged -- a wheel left in either would be
-          # gone or shipped. This is the same handoff shape as CCACHE_DIR: a CUW_* path
-          # the caller owns.
-          : "${CUW_WHEELHOUSE:=/tmp/cuw/wheelhouse}"
-          mkdir -p "$CUW_WHEELHOUSE"
-          # Only the .whl files, never `rm -rf` on the directory itself: this path
-          # arrives from the environment, and an unset or misspelled variable must not
-          # be able to delete a tree.
-          rm -f "$CUW_WHEELHOUSE"/*.whl
-
-          # package.yml `build_subdir`: the setup.py to build is not at the source
-          # root (pointnet2_ops lives in pointnet2_ops_lib/ inside a repo whose root
-          # setup.py is the training code). Everything above is path-independent;
-          # everything below runs where setup.py is.
-          if [ -n "${CUW_BUILD_SUBDIR:-}" ]; then
-            [ -d "$SRC_DIR/$CUW_BUILD_SUBDIR" ] || { echo "::error::build_subdir '$CUW_BUILD_SUBDIR' does not exist under $SRC_DIR" >&2; exit 1; }
-            cd "$SRC_DIR/$CUW_BUILD_SUBDIR"
-            echo "=== building in subdir: $CUW_BUILD_SUBDIR"
-          fi
-
-          BUILD_RC=0
-          $PYTHON "$RECIPE_DIR/nonet.py" -- $PYTHON -m pip wheel . --no-deps --no-build-isolation \
-              --wheel-dir "$CUW_WHEELHOUSE" -vv || BUILD_RC=$?
-
-          STATS="$("$CCACHE_BIN" --print-stats 2>/dev/null || true)"
-          HITS=$(printf '%s\n' "$STATS" | awk -F'\t' '$1 ~ /^(direct_cache_hit|preprocessed_cache_hit)$/ {n+=$2} END{print n+0}')
-          MISSES=$(printf '%s\n' "$STATS" | awk -F'\t' '$1 == "cache_miss" {n+=$2} END{print n+0}')
-          COMPILED=$( [ -s "$CUW_LEDGER" ] && wc -l < "$CUW_LEDGER" || echo 0 )
-          echo "=== ccache: $HITS hit(s) / $MISSES miss(es); ledger records $COMPILED compile(s)"
-
-          # ---- a build with no nvcc translation unit at all -----------------------
-          # The seat wrapper is both the ledger and the cache, and it sees nvcc only.
-          # A package whose extension is C++ against the CUDA runtime -- cumm: 39 .cc
-          # through g++, zero .cu -- never reaches it, so the ledger is empty and
-          # ccache saw nothing, which reads exactly like "the wrapper never occupied
-          # the seat". The two are told apart by EVIDENCE, not by a declaration:
-          # ninja's own .ninja_log, the same record build_win.py reads for L3 on win-64
-          # (that file is copied beside every recipe, so its parser is importable
-          # here). If ninja compiled real translation units and NONE of them is a .cu,
-          # there was nothing for the seat to see: the ninja TUs become the ledger and
-          # the ccache assertions below are skipped as inapplicable. Anything else --
-          # no ninja log, or a .cu among the ninja TUs -- leaves every assertion in
-          # force, so this cannot excuse a wrapper that really did go missing.
-          CUW_NO_NVCC_TU=0
-          if [ "$BUILD_RC" -eq 0 ] && [ "$COMPILED" -eq 0 ] && [ "$((HITS + MISSES))" -eq 0 ]; then
-            NINJA_TUS=$($PYTHON "$RECIPE_DIR/build_win.py" --ninja-ledger "$PWD" "$CUW_LEDGER" 2>/dev/null || echo 0)
-            if [ "${NINJA_TUS:-0}" -gt 0 ]; then
-              CUW_NO_NVCC_TU=1
-              COMPILED=$NINJA_TUS
-              echo "=== ledger: no nvcc translation unit in this build; ninja compiled $NINJA_TUS C++ TU(s), recorded from .ninja_log"
-            fi
-          fi
-
-          case "$CUW_MODE" in
-            shard)
-              # Report a real compile failure as itself. Checking the cache first meant
-              # a genuine build error (gcc too new for nvcc, say) surfaced as "the
-              # wrapper never occupied the nvcc seat", which sent debugging in exactly
-              # the wrong direction.
-              if [ "$BUILD_RC" -ne 0 ]; then
-                echo "::error::shard build failed (exit $BUILD_RC) -- see the compiler output above" >&2
-                exit "$BUILD_RC"
-              fi
-              # A shard that compiled nothing is not automatically wrong (its slice can
-              # be empty), but a shard whose wrapper never ran at all is a real defect:
-              # it would ship an empty cache and the link job would recompile the world.
-              if [ "$((HITS + MISSES))" -eq 0 ] && [ "$CUW_NO_NVCC_TU" -eq 0 ]; then
-                echo "::error::shard saw zero ccache lookups -- the wrapper never occupied the nvcc seat, or it stubbed out every translation unit (check CUW_SHARD_INDEX0 against CUW_SHARD_COUNT)" >&2
-                exit 1
-              fi
-              if [ "$COMPILED" -eq 0 ] && [ "$CUW_SHARD_COUNT" -eq 1 ]; then
-                # With a single shard there is no slice to be empty: compiling nothing
-                # means the partition logic is wrong, not that this shard had no work.
-                echo "::error::single-shard build compiled 0 translation units -- the partition stubbed everything out" >&2
-                exit 1
-              fi
-              echo "shard $CUW_SHARD_INDEX done; cache populated. Exiting before install."
-              exit 0
-              ;;
-            link)
-              if [ "$BUILD_RC" -ne 0 ]; then exit "$BUILD_RC"; fi
-              # ZERO tolerance, not a ratio. One miss is a whole TU recompiled, and a
-              # percentage cannot tell "one nondeterministic TU" from "four shards built
-              # for the wrong architecture".
-              if [ "$((HITS + MISSES))" -eq 0 ] && [ "$CUW_NO_NVCC_TU" -eq 0 ]; then
-                echo "::error::link job saw zero ccache lookups -- no shard cache was restored" >&2
-                exit 1
-              fi
-              if [ "$MISSES" -gt 0 ]; then
-                echo "::error::link job had $MISSES ccache miss(es) of $((HITS+MISSES)). Shard caches did not transfer cleanly: flag mismatch, path mismatch, or wrong-architecture artifacts." >&2
-                printf '%s\n' "$STATS" | grep -iE 'miss|hit' || true
-                exit 1
-              fi
-              ;;
-            full)
-              if [ "$BUILD_RC" -ne 0 ]; then exit "$BUILD_RC"; fi
-              ;;
-          esac
-
-          # ---- install THAT wheel into $PREFIX ------------------------------------
-          # Everything above this line is shared with the wheel output; everything below
-          # is conda packaging. Shard mode has already exited, so this runs exactly once
-          # per artifact.
-          #
-          # --no-index as well as --no-deps: --no-deps stops pip resolving dependencies,
-          # but a missing one would still send it to PyPI for the wheel itself if the
-          # glob below ever produced nothing. With --no-index there is no index to fall
-          # back to, so a broken handoff fails loudly here instead of quietly installing
-          # somebody else's build. (The seccomp filter would also refuse it -- this is
-          # the same belt-and-braces as declaring force_source_build alongside L1.)
-          # Counted with positional parameters rather than a bash array, and that is
-          # NOT a style choice. rattler-build renders this script through minijinja
-          # BEFORE running it, and minijinja opens a comment on the two-character
-          # sequence brace-hash -- which is exactly what a bash array-length
-          # expansion starts with (dollar, brace, hash, name). The comment never
-          # closes, so the render fails and rattler-build reports only:
-          #   Error:   x Script failed to execute
-          # with no script output and no "Running build script" header at all,
-          # because the script never existed to be run. Measured: an array-length
-          # expansion fails, while array assignment, a subscripted element and a
-          # whole-array expansion all render fine -- it is that one digraph alone.
-          # Two other minijinja openers are the same trap and must never appear in
-          # this file either: brace-brace (an expression) and brace-percent (a
-          # statement). This comment therefore spells all three out in words.
-          shopt -s nullglob
-          set -- "$CUW_WHEELHOUSE"/*.whl
-          shopt -u nullglob
-          if [ "$#" -ne 1 ]; then
-            echo "::error::expected exactly 1 wheel in $CUW_WHEELHOUSE, found $#: ${*:-none}. The .conda and the published wheel must come from ONE file; anything else means the compile produced nothing or the wheelhouse was not cleared." >&2
-            exit 1
-          fi
-          CUW_WHEEL="$1"
-          echo "=== installing $(basename "$CUW_WHEEL") into \$PREFIX"
-          $PYTHON "$RECIPE_DIR/nonet.py" -- $PYTHON -m pip install "$CUW_WHEEL" \
-              --no-deps --no-index --no-build-isolation --force-reinstall -vv
-
-          # ---- L3: the compile ledger --------------------------------------------
-          # Every extension module we are about to ship must correspond to at least one
-          # translation unit this run actually compiled. Catches what the network denial
-          # cannot see: a binary vendored into the source tree, or a build system that
-          # copies a prebuilt .so into place.
-          SITE="$(: | $PYTHON -c 'import sysconfig;print(sysconfig.get_paths()["purelib"])')"
-          MODULES=$(find "$SITE" -name '*.so' -newermt '-1 day' 2>/dev/null | wc -l)
-          if [ "$MODULES" -gt 0 ] && [ "$COMPILED" -eq 0 ] && [ "$HITS" -eq 0 ]; then
-            echo "::error::installed $MODULES extension module(s) but the compile ledger is empty and nothing was replayed from cache -- this build did not compile what it is shipping" >&2
-            exit 1
-          fi
-          echo "ledger: $COMPILED compile(s) recorded for $MODULES installed module(s)"
-
-          # ---- dist-info hygiene --------------------------------------------------
-          # pip records where it installed FROM in direct_url.json -- a file:// URL to
-          # this runner's wheelhouse now that the install is `pip install <wheel>`
-          # rather than `pip install .` (it was $SRC_DIR before; either way it is a path
-          # on a machine nobody else has). It makes `pip freeze` emit that URL instead
-          # of a version, so it must not ship. RECORD goes for the same reason conda-forge drops it: with
-          # it present, `pip uninstall` will happily delete files conda owns.
-          #
-          # INSTALLER is deliberately NOT written here. rattler-build 0.75.0 rewrites it
-          # during packaging no matter what the build script leaves behind -- measured:
-          # a script that writes exactly "conda" (5 bytes, verified with od at the end
-          # of the script) still produces "conda\n" (6 bytes) inside the .conda. So a
-          # write here would be dead code that looks load-bearing.
-          # Scoped to the dist-info of the wheel THIS build installed, not every
-          # dist-info in the prefix. The glob form deleted direct_url.json and RECORD
-          # from host-environment packages the build does not own -- filelock, fsspec,
-          # jinja2 and markupsafe were all observed losing theirs. It gains the .conda
-          # nothing, because rattler-build packages files that APPEARED in $PREFIX and
-          # those packages were already there; it just corrupts the build environment's
-          # own metadata. Whether it does visible harm depends on which host packages
-          # happen to carry a RECORD, which is not a property to rely on.
-          #
-          # The name comes from the wheel: PEP 427 fixes the first two filename fields
-          # as the escaped name and version, and pip installs that as
-          # "<name>-<version>.dist-info".
-          CUW_WHL_BASE="$(basename "$CUW_WHEEL")"
-          CUW_DI="$SITE/$(echo "$CUW_WHL_BASE" | cut -d- -f1,2).dist-info"
-          if [ -d "$CUW_DI" ]; then
-            rm -f "$CUW_DI/direct_url.json" "$CUW_DI/RECORD"
-            echo "dist-info hygiene: scrubbed $(basename "$CUW_DI")"
-          else
-            # Not a warning to ignore: it means the wheel's own dist-info is not where
-            # its filename says, so direct_url.json would ship with a path from this
-            # machine in it.
-            echo "::error::expected $CUW_DI from $CUW_WHL_BASE, and it is not there -- refusing to ship a dist-info that may still carry direct_url.json" >&2
-            exit 1
-          fi
-          if [ -s "$CUW_RSS_LOG" ]; then
-            echo "=== nvcc peak RSS per TU (top 10) ==="
-            # `|| true` is load-bearing. Under `set -o pipefail`, sort takes SIGPIPE
-            # (141) whenever head stops reading before sort has finished writing, and
-            # this is the LAST pipeline in the script -- so its status is the script's.
-            # A package with a handful of translation units never saw it; spconv's
-            # link job (699 entries, run 34592223234) compiled, replayed at zero
-            # misses, installed its wheel and scrubbed its dist-info, and then exited
-            # 141 on this line with nothing wrong.
-            sort -t= -k2 -nr "$CUW_RSS_LOG" | head -10 || true
-          fi
-      - if: win
-        then: |
-          :: win-64 build entry point. Deliberately thin: everything of substance lives in
-          :: scripts/build_snippets/build_win.py, which generate_recipes.py copies next to
-          :: the recipe the same way it copies nonet.py.
-          ::
-          :: The split is not stylistic. rattler-build renders THIS text through minijinja
-          :: before running it, and minijinja opens a comment on brace-hash, an expression
-          :: on brace-brace and a statement on brace-percent. When the render fails it
-          :: reports only "Script failed to execute" -- no script output, no "Running build
-          :: script" header, because the script never existed to be run. A sibling .py file
-          :: is copied verbatim and never rendered, so it is free of that hazard; keeping
-          :: this file short enough to eyeball for those three digraphs is the whole point.
-          ::
-          :: Batch's own percent-variables are fine here -- it is brace-percent that opens
-          :: a minijinja statement, not percent alone.
-          @echo on
-          setlocal
-
-          :: package.yml `build_env` is substituted here by generate_recipes.py, the same
-          :: way build.sh's # CUW_BUILD_ENV_HOOK works. Without it a package that declares
-          :: build_env would have it silently applied on Linux and silently dropped here.
-          set "CUW_SPARSEHASH_INCLUDE=%PREFIX%/Library/include"
-
-          if not defined PYTHON (
-            echo ::error::PYTHON is not set -- rattler-build normally provides it 1>&2
-            exit /b 1
-          )
-
-          "%PYTHON%" "%RECIPE_DIR%\build_win.py"
-          if errorlevel 1 (
-            echo ::error::win-64 build script failed 1>&2
-            exit /b 1
-          )
-
-          endlocal
-          exit /b 0
 
 requirements:
   build:
@@ -558,23 +160,27 @@ requirements:
     # Compiling against the cell's CUDA and running against the >= runtime the
     # run_export asks for is the safe direction; the reverse is not.
     - cuda-version ${{ cuda_compiler_version }}.*
-    # NOT the `cuda-nvcc` metapackage on win-64: it hard-depends on
-    # `vs2019_win-64`, unversioned (measured in cuda-nvcc-12.8.93-h8f04d04_2's
-    # index.json), so asking for the toolkit silently selects MSVC 19.29 while
-    # upstream's torch is built with the VS2022 toolset. Asking for vs2022 as
-    # well does not replace it -- both activation scripts land in one prefix and
-    # vs2022 wins only because activate.d runs in filename order and 2022 sorts
-    # after 2019. `cuda-nvcc_win-64` plus an explicit MSVC yields exactly one.
-    # build_win.py re-checks both facts against what actually got installed.
+    # cuda-nvcc_<platform>, never the `cuda-nvcc` metapackage, on BOTH
+    # platforms, for two measured reasons:
+    #   * win-64: `cuda-nvcc` hard-depends on `vs2019_win-64`, unversioned
+    #     (cuda-nvcc-12.8.93-h8f04d04_2's index.json), so asking for the
+    #     toolkit silently selects MSVC 19.29 while upstream's torch is built
+    #     with the VS2022 toolset; asking for vs2022 as well does not replace
+    #     it, both activation scripts land in one prefix and 2022 wins only by
+    #     sorting after 2019. build_win.py re-checks both facts.
+    #   * linux-64: the run_exports live on cuda-nvcc_linux-64
+    #     (`strong: cuda-version >=12.8,<13`), and the `cuda-nvcc` metapackage
+    #     exports NOTHING. With the metapackage here every linux-64 artifact
+    #     shipped with no `cuda-version` run dep at all, while win-64 -- which
+    #     always named the platform package -- had it. One spelling, one
+    #     export, both platforms.
     # The MSVC package itself is NOT named here: `compiler('c')` above already
     # resolves to <c_compiler>_win-64, and the cell picks which one by setting
     # the `c_compiler` variant -- exactly how `c_compiler_version` carries the
     # gcc ceiling on Linux. Naming it again here would be a second source of
     # truth that can disagree with the first. See defaults/policy.yml
     # host_msvc for the per-CUDA table and defaults/variants-win.yaml.
-    - if: win
-      then: cuda-nvcc_win-64
-      else: cuda-nvcc
+    - cuda-nvcc_${{ target_platform }} ${{ cuda_compiler_version }}.*
     - cuda-cudart-dev
     - cuda-cccl
     # package.yml `build_deps`. These were declared by every package and
@@ -593,13 +199,16 @@ requirements:
     # in package.yml and only one of them works from here.
   host:
     - python ${{ python }}.*
-    # python_abi's run_export is what puts a real interpreter-ABI bound on the
-    # RUNTIME package. Without it a cp312 extension module declares only an
-    # unbounded `python` and may legally be installed into a py3.10 env. Today
-    # that is masked for torch-linked packages, because pytorch's own
-    # python_abi dep constrains the env transitively — but the mask vanishes
-    # for a links_torch: false package (cumm, spconv), which has no pytorch to
-    # inherit from. Declare it directly rather than depending on a sibling.
+    # Stated for the reader, not for the solver. The `python_abi 3.12.*
+    # *_cp312` run dep on every artifact is conda-forge's python's OWN weak
+    # run_export (the render says so: "python_abi ... run_export of python
+    # from host"), so it arrives with or without this line, for torch-linked
+    # and torch-free packages alike. An earlier comment claimed the line was
+    # load-bearing because "the mask vanishes for links_torch: false"; the
+    # render shows it is not. It stays because a cp312 extension pinning its
+    # ABI in its own host list is the honest declaration, and because a
+    # future python package that stopped exporting python_abi would otherwise
+    # silently let a cp312 module install into py3.10.
     - python_abi ${{ python }}.* *_cp${{ py_nodot }}
     - pip
     # The Windows window is narrow at BOTH ends, and both ends were measured in
@@ -614,18 +223,49 @@ requirements:
     - if: win
       then: setuptools >=78,<84
       else: setuptools
+    # ---- host's CUDA window -----------------------------------------------
+    # The toolkit is pinned in build:; host: is a separate solve and its
+    # cuda-version is set by whatever else is in it. On linux-64 with a torch
+    # in host that is triton: pytorch 2.8.0 cu128 pins `triton ==3.4.0`, the
+    # only 3.4.0 build anywhere carries `cuda-version >=12.9,<13`, and a
+    # `cuda-version 12.8.*` here is UNSAT (measured, --render-only
+    # --with-solve, 2026-09-11). So linux host floats to 12.9 -- harmless for
+    # the compile, which reads the build env's headers first (build.sh), and
+    # for the runtime dep, which the template declares itself below -- and the
+    # host CUDA -dev packages nothing links have their run_exports ignored so
+    # the 12.9 floor reaches no artifact. Where there is no triton the pin is
+    # SAT and it is applied: win-64 (no triton build exists there) and every
+    # torch-free package on both platforms. A torch-free package inherits no
+    # CUDA window from anywhere, so without this its host would resolve the
+    # newest cuda-nvrtc-dev (13.x) against a 12.8 toolkit.
+    - if: win
+      then: cuda-version ${{ cuda_compiler_version }}.*
     # The exact torch this compiles against. The build glob is what locks the
-    # CUDA flavour today: a bare minor range would let a cu130 torch satisfy a
-    # cu128 extension.
+    # CUDA flavour AND the packaging: a bare minor range would let a cu130
+    # torch satisfy a cu128 extension, and `cuda128_*` alone matches two
+    # different torches on win-64.
+    #
+    # The second token is `repack`, and it is load-bearing. conda-torch's
+    # win-64 carries both `cuda128_mkl_py312_*_302` (a mirror of conda-forge's
+    # own build) and `cuda128_repack_py312_*` (the PyPI wheel, repacked), and
+    # `cuda128_*` matched both. The solver ranks mkl's build number 302 above
+    # the repack's, so every win-64 artifact published before this line was
+    # compiled against cuda128_mkl_302 -- a torch built with a different
+    # toolchain from the wheel this channel claims equivalence with. On
+    # linux-64 only the repack exists and the narrower glob matches exactly
+    # what it always matched. The same glob goes in run: so an installed
+    # extension can never sit beside the other flavour either.
     #
     # An earlier comment here claimed run_exports STRUCTURALLY cannot express
-    # a flavour. That is wrong, and worth correcting rather than deleting: it
-    # is only `pin_subpackage()` that offers version-range or exact-hash and
-    # nothing in between. A run_export is a MatchSpec string, so a producer
-    # can concatenate a build glob onto it, and conda-forge does exactly that
-    # -- see exchcxx-feedstock, whose run_exports is
+    # a flavour. That is wrong, and worth correcting rather than deleting: a
+    # run_export is a MatchSpec string, so a producer can concatenate a build
+    # glob onto it, and conda-forge does exactly that -- see exchcxx-feedstock,
+    # whose run_exports is
     #   {{ pin_subpackage(name, max_pin='x.x') }} cuda{{ ... }}_*
     # and ~152 conda-forge packages ship a build-carrying three-part spec.
+    # (Nor is pin_subpackage the only pin that takes a build: rattler-build's
+    # pin_compatible(..., build=...) does as well -- rattler_build_jinja/src/
+    # jinja.rs, jinja_pin_function.)
     #
     # The reason we still write the glob by hand is narrower and real:
     # conda-torch's repacked pytorch exports a flavour-BLIND
@@ -633,14 +273,22 @@ requirements:
     # recipe here could drop this line and inherit the lock transitively.
     # That is a one-line change in the producer replacing N in the consumers,
     # and it belongs in conda-torch, not here.
-    - pytorch ${{ pytorch }}.* cuda${{ cuda_short }}_*
+    - pytorch ${{ pytorch }}.* cuda${{ cuda_short }}_repack_*
     # torch's OWN headers include these, so every torch-linked extension needs
     # them regardless of what its sources reference: ATen/cuda/CUDAContextLight.h
     # includes <cusparse.h>, and the CUDAContext.h chain pulls the rest.
     # Measured: without libcusparse-dev the compile dies with
     # "fatal error: cusparse.h: No such file or directory".
     # This is the torch-implied floor; anything a package's own sources include
-    # goes in its package.yml host_deps instead of here.
+    # goes in its package.yml host_deps instead of here. HEADERS only: their
+    # run_exports are ignored below, because no extension in the channel links
+    # any of the five libraries (measured on the published artifacts).
+    #
+    # Also true of this host env, and worth knowing before reading a build
+    # log: triton drags `cuda-nvcc-tools` (12.9) into host, so $PREFIX/bin/nvcc
+    # EXISTS and is the wrong compiler. build.sh's CUDA_HOME=$BUILD_PREFIX,
+    # PYTORCH_NVCC and CUDACXX exports are what keep every build system on the
+    # cell's nvcc; they are load-bearing, not tidiness.
     - libcusparse-dev
     - libcublas-dev
     - libcusolver-dev
@@ -662,7 +310,6 @@ requirements:
     - numpy
     - tqdm
     - sparsehash
-    - cuda-cudart-dev
     - libcublas-dev
   run:
     - python
@@ -674,21 +321,92 @@ requirements:
     # one line of this package's own metadata instead of walking its
     # dependency closure to find where __cuda enters.
     - __cuda
-    # Same glob in run:, so an installed extension can never sit beside a
-    # torch of a different flavour.
-    - pytorch ${{ pytorch }}.* cuda${{ cuda_short }}_*
-    - numpy
+    # The CUDA runtime, declared HERE with the cell's own floor rather than
+    # inherited from a host cuda-cudart-dev run_export. Every extension in
+    # the channel links libcudart.so.12 / cudart64_12.dll (measured), and it
+    # was compiled against the build env's 12.8 headers, so >=12.8 is the true
+    # floor and <13 the soname's ceiling. The inherited version was
+    # `>=12.9.79` on every linux-64 artifact -- host's cudart-dev resolved to
+    # 12.9 for the triton reason above -- which is a false floor that refused
+    # a perfectly good 12.8 runtime.
+    - cuda-cudart >=${{ cuda_compiler_version }},<${{ cuda_major_next }}.0a0
+    # Same glob as host:, so an installed extension can never sit beside a
+    # torch of a different flavour or packaging. pytorch's own run_export
+    # (`pytorch >=2.8.0,<2.9.0a0`) is ignored below so this is the ONE pytorch
+    # spec on the artifact; the glob is strictly narrower than the export.
+    - pytorch ${{ pytorch }}.* cuda${{ cuda_short }}_repack_*
+    # `numpy` is in package.yml run_deps AND in host_deps, and its host
+    # run_export (`numpy >=1.25,<3`, the ABI window) subsumes the bare name;
+    # rendered once, from the export. See package_loader.HOST_RUN_EXPORT_SUBSUMES.
     - tqdm
+  ignore_run_exports:
+    # pytorch's weak export `pytorch >=2.8.0,<2.9.0a0` duplicated the glob
+    # above on every artifact (two pytorch specs, one flavour-blind). Ignored
+    # by NAME so libtorch's export from the same package is kept.
+    by_name:
+      - pytorch
+    # Host -dev packages whose headers the compile needs and whose libraries
+    # nothing links. Their run_exports declared libcublas, libcufft, libcurand,
+    # libcusolver and libcusparse on every torch-linked artifact in the
+    # channel while no DT_NEEDED / PE import names any of them -- the finding
+    # every audit cited -- and, because host resolves 12.9 on linux, with 12.9
+    # floors at that. A package whose binary genuinely links one names it in
+    # package.yml `keep_run_exports:` (cumm: cuda-nvrtc-dev) and it is left
+    # out of this list.
+    from_package:
+      - libcublas-dev
+      - libcufft-dev
+      - libcurand-dev
+      - libcusolver-dev
+      - libcusparse-dev
+      - cuda-nvtx-dev
+      - cuda-nvrtc-dev
+
 
 tests:
+  # 0. Contents, checked on the staged package with no environment: the files
+  #    build.files.exclude removes must be gone. Cheap, and it is the check
+  #    that fails closed if the exclude list and the script ever disagree.
+  - package_contents:
+      files:
+        not_exists:
+          - "**/*.dist-info/RECORD"
+          - "**/*.dist-info/REQUESTED"
+          - "**/*.dist-info/direct_url.json"
+          - bin/nvcc*
+          - Library/bin/nvcc*
+  # 1. Import, in a fresh solve of the artifact with its run deps. pip_check
+  #    asks pip whether the wheel's own Requires-Dist are satisfied by what
+  #    conda installed -- a second opinion on run_deps from the metadata the
+  #    upstream wrote. Needs no GPU: __cuda is a virtual package, so the solve
+  #    wants CONDA_OVERRIDE_CUDA on a GPU-less machine and nothing more.
   - python:
       imports:
         - torchsparse
+      pip_check: true
+  # 2. The package's own minimal op on real hardware (package.yml verify.op),
+  #    shipped INSIDE the artifact as info/tests/ so that
+  #    `rattler-build test --package-file <artifact> --test-index 2` runs it on
+  #    any machine with a GPU, long after the build. A mis-arch'd kernel shows
+  #    up as cudaErrorNoKernelImageForDevice here and nowhere else, and the
+  #    disabled-codec bug showed up nowhere but a real decode_jpeg.
+  - script:
+      file: verify_op.py
+    files:
+      recipe:
+        - verify_op.py
 
 about:
   homepage: "https://github.com/mit-han-lab/torchsparse"
   license: "MIT"
+  # package.yml `license_files`: paths in the source tree that rattler-build
+  # copies into info/licenses/. Required -- an artifact redistributing a
+  # compiled upstream without its licence text may not be published.
+  license_file:
+    - "LICENSE"
   summary: "High-performance sparse convolution for point clouds (MIT HAN Lab), compiled against the conda-torch channel"
+  repository: "https://github.com/mit-han-lab/torchsparse"
+  documentation: "https://torchsparse-docs.github.io"
 
 extra:
   # Provenance: the from-source guarantee, recorded in the artifact so it is

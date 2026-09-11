@@ -13,10 +13,23 @@
      read there with `${{ env.get(...) }}`, which is evaluated at render
      time. This is why every CCACHE_* setting is listed below rather than
      exported by the workflow.
-  2. CUDA dev packages are NOT pinned to an exact minor. Pinning
-     `cuda-cudart-dev 12.8.*` forces `cuda-version >=12.8,<12.9`, which is
-     UNSAT against a pytorch whose `triton` pin is cuda129-only. The window
-     comes from the pytorch we build against; we just live inside it.
+  2. host: cannot be pinned to the cell's CUDA minor on linux-64. Pinning
+     `cuda-version 12.8.*` there is UNSAT: pytorch 2.8.0 cu128 pins
+     `triton ==3.4.0`, and the only triton 3.4.0 anywhere (conda-torch's
+     mirror of conda-forge's cuda129 build) carries `cuda-version >=12.9,<13`
+     (measured 2026-09-11 with --render-only --with-solve). So host: floats
+     to 12.9 on linux and every run_export a host CUDA -dev package emits
+     would carry a 12.9 floor -- which is why the template ignores the ones
+     nothing links, declares the cudart floor itself from
+     cuda_compiler_version, and forbids cuda-cudart-dev in host_deps. win-64
+     has no triton and IS pinned. See requirements.host below.
+  3. The build script is a FILE beside the recipe, not inline content.
+     rattler-build renders inline scripts through minijinja before running
+     them (crates/rattler_build_script/src/execution.rs: "file-backed scripts
+     are not rendered"), which is what made brace-hash, brace-brace and
+     brace-percent forbidden in build.sh and forced the win-64 entry point
+     into a .bat shim. A file-backed script is copied verbatim, so build.sh
+     may use a bash array again and win-64 runs build_win.py directly.
 -#>
 context:
   name: << conda_name >>
@@ -31,6 +44,10 @@ context:
   version: "<< version >>"
 <%- endif %>
   cuda_short: ${{ cuda_compiler_version | replace('.', '') }}
+  # The upper bound of the cudart run dep: the next CUDA major. libcudart's
+  # soname is per major (libcudart.so.12), so a 12.8-compiled extension runs
+  # on any 12.x >= 12.8 and on no 13.x.
+  cuda_major_next: ${{ (cuda_compiler_version | split('.') | first | int) + 1 }}
   torch_nodot: ${{ pytorch | replace('.', '') }}
   py_nodot: ${{ python | replace('.', '') }}
 
@@ -58,7 +75,58 @@ build:
   # have.
   string: cuda${{ cuda_short }}_py${{ py_nodot }}_h${{ hash }}_${{ build_number }}
 <%- endif %>
+  # Declarative, applied by rattler-build at packaging time, so it holds on
+  # every path out of the build -- including one that exits before the script
+  # reaches its own cleanup. The script still removes these itself (a build
+  # env that keeps its RECORD is what makes `pip uninstall` delete conda's
+  # files, and a prefix that keeps nvcc.real is what shipped a 27.5 MB
+  # compiler inside torchvision); this is the gate behind the habit.
+  files:
+    exclude:
+      - "**/*.dist-info/RECORD"
+      - "**/*.dist-info/REQUESTED"
+      - "**/*.dist-info/direct_url.json"
+      - bin/nvcc*
+      - Library/bin/nvcc*
+  dynamic_linking:
+<%- if allow_dso %>
+    # package.yml `verify.allow_dso`: libraries a shipped binary may link that
+    # no conda package provides -- the CUDA driver (libcuda.so.1 / nvcuda.dll)
+    # for a package that calls the driver API directly.
+    missing_dso_allowlist:
+<%- for g in allow_dso %>
+      - << g | tojson >>
+<%- endfor %>
+<%- endif %>
+    # Both checks are LEFT AT ignore, deliberately, and not because they are
+    # unwanted: overdepending is exactly the torchvision no-codec trap, caught
+    # at packaging instead of two gates later. They cannot be `error` under
+    # rattler-build 0.75.0 on linux-64 because its attribution does not follow
+    # conda-forge's CUDA layout or conda-torch's pytorch. Measured on the
+    # runs that published pyg-lib (34594865610), cumesh-vb (34592422001) and
+    # spconv (34601407550): every artifact linking libcudart.so.12 is reported
+    # as BOTH "Overdepending against cuda-cudart" and "Overlinking against
+    # targets/x86_64-linux/lib/libcudart.so.12.x" -- the symlink in lib/
+    # belongs to cuda-cudart and resolves into cuda-cudart_linux-64, and the
+    # checks look at the resolved file; likewise "Overdepending against
+    # libtorch" and "pytorch" on every torch-linked artifact, and "Overlinking
+    # against lib/libstdc++.so.6" wherever gcc 8's run_exports are spelled
+    # libstdcxx-ng. `error` would fail every linux-64 build in the channel on
+    # attribution, not on a real defect. The five math-library warnings that
+    # were genuine are removed at the source (ignore_run_exports below), so
+    # the win-64 log -- where the checks attribute correctly -- should read
+    # clean after the rebuild wave; flipping win-64 to `error` then is a
+    # one-line change here.
+    overdepending_behavior: ignore
+    overlinking_behavior: ignore
   script:
+    # File-backed and platform-selected: build.sh is the shared script with
+    # this package's build_env substituted in, build_win.py the win-64
+    # counterpart (interpreter inferred from the extension). Neither is
+    # rendered by minijinja, so neither has to avoid brace-hash. Both are
+    # generated beside the recipe by scripts/generate_recipes.py and covered
+    # by --check.
+    file: ${{ "build_win.py" if win else "build.sh" }}
     env:
       # ---- what the build is ------------------------------------------
       # Per-CELL, not per-package: the arch list depends on the CUDA version
@@ -157,13 +225,6 @@ build:
       TORCH_EXTENSION_SKIP_NVCC_GEN_DEPENDENCIES: "1"
       CUW_RUN_ID: ${{ env.get("GITHUB_RUN_ID", default="local") }}
       CUW_RUN_URL: ${{ env.get("CUW_RUN_URL", default="local") }}
-    content:
-      - if: unix
-        then: |
-<< build_sh | indent(10, true) >>
-      - if: win
-        then: |
-<< build_bat | indent(10, true) >>
 
 requirements:
   build:
@@ -198,23 +259,27 @@ requirements:
     # Compiling against the cell's CUDA and running against the >= runtime the
     # run_export asks for is the safe direction; the reverse is not.
     - cuda-version ${{ cuda_compiler_version }}.*
-    # NOT the `cuda-nvcc` metapackage on win-64: it hard-depends on
-    # `vs2019_win-64`, unversioned (measured in cuda-nvcc-12.8.93-h8f04d04_2's
-    # index.json), so asking for the toolkit silently selects MSVC 19.29 while
-    # upstream's torch is built with the VS2022 toolset. Asking for vs2022 as
-    # well does not replace it -- both activation scripts land in one prefix and
-    # vs2022 wins only because activate.d runs in filename order and 2022 sorts
-    # after 2019. `cuda-nvcc_win-64` plus an explicit MSVC yields exactly one.
-    # build_win.py re-checks both facts against what actually got installed.
+    # cuda-nvcc_<platform>, never the `cuda-nvcc` metapackage, on BOTH
+    # platforms, for two measured reasons:
+    #   * win-64: `cuda-nvcc` hard-depends on `vs2019_win-64`, unversioned
+    #     (cuda-nvcc-12.8.93-h8f04d04_2's index.json), so asking for the
+    #     toolkit silently selects MSVC 19.29 while upstream's torch is built
+    #     with the VS2022 toolset; asking for vs2022 as well does not replace
+    #     it, both activation scripts land in one prefix and 2022 wins only by
+    #     sorting after 2019. build_win.py re-checks both facts.
+    #   * linux-64: the run_exports live on cuda-nvcc_linux-64
+    #     (`strong: cuda-version >=12.8,<13`), and the `cuda-nvcc` metapackage
+    #     exports NOTHING. With the metapackage here every linux-64 artifact
+    #     shipped with no `cuda-version` run dep at all, while win-64 -- which
+    #     always named the platform package -- had it. One spelling, one
+    #     export, both platforms.
     # The MSVC package itself is NOT named here: `compiler('c')` above already
     # resolves to <c_compiler>_win-64, and the cell picks which one by setting
     # the `c_compiler` variant -- exactly how `c_compiler_version` carries the
     # gcc ceiling on Linux. Naming it again here would be a second source of
     # truth that can disagree with the first. See defaults/policy.yml
     # host_msvc for the per-CUDA table and defaults/variants-win.yaml.
-    - if: win
-      then: cuda-nvcc_win-64
-      else: cuda-nvcc
+    - cuda-nvcc_${{ target_platform }} ${{ cuda_compiler_version }}.*
     - cuda-cudart-dev
     - cuda-cccl
     # package.yml `build_deps`. These were declared by every package and
@@ -236,13 +301,16 @@ requirements:
 <%- endfor %>
   host:
     - python ${{ python }}.*
-    # python_abi's run_export is what puts a real interpreter-ABI bound on the
-    # RUNTIME package. Without it a cp312 extension module declares only an
-    # unbounded `python` and may legally be installed into a py3.10 env. Today
-    # that is masked for torch-linked packages, because pytorch's own
-    # python_abi dep constrains the env transitively — but the mask vanishes
-    # for a links_torch: false package (cumm, spconv), which has no pytorch to
-    # inherit from. Declare it directly rather than depending on a sibling.
+    # Stated for the reader, not for the solver. The `python_abi 3.12.*
+    # *_cp312` run dep on every artifact is conda-forge's python's OWN weak
+    # run_export (the render says so: "python_abi ... run_export of python
+    # from host"), so it arrives with or without this line, for torch-linked
+    # and torch-free packages alike. An earlier comment claimed the line was
+    # load-bearing because "the mask vanishes for links_torch: false"; the
+    # render shows it is not. It stays because a cp312 extension pinning its
+    # ABI in its own host list is the honest declaration, and because a
+    # future python package that stopped exporting python_abi would otherwise
+    # silently let a cp312 module install into py3.10.
     - python_abi ${{ python }}.* *_cp${{ py_nodot }}
     - pip
     # The Windows window is narrow at BOTH ends, and both ends were measured in
@@ -257,19 +325,54 @@ requirements:
     - if: win
       then: setuptools >=78,<84
       else: setuptools
+    # ---- host's CUDA window -----------------------------------------------
+    # The toolkit is pinned in build:; host: is a separate solve and its
+    # cuda-version is set by whatever else is in it. On linux-64 with a torch
+    # in host that is triton: pytorch 2.8.0 cu128 pins `triton ==3.4.0`, the
+    # only 3.4.0 build anywhere carries `cuda-version >=12.9,<13`, and a
+    # `cuda-version 12.8.*` here is UNSAT (measured, --render-only
+    # --with-solve, 2026-09-11). So linux host floats to 12.9 -- harmless for
+    # the compile, which reads the build env's headers first (build.sh), and
+    # for the runtime dep, which the template declares itself below -- and the
+    # host CUDA -dev packages nothing links have their run_exports ignored so
+    # the 12.9 floor reaches no artifact. Where there is no triton the pin is
+    # SAT and it is applied: win-64 (no triton build exists there) and every
+    # torch-free package on both platforms. A torch-free package inherits no
+    # CUDA window from anywhere, so without this its host would resolve the
+    # newest cuda-nvrtc-dev (13.x) against a 12.8 toolkit.
+<%- if links_torch %>
+    - if: win
+      then: cuda-version ${{ cuda_compiler_version }}.*
+<%- else %>
+    - cuda-version ${{ cuda_compiler_version }}.*
+<%- endif %>
 <%- if links_torch %>
     # The exact torch this compiles against. The build glob is what locks the
-    # CUDA flavour today: a bare minor range would let a cu130 torch satisfy a
-    # cu128 extension.
+    # CUDA flavour AND the packaging: a bare minor range would let a cu130
+    # torch satisfy a cu128 extension, and `cuda128_*` alone matches two
+    # different torches on win-64.
+    #
+    # The second token is `repack`, and it is load-bearing. conda-torch's
+    # win-64 carries both `cuda128_mkl_py312_*_302` (a mirror of conda-forge's
+    # own build) and `cuda128_repack_py312_*` (the PyPI wheel, repacked), and
+    # `cuda128_*` matched both. The solver ranks mkl's build number 302 above
+    # the repack's, so every win-64 artifact published before this line was
+    # compiled against cuda128_mkl_302 -- a torch built with a different
+    # toolchain from the wheel this channel claims equivalence with. On
+    # linux-64 only the repack exists and the narrower glob matches exactly
+    # what it always matched. The same glob goes in run: so an installed
+    # extension can never sit beside the other flavour either.
     #
     # An earlier comment here claimed run_exports STRUCTURALLY cannot express
-    # a flavour. That is wrong, and worth correcting rather than deleting: it
-    # is only `pin_subpackage()` that offers version-range or exact-hash and
-    # nothing in between. A run_export is a MatchSpec string, so a producer
-    # can concatenate a build glob onto it, and conda-forge does exactly that
-    # -- see exchcxx-feedstock, whose run_exports is
+    # a flavour. That is wrong, and worth correcting rather than deleting: a
+    # run_export is a MatchSpec string, so a producer can concatenate a build
+    # glob onto it, and conda-forge does exactly that -- see exchcxx-feedstock,
+    # whose run_exports is
     #   {{ pin_subpackage(name, max_pin='x.x') }} cuda{{ ... }}_*
     # and ~152 conda-forge packages ship a build-carrying three-part spec.
+    # (Nor is pin_subpackage the only pin that takes a build: rattler-build's
+    # pin_compatible(..., build=...) does as well -- rattler_build_jinja/src/
+    # jinja.rs, jinja_pin_function.)
     #
     # The reason we still write the glob by hand is narrower and real:
     # conda-torch's repacked pytorch exports a flavour-BLIND
@@ -277,14 +380,22 @@ requirements:
     # recipe here could drop this line and inherit the lock transitively.
     # That is a one-line change in the producer replacing N in the consumers,
     # and it belongs in conda-torch, not here.
-    - pytorch ${{ pytorch }}.* cuda${{ cuda_short }}_*
+    - pytorch ${{ pytorch }}.* cuda${{ cuda_short }}_repack_*
     # torch's OWN headers include these, so every torch-linked extension needs
     # them regardless of what its sources reference: ATen/cuda/CUDAContextLight.h
     # includes <cusparse.h>, and the CUDAContext.h chain pulls the rest.
     # Measured: without libcusparse-dev the compile dies with
     # "fatal error: cusparse.h: No such file or directory".
     # This is the torch-implied floor; anything a package's own sources include
-    # goes in its package.yml host_deps instead of here.
+    # goes in its package.yml host_deps instead of here. HEADERS only: their
+    # run_exports are ignored below, because no extension in the channel links
+    # any of the five libraries (measured on the published artifacts).
+    #
+    # Also true of this host env, and worth knowing before reading a build
+    # log: triton drags `cuda-nvcc-tools` (12.9) into host, so $PREFIX/bin/nvcc
+    # EXISTS and is the wrong compiler. build.sh's CUDA_HOME=$BUILD_PREFIX,
+    # PYTORCH_NVCC and CUDACXX exports are what keep every build system on the
+    # cell's nvcc; they are load-bearing, not tidiness.
     - libcusparse-dev
     - libcublas-dev
     - libcusolver-dev
@@ -331,10 +442,21 @@ requirements:
     # one line of this package's own metadata instead of walking its
     # dependency closure to find where __cuda enters.
     - __cuda
+    # The CUDA runtime, declared HERE with the cell's own floor rather than
+    # inherited from a host cuda-cudart-dev run_export. Every extension in
+    # the channel links libcudart.so.12 / cudart64_12.dll (measured), and it
+    # was compiled against the build env's 12.8 headers, so >=12.8 is the true
+    # floor and <13 the soname's ceiling. The inherited version was
+    # `>=12.9.79` on every linux-64 artifact -- host's cudart-dev resolved to
+    # 12.9 for the triton reason above -- which is a false floor that refused
+    # a perfectly good 12.8 runtime.
+    - cuda-cudart >=${{ cuda_compiler_version }},<${{ cuda_major_next }}.0a0
 <%- if links_torch %>
-    # Same glob in run:, so an installed extension can never sit beside a
-    # torch of a different flavour.
-    - pytorch ${{ pytorch }}.* cuda${{ cuda_short }}_*
+    # Same glob as host:, so an installed extension can never sit beside a
+    # torch of a different flavour or packaging. pytorch's own run_export
+    # (`pytorch >=2.8.0,<2.9.0a0`) is ignored below so this is the ONE pytorch
+    # spec on the artifact; the glob is strictly narrower than the export.
+    - pytorch ${{ pytorch }}.* cuda${{ cuda_short }}_repack_*
 <%- endif %>
 <%- for dep in run_deps %>
 <%- if dep is mapping %>
@@ -343,6 +465,10 @@ requirements:
     # package_loader.resolve_run_deps for the wheel-side counterpart.
     - if: << dep["if"] >>
       then: << dep["then"] >>
+<%- elif dep in subsumed_run_deps %>
+    # `<< dep >>` is in package.yml run_deps AND in host_deps, and its host
+    # run_export (`numpy >=1.25,<3`, the ABI window) subsumes the bare name;
+    # rendered once, from the export. See package_loader.HOST_RUN_EXPORT_SUBSUMES.
 <%- else %>
     - << dep >>
 <%- endif %>
@@ -359,19 +485,98 @@ requirements:
     - << c >>
 <%- endfor %>
 <%- endif %>
+  ignore_run_exports:
+<%- if links_torch %>
+    # pytorch's weak export `pytorch >=2.8.0,<2.9.0a0` duplicated the glob
+    # above on every artifact (two pytorch specs, one flavour-blind). Ignored
+    # by NAME so libtorch's export from the same package is kept.
+    by_name:
+      - pytorch
+<%- endif %>
+    # Host -dev packages whose headers the compile needs and whose libraries
+    # nothing links. Their run_exports declared libcublas, libcufft, libcurand,
+    # libcusolver and libcusparse on every torch-linked artifact in the
+    # channel while no DT_NEEDED / PE import names any of them -- the finding
+    # every audit cited -- and, because host resolves 12.9 on linux, with 12.9
+    # floors at that. A package whose binary genuinely links one names it in
+    # package.yml `keep_run_exports:` (cumm: cuda-nvrtc-dev) and it is left
+    # out of this list.
+    from_package:
+<%- for pkg in ignored_run_exports %>
+      - << pkg >>
+<%- endfor %>
+<%- if run_exports %>
+  # package.yml `run_exports`: what THIS package exports to its consumers,
+  # so a sibling that builds against it inherits the flavour glob instead of
+  # hand-writing it (cumm -> spconv). The same argument ARCHITECTURE.md makes
+  # about conda-torch's pytorch, applied where this repo is the producer.
+  run_exports:
+<%- for kind, specs in run_exports.items() %>
+    << kind >>:
+<%- for spec in specs %>
+      - << spec >>
+<%- endfor %>
+<%- endfor %>
+<%- endif %>
 
-<%- if import_name %>
 
 tests:
+  # 0. Contents, checked on the staged package with no environment: the files
+  #    build.files.exclude removes must be gone. Cheap, and it is the check
+  #    that fails closed if the exclude list and the script ever disagree.
+  - package_contents:
+      files:
+        not_exists:
+          - "**/*.dist-info/RECORD"
+          - "**/*.dist-info/REQUESTED"
+          - "**/*.dist-info/direct_url.json"
+          - bin/nvcc*
+          - Library/bin/nvcc*
+  # 1. Import, in a fresh solve of the artifact with its run deps. pip_check
+  #    asks pip whether the wheel's own Requires-Dist are satisfied by what
+  #    conda installed -- a second opinion on run_deps from the metadata the
+  #    upstream wrote. Needs no GPU: __cuda is a virtual package, so the solve
+  #    wants CONDA_OVERRIDE_CUDA on a GPU-less machine and nothing more.
   - python:
       imports:
-        - << import_name >>
+        - << verify_import >>
+      pip_check: true
+  # 2. The package's own minimal op on real hardware (package.yml verify.op),
+  #    shipped INSIDE the artifact as info/tests/ so that
+  #    `rattler-build test --package-file <artifact> --test-index 2` runs it on
+  #    any machine with a GPU, long after the build. A mis-arch'd kernel shows
+  #    up as cudaErrorNoKernelImageForDevice here and nowhere else, and the
+  #    disabled-codec bug showed up nowhere but a real decode_jpeg.
+  - script:
+      file: verify_op.py
+<%- if op_requires %>
+    # package.yml verify.op_requires: what the op imports beyond the
+    # artifact's own run deps.
+    requirements:
+      run:
+<%- for r in op_requires %>
+        - << r >>
+<%- endfor %>
 <%- endif %>
+    files:
+      recipe:
+        - verify_op.py
 
 about:
   homepage: << homepage | tojson >>
   license: << license | tojson >>
+  # package.yml `license_files`: paths in the source tree that rattler-build
+  # copies into info/licenses/. Required -- an artifact redistributing a
+  # compiled upstream without its licence text may not be published.
+  license_file:
+<%- for lf in license_files %>
+    - << lf | tojson >>
+<%- endfor %>
   summary: << summary | tojson >>
+  repository: << repository | tojson >>
+<%- if documentation %>
+  documentation: << documentation | tojson >>
+<%- endif %>
 
 extra:
   # Provenance: the from-source guarantee, recorded in the artifact so it is
@@ -392,6 +597,18 @@ extra:
     commit: << source_rev | tojson >>
 <%- endif %>
   torch_build: ${{ env.get("CUW_TORCH_BUILD", default="unrecorded") }}
+<%- if pypi_project %>
+  # The PyPI project this artifact genuinely provides (package.yml
+  # pypi_project); tools/fragment.py turns it into the purl. Absent means
+  # "no purl" -- either the name is not on PyPI or it is someone else's.
+  pypi_project: << pypi_project | tojson >>
+<%- endif %>
+<%- if distribution_restriction %>
+  # package.yml `distribution_restriction`: the licence forbids distribution
+  # somewhere. Recorded in the artifact and in the README's package table;
+  # whether the package belongs on the channel at all is the owner's call.
+  distribution_restriction: << distribution_restriction | tojson >>
+<%- endif %>
   cuda_compiler_version: ${{ cuda_compiler_version }}
   arch_list: ${{ env.get("CUW_ARCH_LIST", default="<< arch_list >>") }}
   run_id: ${{ env.get("GITHUB_RUN_ID", default="local") }}

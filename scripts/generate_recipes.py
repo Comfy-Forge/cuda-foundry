@@ -7,6 +7,13 @@ experiment hand-wrote three recipes that were ~90% identical text and had
 already drifted apart (a force-source flag set in one and not the others, two
 divergent Windows blocks); 42 of them would be worse.
 
+Every file the build runs is generated beside the recipe and covered by
+--check: recipe.yaml, build.sh and build_win.py (the shared scripts with this
+package's build_env substituted in -- file-backed, so rattler-build never
+renders them through minijinja), verify_op.py (package.yml verify.op, shipped
+inside the artifact as its own test), and the verbatim siblings nvcc-wrap.sh
+and nonet.py. The README's package table is generated the same way.
+
 Usage:
     generate_recipes.py                 # regenerate all
     generate_recipes.py --package foo   # regenerate one
@@ -17,7 +24,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import re
+import json
 import sys
 from pathlib import Path
 
@@ -26,26 +33,32 @@ TEMPLATE = REPO / "templates" / "recipe.yaml.j2"
 BUILD_SH = REPO / "scripts" / "build_snippets" / "build.sh"
 NVCC_WRAP = REPO / "scripts" / "build_snippets" / "nvcc-wrap.sh"
 NONET = REPO / "scripts" / "build_snippets" / "nonet.py"
-BUILD_BAT = REPO / "scripts" / "build_snippets" / "build.bat"
 BUILD_WIN = REPO / "scripts" / "build_snippets" / "build_win.py"
+README = REPO / "README.md"
+README_BEGIN = "<!-- packages:begin -->"
+README_END = "<!-- packages:end -->"
 
 
 def load_packages(only: str | None) -> list[tuple[str, dict]]:
     """Package configs via the shared loader (scripts/package_loader.py)."""
     sys.path.insert(0, str(REPO / "scripts"))
     try:
-        from package_loader import iter_packages  # type: ignore
+        from package_loader import PACKAGES_DIR, load_package  # type: ignore
     except ImportError:
         sys.exit("scripts/package_loader.py not found — it is the schema owner "
                  "for packages/*/package.yml and must exist before recipes can "
                  "be generated")
     out = []
-    for folder, cfg in iter_packages():
-        if only and only not in (folder, cfg.get("name")):
+    # Loaded one folder at a time so that --package <x> validates <x> alone: a
+    # schema error in some other package must not stop this one rendering.
+    for d in sorted(PACKAGES_DIR.iterdir()):
+        if not d.is_dir() or not (d / "package.yml").exists():
             continue
-        out.append((folder, cfg))
+        if only and only != d.name:
+            continue
+        out.append((d.name, load_package(d)))
     if only and not out:
-        sys.exit(f"no package matching {only!r}")
+        sys.exit(f"no package folder matching {only!r}")
     return out
 
 
@@ -113,64 +126,84 @@ def _build_sh(cfg: dict) -> str:
     return text.replace(hook, build_env_block(cfg))
 
 
-def _build_bat(cfg: dict) -> str:
-    """The win-64 entry point with this package's build_env substituted in.
+def _build_win(cfg: dict) -> str:
+    """The win-64 build script with this package's build_env substituted in.
 
     Deliberately parallel to _build_sh: a package declaring `build_env` must get
-    it on both platforms or neither. The two hooks render different syntax --
-    `export K="V"` against `set "K=V"` -- so the substitution cannot be shared,
-    but the failure mode if one is forgotten is identical and silent, which is
-    why both are checked.
+    it on both platforms or neither, and the failure mode if one is forgotten is
+    identical and silent. The substitution is a Python dict literal on the line
+    build_win.py marks with CUW_BUILD_ENV_HOOK; build_win.py applies it with
+    os.path.expandvars, which on Windows expands `$VAR`, `${VAR}` and `%VAR%`
+    alike -- so a value written once for both platforms (`$PREFIX/include`)
+    needs no batch translation, and the .bat shim that used to do it is gone.
+
+    build_env_win OVERRIDES build_env per variable, rather than replacing the
+    block. The two platforms need the same variables pointing at different
+    places: conda's Unix-shaped tree lives under %PREFIX%/Library on Windows,
+    so `FFMPEG_ROOT: $PREFIX` is right on Linux and points at a directory
+    with no include/ on win-64. torchaudio's CMake found no libavutil/avutil.h
+    there and the whole build died at configure -- which is the good failure;
+    the bad one is a package that silently builds without a backend it
+    declares.
     """
-    text = BUILD_BAT.read_text().rstrip("\n")
-    hook = ":: CUW_BUILD_ENV_HOOK"
+    text = BUILD_WIN.read_text().rstrip("\n") + "\n"
+    hook = "CUW_BUILD_ENV = {}  # CUW_BUILD_ENV_HOOK"
     if hook not in text:
-        sys.exit("scripts/build_snippets/build.bat lost its :: CUW_BUILD_ENV_HOOK "
-                 "marker -- package.yml build_env would be silently dropped on win-64")
-    # build_env_win OVERRIDES build_env per variable, rather than replacing the
-    # block. The two platforms need the same variables pointing at different
-    # places: conda's Unix-shaped tree lives under %PREFIX%\Library on Windows,
-    # so `FFMPEG_ROOT: $PREFIX` is right on Linux and points at a directory
-    # with no include/ on win-64. torchaudio's CMake found no libavutil/avutil.h
-    # there and the whole build died at configure -- which is the good failure;
-    # the bad one is a package that silently builds without a backend it
-    # declares. The loader refuses a win override for a variable Linux does not
-    # set, so this cannot become a place to hide a Windows-only variable.
+        sys.exit("scripts/build_snippets/build_win.py lost its CUW_BUILD_ENV_HOOK "
+                 "line -- package.yml build_env would be silently dropped on win-64")
     env = dict(cfg.get("build_env") or {})
     env.update(cfg.get("build_env_win") or {})
-    block = "\n".join(f'set "{k}={_bat_value(v)}"' for k, v in env.items()) \
-        or ":: (no build_env declared)"
-    return text.replace(hook, block)
+    literal = json.dumps({str(k): str(v) for k, v in env.items()}, sort_keys=True)
+    return text.replace(hook, f"CUW_BUILD_ENV = {literal}  # from package.yml build_env")
 
 
-_SHELL_VAR = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+def _verify_op(cfg: dict) -> str:
+    """package.yml `verify.op` as a standalone script, shipped in the artifact.
 
-
-def _bat_value(value) -> str:
-    """Translate a build_env value's shell variable references to batch syntax.
-
-    package.yml is written once for both platforms, and its values reference the
-    build environment the way build.sh does -- `$PREFIX`, `${SRC_DIR}`. Copied
-    verbatim into a .bat that sets the LITERAL string "$PREFIX", silently, and a
-    build configured against a path that does not exist is a far worse failure
-    than one that stops here. torchaudio's `FFMPEG_ROOT: $PREFIX` is the case
-    that surfaced it.
-
-    Only simple `$VAR` and `${VAR}` are handled, which is all that can appear:
-    package_loader rejects quotes, backticks, backslashes and command
-    substitution in build_env values before this ever runs. Anything with a
-    dollar still in it afterwards is refused rather than guessed at.
-
-    Path separators are deliberately NOT rewritten. Windows accepts forward
-    slashes in paths, and blanket-converting them would corrupt any value that
-    is not a path.
+    rattler-build copies it into info/tests/ so `rattler-build test
+    --package-file <artifact>` can run the package's own minimal op on any
+    machine with a GPU. The header records where it came from so a reader of
+    the artifact does not have to find this repo to know what it asserts.
     """
-    out = _SHELL_VAR.sub(lambda m: f"%{m.group(1) or m.group(2)}%", str(value))
-    if "$" in out:
-        sys.exit(f"package.yml build_env value {value!r} still contains '$' after "
-                 f"translating to batch syntax -- it cannot be rendered for win-64. "
-                 f"Use a plain $VAR or ${{VAR}} reference.")
-    return out
+    op = ((cfg.get("verify") or {}).get("op") or "").rstrip("\n")
+    if not op:
+        op = (f"import {cfg.get('import_name') or cfg['name']}  # no verify.op "
+              f"declared; import is the whole test")
+    return (f"# {cfg['name']}: the package's own minimal GPU op, from\n"
+            f"# packages/{cfg['name']}/package.yml `verify.op`. Generated by\n"
+            f"# scripts/generate_recipes.py; edit package.yml, not this file.\n"
+            f"{op}\n")
+
+
+def _readme_table(packages: list) -> str:
+    """The README package table, between README_BEGIN and README_END.
+
+    One row per package.yml: what it is, its licence, and -- the reason the
+    table exists -- any distribution restriction its licence imposes, which
+    a consumer must be able to see without opening an artifact.
+    """
+    rows = ["| package | version | license | PyPI purl | distribution restriction |",
+            "|---|---|---|---|---|"]
+    for _folder, cfg in packages:
+        fam = cfg.get("family_versions")
+        version = "per torch pairing" if fam else str(cfg.get("version", ""))
+        purl = cfg.get("pypi_project") or "none"
+        restriction = cfg.get("distribution_restriction") or ""
+        if restriction:
+            restriction = "**" + " ".join(restriction.split()) + "**"
+        rows.append(f"| `{conda_name(cfg)}` | {version} | {cfg.get('license', '')} "
+                    f"| {purl} | {restriction} |")
+    return "\n".join(rows) + "\n"
+
+
+def _readme_with_table(packages: list) -> str:
+    text = README.read_text()
+    if README_BEGIN not in text or README_END not in text:
+        sys.exit(f"README.md lost its {README_BEGIN} / {README_END} markers -- "
+                 f"the package table has nowhere to go")
+    head, rest = text.split(README_BEGIN, 1)
+    _old, tail = rest.split(README_END, 1)
+    return f"{head}{README_BEGIN}\n{_readme_table(packages)}{README_END}{tail}"
 
 
 def render(folder: str, cfg: dict, env) -> str:
@@ -181,6 +214,17 @@ def render(folder: str, cfg: dict, env) -> str:
     else:
         default_version = cfg.get("version", "0.0.0")
         default_rev = cfg.get("source_rev") or cfg.get("source_tag", "")
+    from package_loader import (HOST_RUN_EXPORT_SUBSUMES,  # type: ignore
+                                IGNORED_CUDA_RUN_EXPORTS)
+    verify = cfg.get("verify") or {}
+    host_names = {d.split()[0] for d in (cfg.get("host_deps") or []) if isinstance(d, str)}
+    run_deps = cfg.get("run_deps") or []
+    subsumed = sorted(d for d in run_deps if isinstance(d, str)
+                      and d.strip() in HOST_RUN_EXPORT_SUBSUMES and d.strip() in host_names)
+    keep = set(cfg.get("keep_run_exports") or [])
+    run_exports = cfg.get("run_exports")
+    if isinstance(run_exports, list):
+        run_exports = {"weak": run_exports}
     return tmpl.render(
         conda_name=conda_name(cfg),
         family=family,
@@ -201,12 +245,21 @@ def render(folder: str, cfg: dict, env) -> str:
         shard_sources=cfg.get("shard_sources") or [],
         shard_partition=cfg.get("shard_partition") or "",
         build_subdir=cfg.get("build_subdir") or "",
-        import_name=cfg.get("import_name") or cfg["name"],
+        verify_import=verify.get("import") or cfg.get("import_name") or cfg["name"],
+        op_requires=verify.get("op_requires") or [],
+        allow_dso=verify.get("allow_dso") or [],
+        subsumed_run_deps=subsumed,
+        ignored_run_exports=[p for p in IGNORED_CUDA_RUN_EXPORTS if p not in keep],
+        run_exports=run_exports or {},
+        license_files=cfg["license_files"],
+        repository=cfg.get("repository")
+        or f"https://github.com/{cfg.get('source_repo', '')}",
+        documentation=cfg.get("documentation") or "",
+        pypi_project=cfg.get("pypi_project") or "",
+        distribution_restriction=cfg.get("distribution_restriction") or "",
         homepage=cfg.get("homepage", f"https://github.com/{cfg.get('source_repo','')}"),
         license=_license(cfg),
         summary=cfg.get("summary", cfg["name"]),
-        build_sh=_build_sh(cfg),
-        build_bat=_build_bat(cfg),
     ) + "\n"
 
 
@@ -232,51 +285,73 @@ def main() -> int:
                       comment_start_string="<#", comment_end_string="#>",
                       undefined=StrictUndefined, keep_trailing_newline=True)
 
-    # The sibling files copied next to each recipe, and where they come from.
-    # --check has to cover these too. It used to check recipe.yaml alone, which
-    # meant a change to build_win.py, nvcc-wrap.sh or nonet.py left every
-    # committed copy stale and CI green -- and the copy beside the recipe is
-    # the one the build actually runs, because $RECIPE_DIR is the only path it
-    # can rely on inside the sandbox. An edit that was never regenerated would
-    # simply not take effect, which is the hardest kind of change to debug: the
-    # source says one thing and the build does another.
-    siblings = {"nvcc-wrap.sh": NVCC_WRAP, "nonet.py": NONET, "build_win.py": BUILD_WIN}
+    # Everything the build runs lives beside the recipe, because $RECIPE_DIR
+    # is the only path the build can rely on inside the sandbox, and every one
+    # of those files is covered by --check. It used to check recipe.yaml
+    # alone, which meant a change to build_win.py, nvcc-wrap.sh or nonet.py
+    # left every committed copy stale and CI green -- and the copy beside the
+    # recipe is the one the build actually runs. An edit that was never
+    # regenerated would simply not take effect, which is the hardest kind of
+    # change to debug: the source says one thing and the build does another.
+    #
+    # Two kinds: verbatim siblings, and per-package renders (build.sh and
+    # build_win.py carry the package's build_env; verify_op.py its op).
+    verbatim = {"nvcc-wrap.sh": NVCC_WRAP, "nonet.py": NONET}
+    executable = {"nvcc-wrap.sh", "nonet.py", "build.sh"}
 
     stale = []
-    for folder, cfg in load_packages(args.package):
-        text = render(folder, cfg, env)
-        out = REPO / "recipes" / conda_name(cfg) / "recipe.yaml"
+    packages = load_packages(args.package)
+    for folder, cfg in packages:
+        out_dir = REPO / "recipes" / conda_name(cfg)
+        generated = {
+            "recipe.yaml": render(folder, cfg, env),
+            "build.sh": _build_sh(cfg) + "\n",
+            "build_win.py": _build_win(cfg),
+            "verify_op.py": _verify_op(cfg),
+        }
+        generated.update({name: src.read_text() for name, src in verbatim.items()})
+        # A stale build.bat from before the script became file-backed would be
+        # picked up by rattler-build as the default win-64 script if the
+        # recipe ever lost its `file:` line; it has no business existing.
+        leftovers = [out_dir / "build.bat"]
         if args.check:
-            have = out.read_text() if out.is_file() else ""
-            if have != text:
-                stale.append(out.relative_to(REPO))
-                sys.stdout.writelines(difflib.unified_diff(
-                    have.splitlines(True), text.splitlines(True),
-                    fromfile=f"{out.relative_to(REPO)} (committed)",
-                    tofile=f"{out.relative_to(REPO)} (regenerated)"))
-            for name, src in siblings.items():
-                copy = out.parent / name
-                if not copy.is_file() or copy.read_text() != src.read_text():
-                    stale.append(copy.relative_to(REPO))
-                    print(f"{copy.relative_to(REPO)} differs from "
-                          f"{src.relative_to(REPO)}")
+            for name, text in generated.items():
+                path = out_dir / name
+                have = path.read_text() if path.is_file() else ""
+                if have != text:
+                    stale.append(path.relative_to(REPO))
+                    sys.stdout.writelines(difflib.unified_diff(
+                        have.splitlines(True), text.splitlines(True),
+                        fromfile=f"{path.relative_to(REPO)} (committed)",
+                        tofile=f"{path.relative_to(REPO)} (regenerated)"))
+            for left in leftovers:
+                if left.exists():
+                    stale.append(left.relative_to(REPO))
+                    print(f"{left.relative_to(REPO)} should not exist")
             continue
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(text)
-        # The wrapper sits beside the recipe so $RECIPE_DIR/nvcc-wrap.sh
-        # resolves inside the build sandbox, where scripts/ is not present.
-        (out.parent / "nvcc-wrap.sh").write_text(NVCC_WRAP.read_text())
-        (out.parent / "nvcc-wrap.sh").chmod(0o755)
-        # nonet.py must sit beside the recipe too: $RECIPE_DIR is the only
-        # path the build script can rely on inside the build.
-        (out.parent / "nonet.py").write_text(NONET.read_text())
-        (out.parent / "nonet.py").chmod(0o755)
-        # Same reason as nonet.py: $RECIPE_DIR is the only path build.bat can
-        # rely on inside the build. Kept a sibling file rather than embedded
-        # because rattler-build renders the embedded script through minijinja,
-        # and brace-hash / brace-brace / brace-percent would break the render.
-        (out.parent / "build_win.py").write_text(BUILD_WIN.read_text())
-        print(out.relative_to(REPO))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for name, text in generated.items():
+            path = out_dir / name
+            path.write_text(text)
+            if name in executable:
+                path.chmod(0o755)
+        for left in leftovers:
+            if left.exists():
+                left.unlink()
+        print(out_dir.relative_to(REPO) / "recipe.yaml")
+
+    # The README package table, from the same package set. Only when every
+    # package was loaded: a --package run renders one recipe, not a table
+    # that would silently drop the other 43.
+    if not args.package:
+        want = _readme_with_table(packages)
+        if args.check:
+            if README.read_text() != want:
+                stale.append(README.relative_to(REPO))
+                print("README.md package table is stale")
+        elif README.read_text() != want:
+            README.write_text(want)
+            print("README.md (package table)")
 
     if stale:
         print(f"\n{len(stale)} recipe(s) are stale — run scripts/generate_recipes.py "
