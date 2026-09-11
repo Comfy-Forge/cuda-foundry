@@ -7,13 +7,25 @@ index is a static site deployed to the pypi-cuda-wheels repo's Pages. No
 wheel is ever copied: both trees, and every per-combo sub-tree, are anchor
 tags pointing at the same release URLs.
 
-    /                 plain anchors. pip opens the wheel, finds no
-                      Requires-Dist, and installs nothing extra. This is what
-                      comfy-env's direct-URL installs need: a resolver must
-                      not go chasing a dependency list.
-    /deps/            the same anchors plus data-core-metadata, so a resolver
-                      fetches the PEP 658 <wheel>.metadata sidecar and
-                      installs the declared dependencies.
+    /                 anchors to the STRIPPED wheels (release <subdir>). pip
+                      opens the wheel, finds no Requires-Dist, and installs
+                      nothing extra. This is what comfy-env's direct-URL
+                      installs need: a resolver must not go chasing a
+                      dependency list.
+    /deps/            anchors to each wheel's TWIN (release <subdir>-deps):
+                      the same wheel under the same canonical filename, with
+                      the curated Requires-Dist written into its METADATA and
+                      a PEP 658 sidecar that is byte-identical to it, advertised
+                      with its sha256. A plain `pip install` from here resolves
+                      the declared dependencies.
+
+    Two files, not one file with two sidecars: PEP 658 says the sidecar and
+    the wheel's METADATA "MUST be identical" and pip >= 26 enforces it (a
+    sidecar declaring deps beside a stripped wheel is refused outright,
+    measured). And two RELEASES, not two asset names: pip takes a link's
+    filename from the URL's last path component, so the deps twin must be
+    reachable under the canonical *.whl name -- which a flat release cannot
+    hold twice.
     /<cu>/<torch>/    both of the above, narrowed to one (CUDA, torch) cell.
                       The flat index cannot be resolved unambiguously: a
                       wheel's CUDA and torch versions live only in its local
@@ -24,10 +36,9 @@ tags pointing at the same release URLs.
 
 `data-core-metadata` is the PEP 714 spelling and `data-dist-info-metadata`
 the PEP 658 original that older pip reads; PEP 714 tells index providers to
-emit both. The value is "true" rather than a hash -- PEP 658 permits that
-when the hash is unavailable, and hashing every sidecar would mean fetching
-one file per wheel on every index build to save pip an integrity check it
-does not require.
+emit both. The value is the sidecar's sha256 when the releases API serves a
+digest for the asset (it does, at no download cost) and "true" otherwise,
+which PEP 658 permits.
 
 Three deliberate departures from the cuda-wheels original, each recorded
 where it bites:
@@ -67,7 +78,12 @@ ASSET_REPO = "Comfy-Forge/cuda-foundry"
 # Where this site is served from. Used for the shrinkage-guard baseline.
 INDEX_URL = "https://comfy-forge.github.io/pypi-cuda-wheels"
 
-_PEP658_ATTRS = ' data-core-metadata="true" data-dist-info-metadata="true"'
+DEPS_SUFFIX = "-deps"     # release <subdir>-deps holds the /deps/ twins
+
+
+def _pep658_attrs(sidecar_sha256: str) -> str:
+    val = f"sha256={sidecar_sha256}" if sidecar_sha256 else "true"
+    return f' data-core-metadata="{val}" data-dist-info-metadata="{val}"'
 
 # Pulls the cell out of a wheel filename: +cu128torch2.8 -> ("cu128", "torch2.8")
 _COMBO_RE = re.compile(r"\+(cu\d+)(torch[\d.]+)")
@@ -142,6 +158,25 @@ def fetch_baseline(source: str):
         raise
 
 
+def local_releases(root: Path) -> list:
+    """The releases API's shape from a directory of <tag>/<asset> files.
+
+    For tests and for proving the two trees locally with a real pip/uv:
+    browser_download_url is a file:// URL and the digest is computed here.
+    """
+    import hashlib
+    out = []
+    for tag_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        assets = []
+        for f in sorted(p for p in tag_dir.iterdir() if p.is_file()):
+            assets.append({"name": f.name, "browser_download_url": f.resolve().as_uri(),
+                           "digest": "sha256:" + hashlib.sha256(f.read_bytes()).hexdigest()})
+        out.append({"tag_name": tag_dir.name, "assets": assets})
+    if not out:
+        sys.exit(f"ERROR: no <tag>/ directories under {root}")
+    return out
+
+
 def parse_wheel(filename: str) -> dict | None:
     """{name, version, cuda, torch, python, abi, platform} or None.
 
@@ -181,24 +216,32 @@ def load_known_bad(path: Path) -> dict:
 
 
 def anchor(wheel: dict, with_metadata: bool) -> str:
-    """One PEP 503 anchor, optionally advertising its PEP 658 sidecar.
+    """One PEP 503 anchor: the root file, or the /deps/ twin with its sidecar.
 
     The href carries a `#sha256=` fragment whenever the digest is known (it
     always is -- the releases API serves one per asset, no downloads). Our
     release tags are mutable, so an unhashed anchor pins a URL whose bytes
     can change under it; the fragment is what lets pip/uv/pixi verify the
     artifact and lets a lockfile record a real hash.
+
+    In the /deps/ tree a wheel that has no twin yet (published under the
+    old one-file scheme) is linked to its ROOT file with no sidecar: pip
+    then opens the wheel and installs no dependencies, which is honest, where
+    advertising the old mismatching sidecar would be a hard refusal.
     """
-    attrs = _PEP658_ATTRS if (with_metadata and wheel["has_sidecar"]) else ""
+    attrs, url, sha = "", wheel["url"], wheel.get("sha256", "")
+    if with_metadata and wheel.get("deps_url"):
+        url, sha = wheel["deps_url"], wheel.get("deps_sha256", "")
+        attrs = _pep658_attrs(wheel.get("sidecar_sha256", ""))
     # PEP 592. A yanked file stays downloadable, so nobody who pinned this exact
     # filename breaks, but no resolver will SELECT it unless given that exact
     # pin -- which is the wheel analogue of dropping a .conda from repodata,
-    # with the additional property that the reason reaches the user.
+    # with the additional property that the reason reaches the user. Keyed
+    # by filename, so it covers the root file and the twin alike.
     if wheel.get("yanked"):
         attrs += f' data-yanked="{html.escape(wheel["yanked"], quote=True)}"'
-    url = wheel["url"]
-    if wheel.get("sha256"):
-        url += f'#sha256={wheel["sha256"]}'
+    if sha:
+        url += f"#sha256={sha}"
     return f'<a href="{url}"{attrs}>{wheel["filename"]}</a><br>\n'
 
 
@@ -227,26 +270,45 @@ def main() -> None:
                     help="OWNER/NAME whose releases hold the wheels")
     ap.add_argument("--baseline", default=f"{INDEX_URL}/packages.json",
                     help="URL or path of the live packages.json (shrinkage guard)")
+    ap.add_argument("--local-assets", type=Path, default=None,
+                    help="instead of the releases API: a directory holding <tag>/<asset> "
+                         "files, served as file:// URLs (tests and local proofs)")
     ap.add_argument("--known-bad", type=Path,
                     default=Path(__file__).resolve().parent.parent / "known_bad.json",
                     help="defective artifacts; wheels listed here are yanked "
                          "per PEP 592 (the same file make_repodata.py reads)")
     args = ap.parse_args()
 
-    releases = get_releases(args.repo, os.environ.get("GITHUB_TOKEN"))
+    if args.local_assets:
+        releases = local_releases(args.local_assets)
+    else:
+        releases = get_releases(args.repo, os.environ.get("GITHUB_TOKEN"))
 
-    # Collect wheels, and note which ones have a sidecar asset beside them.
-    # A sidecar is an asset named exactly <wheel>.metadata, so its URL is
-    # exactly the wheel URL + ".metadata" -- which is where PEP 658 says a
-    # resolver looks. Nothing rewrites URLs; the naming IS the contract.
+    # Collect wheels. The root file lives in release <subdir>; its /deps/
+    # twin and that twin's sidecar live in <subdir>-deps under the SAME
+    # filename, so the sidecar URL is the twin URL + ".metadata" -- where
+    # PEP 658 says a resolver looks. Nothing rewrites URLs; the naming IS
+    # the contract.
     known_bad = load_known_bad(args.known_bad)
     yanked_count = 0
 
+    def _digest(asset) -> str:
+        return (asset.get("digest") or "").removeprefix("sha256:")
+
+    twins: dict[str, dict[str, dict]] = {}     # subdir -> filename -> asset
+    for release in releases:
+        tag = release.get("tag_name", "")
+        if tag.endswith(DEPS_SUFFIX):
+            twins[tag[:-len(DEPS_SUFFIX)]] = {a["name"]: a for a in release.get("assets", [])}
+
     packages: dict[str, list] = {}
     for release in releases:
+        tag = release.get("tag_name", "")
+        if tag.endswith(DEPS_SUFFIX):
+            continue
         assets = release.get("assets", [])
-        bad_here = known_bad.get(release.get("tag_name", "")) or {}
-        sidecars = {a["name"] for a in assets if a["name"].endswith(".whl.metadata")}
+        bad_here = known_bad.get(tag) or {}
+        here_twins = twins.get(tag, {})
         for asset in assets:
             name = asset["name"]
             if not name.endswith(".whl"):
@@ -258,14 +320,24 @@ def main() -> None:
             bad = bad_here.get(name)
             if bad:
                 yanked_count += 1
+            twin, side = here_twins.get(name), here_twins.get(name + ".metadata")
+            if twin and not side:
+                # A twin without its sidecar is the old refusal waiting to
+                # happen in reverse; do not advertise what is not there.
+                print(f"WARNING: {tag}{DEPS_SUFFIX}/{name} has no .metadata beside it; "
+                      f"the /deps/ tree links the root file instead")
+                twin = None
             packages.setdefault(parsed["name"], []).append({
                 "yanked": (bad or {}).get("reason", "") if bad else "",
                 "filename": name,
                 "url": asset["browser_download_url"],
                 # The releases API serves a digest per asset: free hash
                 # verification for every anchor, no downloads.
-                "sha256": (asset.get("digest") or "").removeprefix("sha256:"),
-                "has_sidecar": f"{name}.metadata" in sidecars,
+                "sha256": _digest(asset),
+                "deps_url": twin["browser_download_url"] if twin else "",
+                "deps_sha256": _digest(twin) if twin else "",
+                "sidecar_sha256": _digest(side) if twin else "",
+                "has_sidecar": bool(twin),
                 "parsed": parsed,
             })
 
@@ -329,8 +401,9 @@ def main() -> None:
         '<a href="deps/">/deps/</a>. Per-cell indexes live at '
         '<code>/cu&lt;ver&gt;/torch&lt;ver&gt;/</code>.</p>\n')
     deps_blurb = (
-        '<p>The same wheels as the root index, at the same URLs. This tree '
-        'advertises a PEP 658 <code>.metadata</code> sidecar per wheel, so a '
+        '<p>The same wheels as the root index under the same filenames, each '
+        'served from a twin file whose METADATA carries the curated dependency '
+        'list, with a PEP 658 <code>.metadata</code> sidecar identical to it, so a '
         'resolver installs each package&#39;s third-party dependencies. '
         '<b>torch is deliberately excluded</b> from those sidecars: these '
         'wheels are pinned to one exact (CUDA, torch) ABI in their local '
@@ -375,6 +448,8 @@ def main() -> None:
     for pkg, wheels in sorted(packages.items()):
         manifest["packages"][pkg] = {"wheels": sorted(
             ({"filename": w["filename"], "url": w["url"], "sha256": w["sha256"],
+              "deps_url": w["deps_url"], "deps_sha256": w["deps_sha256"],
+              "sidecar_sha256": w["sidecar_sha256"],
               "has_sidecar": w["has_sidecar"], "tag": tag_of.get(w["url"], ""),
               **{k: w["parsed"][k] for k in
                  ("version", "cuda", "torch", "python", "abi", "platform")}}

@@ -15,10 +15,13 @@ The wheel-only checks are the inverse of the conda ones, on purpose:
   * a conda package must NOT vendor shared libraries; a wheel MUST, and
     `auditwheel repair` is the conversion. So verify_conda asserts no
     vendored libs and this asserts they are present and correct.
-  * a conda package declares dependencies in index.json; the published
-    wheel declares NONE (see cuda-wheels' contract) and carries them only
-    in a PEP 658 sidecar. So this asserts the wheel is empty of
-    Requires-Dist and the sidecar is not.
+  * a conda package declares dependencies in index.json; the root-tree
+    wheel declares NONE (cuda-wheels' contract) and its /deps/ twin -- the
+    same wheel, same filename, Requires-Dist inside, sidecar identical to
+    its METADATA -- declares the curated list. So this asserts the root
+    wheel is empty of Requires-Dist, the twin exists, agrees with its
+    sidecar byte for byte, and differs from the root wheel in nothing but
+    METADATA and RECORD.
   * neither may ever vendor libtorch, and neither may advertise a torch
     dependency: the ABI is pinned in the local version segment, which pip
     ignores for resolution.
@@ -151,51 +154,74 @@ def verify(path: Path, args, tmp: Path) -> bool:
                   f"base version is the cell's ({ver.split('+')[0]} == "
                   f"{args.expect_version})")
 
-    # ---- the wheel itself declares NOTHING ----------------------------------
+    # ---- the ROOT wheel declares NOTHING -----------------------------------
     reqs = meta.get_all("Requires-Dist") or []
     rep.check(not reqs,
-              f"wheel declares no Requires-Dist ({len(reqs)} found) -- the "
-              f"index this serves must not let a resolver chase dependencies")
+              f"root wheel declares no Requires-Dist ({len(reqs)} found) -- the "
+              f"root index must not let a resolver chase dependencies")
+    rep.check(not path.with_name(path.name + ".metadata").exists(),
+              "no sidecar beside the root wheel (the root tree advertises none, and a "
+              "sidecar that differs from the wheel's METADATA is what pip refuses)")
 
-    # ---- the sidecar is where the dependencies live -------------------------
-    side = path.with_name(path.name + ".metadata")
-    if rep.check(side.is_file(), "PEP 658 sidecar exists beside the wheel"):
-        smeta = email.message_from_string(side.read_text(encoding="utf-8"))
-        sreqs = smeta.get_all("Requires-Dist") or []
-        rep.check(smeta.get("Version") == ver,
-                  "sidecar version matches the wheel")
+    # ---- the /deps/ twin: same wheel, dependencies INSIDE ------------------
+    # Two files per artifact, same canonical filename, different storage
+    # release. PEP 658 says a sidecar and the wheel's METADATA "MUST be
+    # identical" and pip >= 26 enforces it (measured: every old-scheme wheel
+    # whose sidecar declared a dependency was refused from /deps/), so the
+    # deps tree's file carries the curated Requires-Dist in its own METADATA
+    # and its sidecar is that METADATA byte for byte.
+    deps_whl = args.deps_wheel or (path.parent / "deps" / path.name)
+    deps_side = deps_whl.with_name(deps_whl.name + ".metadata")
+    sreqs: list[str] = []
+    if rep.check(deps_whl.is_file(), f"the /deps/ twin exists ({deps_whl})"):
+        zd = zipfile.ZipFile(deps_whl)
+        dnames = zd.namelist()
+        ddi = [n for n in dnames if n.endswith(".dist-info/METADATA")]
+        rep.check(len(ddi) == 1, "deps twin: exactly one dist-info/METADATA")
+        dmeta_bytes = zd.read(ddi[0]) if ddi else b""
+        dmeta = email.message_from_string(dmeta_bytes.decode("utf-8"))
+        sreqs = dmeta.get_all("Requires-Dist") or []
+        rep.check(dmeta.get("Version") == ver, "deps twin: METADATA version matches the filename")
+        if rep.check(deps_side.is_file(), "deps twin: PEP 658 sidecar exists beside it"):
+            rep.check(deps_side.read_bytes() == dmeta_bytes,
+                      "deps twin: the sidecar is byte-identical to the wheel's METADATA "
+                      "(PEP 658 'MUST be identical'; pip enforces it)")
         bad = [r for r in sreqs
                if re.split(r"[<>=!~\s;\[]", r.strip())[0].lower() in TORCH_NAMES]
         rep.check(not bad,
-                  f"sidecar does not advertise torch ({bad}) -- the ABI is "
+                  f"deps twin does not advertise torch ({bad}) -- the ABI is "
                   f"pinned in the local version, which pip ignores")
-        # PEP 658 says the sidecar and the wheel's METADATA "MUST be
-        # identical", and pip enforces it: 26.2.1's
-        # _check_sidecar_matches_wheel compares Name, Version, Requires-Dist,
-        # Requires-Python and Provides-Extra and ABORTS the install on a
-        # difference. Measured by tools/clean_verify.py on the live /deps/
-        # index: every wheel whose sidecar carries a dependency fails with
-        # "has inconsistent Requires-Dist between its PEP 658 .metadata file
-        # and the wheel's METADATA"; only wheels with an empty sidecar
-        # (cc-torch) install. So the two-trees-one-file design as documented
-        # cannot be consumed by pip through /deps/. This is a design decision
-        # for the index owner, not something a verifier can fix by itself,
-        # so it is reported loudly here rather than failed silently later.
-        if sreqs and not reqs:
-            print(f"::warning::{path.name}: the sidecar declares {len(sreqs)} Requires-Dist "
-                  f"and the wheel's METADATA declares none. PEP 658 requires the two to be "
-                  f"identical and pip >= 26 refuses to install the wheel from an index that "
-                  f"advertises this sidecar (measured, tools/clean_verify.py). The /deps/ "
-                  f"tree cannot serve this wheel to pip until the design changes.")
+        # Everything but METADATA and RECORD is the same bytes in both files:
+        # the twin is a repackaging of the root wheel, never a second build.
+        skip = (".dist-info/METADATA", ".dist-info/RECORD")
+        differ = sorted(n for n in set(names) | set(dnames)
+                        if not n.endswith(skip)
+                        and (n not in names or n not in dnames or z.read(n) != zd.read(n)))
+        rep.check(not differ,
+                  f"deps twin differs from the root wheel in METADATA/RECORD only ({differ[:3]})")
+        # Its RECORD hashes its own payload.
+        drec = [n for n in dnames if n.endswith(".dist-info/RECORD")]
+        if rep.check(len(drec) == 1, "deps twin: exactly one dist-info/RECORD"):
+            dbad = []
+            for row in csv.reader(io.StringIO(zd.read(drec[0]).decode("utf-8"))):
+                if not row or row[0] == drec[0]:
+                    continue
+                name, digest = row[0], row[1]
+                if name not in dnames:
+                    dbad.append(f"{name}: absent")
+                    continue
+                want = "sha256=" + base64.urlsafe_b64encode(
+                    hashlib.sha256(zd.read(name)).digest()).rstrip(b"=").decode()
+                if digest != want:
+                    dbad.append(f"{name}: hash")
+            rep.check(not dbad, f"deps twin: every RECORD hash matches ({dbad[:2]})")
 
         # ---- and they are the SAME dependencies as the conda package --------
         if args.conda:
             cdeps = conda_run_deps(Path(args.conda))
             # The conda names are translated through the SAME table
-            # make_wheel.py used to write the sidecar (py-opencv ->
-            # opencv-python, matplotlib-base -> matplotlib), so the two
-            # sides are compared in one namespace. A second, private copy of
-            # that mapping here is exactly the kind of thing that drifts.
+            # make_wheel.py used (py-opencv -> opencv-python, matplotlib-base
+            # -> matplotlib), so the two sides are compared in one namespace.
             from make_wheel import pypi_name_for
             def norm(s):
                 n = re.split(r"[<>=!~\s;\[]", s.strip())[0]
@@ -206,13 +232,13 @@ def verify(path: Path, args, tmp: Path) -> bool:
             # conda's run: legitimately carries things a wheel cannot express
             # (virtual packages, the C/C++ runtimes, and every shared library
             # the wheel VENDORS instead of depending on), so the assertion is
-            # one-directional: nothing the sidecar claims may be absent from
+            # one-directional: nothing the wheel claims may be absent from
             # the conda package.
             cnames = {c for c in cnames if not c.startswith("__")}
             snames = {norm(r) for r in sreqs}
             missing = sorted(snames - cnames)
             rep.check(not missing,
-                      f"every sidecar dependency is also a conda run dep "
+                      f"every deps-twin dependency is also a conda run dep "
                       f"(orphans: {missing})")
 
     # ---- RECORD integrity ---------------------------------------------------
@@ -414,6 +440,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("wheels", nargs="+", type=Path)
     ap.add_argument("--conda", help="the .conda built from the same compile")
+    ap.add_argument("--deps-wheel", type=Path, default=None,
+                    help="the /deps/ twin (default: deps/<same name> beside the wheel)")
     ap.add_argument("--expect-arch", default="")
     ap.add_argument("--expect-version", default="")
     ap.add_argument("--package", default="",

@@ -17,10 +17,12 @@ because a wheel has no way to declare a non-Python dependency at all.
 library into <pkg>.libs/, gives it a hash-suffixed name and rewrites the
 extension's RPATH to $ORIGIN.
 
-Three outputs land in --out-dir:
-  <pkg>-<ver>+cu<NNN>torch<M.m>-<abi>-<manylinux>.whl   deps stripped
-  <same>.whl.metadata                                   PEP 658 sidecar
-  and a printed summary of what got vendored.
+Four files land in --out-dir, two per index tree (see generate_index.py):
+  <name>.whl                 deps stripped -- the root tree's file
+  deps/<name>.whl            the SAME wheel with Requires-Dist in METADATA
+  deps/<name>.whl.metadata   PEP 658 sidecar, byte-identical to that METADATA
+  and a printed summary of what got vendored. Same canonical filename in
+  both trees; they are stored in different releases (<subdir>, <subdir>-deps).
 
 Usage:
   make_wheel.py --package torchvision --wheel <raw.whl> --out-dir dist \\
@@ -685,8 +687,9 @@ def finalize(wheel: Path, version_tag: str, arch_list: str,
              run_deps: list[str], expect_version: str = "",
              build_number: str = "",
              vendor_extra: list[tuple[str, Path]] | None = None,
-             cuda: str = "", sidecar_omit=()) -> tuple[Path, Path, int]:
-    """Apply the local version and build tag, strip deps, write the sidecar."""
+             cuda: str = "", sidecar_omit=()) -> tuple[Path, Path, Path, int]:
+    """Apply the local version and build tag; write the stripped wheel and the
+    /deps/ twin (same name, Requires-Dist inside, sidecar == METADATA)."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         with zipfile.ZipFile(wheel) as z:
@@ -816,17 +819,68 @@ def finalize(wheel: Path, version_tag: str, arch_list: str,
             else:
                 stem.insert(2, str(build_number))
         out = wheel.with_name("-".join(stem))
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-            for f in sorted(root.rglob("*")):
-                if f.is_file():
-                    z.write(f, f.relative_to(root))
+        _zip_tree(root, out)
         if out != wheel:
             wheel.unlink()
-        side = out.with_name(out.name + ".metadata")
-        side.write_text(sidecar_text, encoding="utf-8")
+        # ---- the SECOND file: the same wheel, dependencies inside ---------
+        # PEP 658 says a sidecar and the wheel's METADATA "MUST be identical",
+        # and pip >= 26 enforces it (measured: every wheel whose sidecar
+        # declared a dependency its METADATA did not was refused from the
+        # /deps/ index). So the two index contracts -- root: a resolver must
+        # not chase dependencies; /deps/: a plain pip install resolves them
+        # -- are honoured by two FILES with the same canonical name: the
+        # stripped wheel above, and this one, whose METADATA carries the
+        # curated Requires-Dist and whose sidecar is byte-identical to that
+        # METADATA. They live in different storage releases (<subdir> and
+        # <subdir>-deps) so the filename, which pip takes from the URL's last
+        # path component, is the same in both trees.
+        (new_di / "METADATA").write_text(sidecar_text, encoding="utf-8")
+        rebuild_record(root, new_di.name)
+        deps_dir = out.parent / "deps"
+        deps_dir.mkdir(exist_ok=True)
+        deps_out = deps_dir / out.name
+        _zip_tree(root, deps_out)
+        deps_side = deps_dir / (out.name + ".metadata")
+        with zipfile.ZipFile(deps_out) as z:
+            deps_side.write_bytes(z.read(f"{new_di.name}/METADATA"))
         n_dist = sum(1 for l in sidecar_text.splitlines()
                      if l.startswith("Requires-Dist:"))
-        return out, side, n_dist
+        return out, deps_out, deps_side, n_dist
+
+
+def _zip_tree(root: Path, out: Path) -> None:
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(root.rglob("*")):
+            if f.is_file():
+                z.write(f, f.relative_to(root))
+
+
+def deps_variant_of(published: Path, sidecar: Path, out_dir: Path) -> tuple[Path, Path]:
+    """The /deps/ file for a wheel ALREADY published under the old scheme.
+
+    Repackaging, not compiling: the stripped wheel's METADATA gets the
+    Requires-Dist lines of the sidecar that used to sit beside it, RECORD is
+    rebuilt, and the new sidecar is the new METADATA byte for byte. This is
+    how the deps release is back-filled for wheels published before the two-
+    file scheme, without rebuilding anything.
+    """
+    import email
+    reqs = email.message_from_string(sidecar.read_text(encoding="utf-8")).get_all("Requires-Dist") or []
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        with zipfile.ZipFile(published) as z:
+            z.extractall(root)
+        di = next(iter(root.glob("*.dist-info")))
+        meta_p = di / "METADATA"
+        text, _ = strip_requires(meta_p.read_text(encoding="utf-8"))
+        meta_p.write_text(add_requires(text, reqs), encoding="utf-8")
+        rebuild_record(root, di.name)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        deps_out = out_dir / published.name
+        _zip_tree(root, deps_out)
+        deps_side = out_dir / (published.name + ".metadata")
+        deps_side.write_bytes(meta_p.read_bytes())
+        return deps_out, deps_side
 
 
 def main() -> int:
@@ -891,13 +945,13 @@ def main() -> int:
         # the dependency strip, and the PEP 658 sidecar.
         staged = args.out_dir / args.wheel.name
         shutil.copy2(args.wheel, staged)
-        final, side, n = finalize(staged, local_tag(args.cuda, args.pytorch),
-                                  args.arch_list, run_deps, args.expect_version,
-                                  args.build_number, cuda=args.cuda,
-                                  sidecar_omit=sidecar_omit)
+        final, deps_whl, side, n = finalize(staged, local_tag(args.cuda, args.pytorch),
+                                            args.arch_list, run_deps, args.expect_version,
+                                            args.build_number, cuda=args.cuda,
+                                            sidecar_omit=sidecar_omit)
         print(f"  win-64  : no repair -- Windows wheels vendor nothing")
-        print(f"  wheel   : {final.name}")
-        print(f"  sidecar : {side.name}  ({n} Requires-Dist)")
+        print(f"  wheel   : {final.name}  (no Requires-Dist; root tree)")
+        print(f"  deps    : deps/{deps_whl.name} + sidecar  ({n} Requires-Dist; /deps/ tree)")
         return 0
 
     for line in check_compiler_provenance(args.wheel):
@@ -916,12 +970,12 @@ def main() -> int:
               "out what started linking them.")
 
     extra = resolve_vendor_extra(cfg.get("wheel_vendor_extra") or [], args.lib_path)
-    final, side, n = finalize(repaired, local_tag(args.cuda, args.pytorch),
-                              args.arch_list, run_deps, args.expect_version,
-                              args.build_number, vendor_extra=extra,
-                              cuda=args.cuda, sidecar_omit=sidecar_omit)
-    print(f"  wheel   : {final.name}")
-    print(f"  sidecar : {side.name}  ({n} Requires-Dist)")
+    final, deps_whl, side, n = finalize(repaired, local_tag(args.cuda, args.pytorch),
+                                        args.arch_list, run_deps, args.expect_version,
+                                        args.build_number, vendor_extra=extra,
+                                        cuda=args.cuda, sidecar_omit=sidecar_omit)
+    print(f"  wheel   : {final.name}  (no Requires-Dist; root tree)")
+    print(f"  deps    : deps/{deps_whl.name} + sidecar  ({n} Requires-Dist; /deps/ tree)")
     return 0
 
 

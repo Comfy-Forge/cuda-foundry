@@ -131,18 +131,37 @@ def main() -> int:
                            "pkg/__init__.py": b""}, ["cp39-abi3-manylinux_2_28_x86_64"])
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        out, side, n = mw.finalize(raw, "+cu128torch2.8", "8.0 9.0", ["numpy", "cuda-nvrtc"],
-                                   expect_version="1.0", build_number="0", cuda="12.8")
+        out, deps_out, side, n = mw.finalize(raw, "+cu128torch2.8", "8.0 9.0", ["numpy", "cuda-nvrtc"],
+                                             expect_version="1.0", build_number="0", cuda="12.8")
     check(out.name == "pkg-1.0+cu128torch2.8-0-cp312-cp312-manylinux_2_28_x86_64.whl",
           f"make_wheel retags cp39-abi3 -> cp312-cp312 (got {out.name})")
     with zipfile.ZipFile(out) as z:
         wheel_txt = z.read("pkg-1.0+cu128torch2.8.dist-info/WHEEL").decode()
         record = z.read("pkg-1.0+cu128torch2.8.dist-info/RECORD").decode()
+        root_meta = z.read("pkg-1.0+cu128torch2.8.dist-info/METADATA").decode()
     check("Tag: cp312-cp312-manylinux_2_28_x86_64" in wheel_txt and "abi3" not in wheel_txt,
           "...and rewrites the WHEEL Tag line")
     check("dist-info/WHEEL,sha256=" in record, "...and RECORD hashes the rewritten WHEEL")
-    check("Requires-Dist: nvidia-cuda-nvrtc-cu12" in side.read_text() and n == 2,
-          "the sidecar carries the translated CUDA package")
+    check("Requires-Dist" not in root_meta and not out.with_name(out.name + ".metadata").exists(),
+          "the root wheel carries no Requires-Dist and no sidecar")
+    # ---- the /deps/ twin ----------------------------------------------------
+    check(deps_out.name == out.name and deps_out.parent.name == "deps",
+          f"the deps twin has the SAME filename under deps/ ({deps_out})")
+    with zipfile.ZipFile(deps_out) as z:
+        deps_meta = z.read("pkg-1.0+cu128torch2.8.dist-info/METADATA")
+        deps_names = set(z.namelist())
+    check(b"Requires-Dist: nvidia-cuda-nvrtc-cu12" in deps_meta and n == 2,
+          "the deps twin's METADATA carries the translated CUDA package")
+    check(side.read_bytes() == deps_meta, "the deps twin's sidecar is byte-identical to its METADATA")
+    with zipfile.ZipFile(out) as zr, zipfile.ZipFile(deps_out) as zd:
+        same = all(zr.read(nm) == zd.read(nm) for nm in deps_names
+                   if not nm.endswith((".dist-info/METADATA", ".dist-info/RECORD")))
+    check(same and deps_names == set(zipfile.ZipFile(out).namelist()),
+          "the deps twin differs from the root wheel in METADATA and RECORD only")
+    dv, ds = mw.deps_variant_of(out, side, td / "backfill")
+    with zipfile.ZipFile(dv) as z:
+        check(z.read("pkg-1.0+cu128torch2.8.dist-info/METADATA") == ds.read_bytes() == deps_meta,
+              "deps_variant_of() reproduces the twin from a published root wheel + old sidecar")
 
     raw2 = make_wheel_file(td / "pkg-1.0-cp311-cp311-manylinux_2_28_x86_64.whl",
                            {"pkg/mx.cpython-312-x86_64-linux-gnu.so": so_cf}, ["cp311-cp311-manylinux_2_28_x86_64"])
@@ -164,7 +183,7 @@ def main() -> int:
     # ---- verify_wheel gates ------------------------------------------------
     def vargs(**kw):
         a = SimpleNamespace(platform="linux-64", links_torch=False, expect_arch="", expect_version="",
-                            conda=None, no_sass=None, cuda="12.8", expect_msvc="")
+                            conda=None, no_sass=None, cuda="12.8", expect_msvc="", deps_wheel=None)
         for k, v in kw.items():
             setattr(a, k, v)
         return a
@@ -182,8 +201,8 @@ def main() -> int:
         """A raw fixture wheel taken through make_wheel.finalize, as CI does."""
         raw = make_wheel_file(td / f"{name}-1.0-{tags[0]}.whl", files, tags, name=name)
         with contextlib.redirect_stdout(io.StringIO()):
-            out, _, _ = mw.finalize(raw, "+cu128torch2.8", "8.0 9.0", ["numpy"],
-                                    expect_version="1.0", build_number="0", cuda="12.8")
+            out, _, _, _ = mw.finalize(raw, "+cu128torch2.8", "8.0 9.0", ["numpy"],
+                                       expect_version="1.0", build_number="0", cuda="12.8")
         return out
 
     # An abi3 mis-tag that got PAST make_wheel: build the wheel with the
@@ -212,6 +231,36 @@ def main() -> int:
     check(ok, "verify_wheel positive control PASSES")
     if not ok:
         print(out)
+    # the old scheme: a sidecar beside the root wheel that differs from it
+    stale = okw.with_name(okw.name + ".metadata")
+    stale.write_text("Metadata-Version: 2.1\nName: okw\nVersion: 1.0+cu128torch2.8\nRequires-Dist: numpy\n")
+    ok, out = run_vw(okw)
+    check(not ok and fails_on(out, "no sidecar beside the root wheel"),
+          "verify_wheel: a sidecar beside the ROOT wheel (the old scheme) FAILS")
+    stale.unlink()
+    # a deps twin whose sidecar drifted from its METADATA (what pip refuses)
+    twin_side = okw.parent / "deps" / (okw.name + ".metadata")
+    orig = twin_side.read_bytes()
+    twin_side.write_bytes(orig + b"Requires-Dist: pillow\n")
+    ok, out = run_vw(okw)
+    check(not ok and fails_on(out, "byte-identical"),
+          "verify_wheel: a deps-twin sidecar that differs from the twin's METADATA FAILS")
+    twin_side.write_bytes(orig)
+    # a missing twin
+    twin = okw.parent / "deps" / okw.name
+    twin.rename(twin.with_name("moved.whl"))
+    ok, out = run_vw(okw)
+    check(not ok and fails_on(out, "twin exists"), "verify_wheel: a missing deps twin FAILS")
+    twin.with_name("moved.whl").rename(twin)
+    # a twin whose payload differs from the root wheel
+    with zipfile.ZipFile(twin) as zin, zipfile.ZipFile(td / "twin.tmp", "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            zout.writestr(item, data + (b"x" if item.filename == "okw/_C.so" else b""))
+    os.replace(td / "twin.tmp", twin)
+    ok, out = run_vw(okw)
+    check(not ok and fails_on(out, "METADATA/RECORD only"),
+          "verify_wheel: a deps twin whose payload differs from the root wheel FAILS")
 
     pyd_ok, pyd_bad = td / "ok.pyd", td / "bad.pyd"
     build_pe(pyd_ok, ["KERNEL32.dll", "c10.dll"], linker=(14, 44))
