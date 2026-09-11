@@ -10,6 +10,17 @@ version: "0.6"
 license: Apache-2.0
 homepage: https://github.com/facebookresearch/detectron2
 summary: FAIR's detection and segmentation platform, compiled against the conda-torch channel
+repository: https://github.com/facebookresearch/detectron2
+documentation: https://detectron2.readthedocs.io
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no detectron2 project (404, 2026-09-11); upstream never published one.
+pypi_project: null
 
 source_repo: facebookresearch/detectron2
 # v0.6, dereferenced to the commit (git ls-remote --tags, 2026-09-11).
@@ -48,9 +59,23 @@ nvcc_threads: 1
 # matplotlib-base rather than matplotlib: the conda-forge `matplotlib`
 # metapackage drags pyqt in; the library detectron2 imports is the -base one.
 # tools/make_wheel.py maps it back to PyPI's `matplotlib` for the sidecar.
+#
+#   + py-opencv          detectron2/utils/visualizer.py does `import cv2` at
+#                        module scope (line 7), and so do colormap.py,
+#                        data/transforms/transform.py and the cityscapes
+#                        dataset -- the visualizer is the module every
+#                        consumer reaches for. Upstream leaves it undeclared;
+#                        the published artifact could not `import
+#                        detectron2.utils.visualizer`. py-opencv is
+#                        conda-forge's name for cv2 (make_wheel.py maps it
+#                        to opencv-python for the sidecar).
+#   pillow >=7.1, no ceiling: the patch replaces the one Pillow-10-removed
+#                        constant (Image.LINEAR, transform.py:46), so nothing
+#                        here needs a `<10` pin.
 run_deps:
   - numpy
   - pillow >=7.1
+  - py-opencv
   - matplotlib-base
   - pycocotools >=2.0.2
   - termcolor >=1.1
@@ -69,21 +94,35 @@ run_deps:
 
 # detectron2/layers/csrc includes only torch headers and the CUDA runtime
 # (<cuda_runtime.h>, <ATen/cuda/...>); no CUDA library headers.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 
-carry: complete   # not on conda-forge; nothing to shadow
+carry: complete  # shadows conda-forge's line for this cell; see ARCHITECTURE.md "Shadowing"
 
 verify:
   import: detectron2
+  # Submodules that must import on a GPU-less runner (S2's CI test). These
+  # are the surfaces the audit found broken on the published artifact: .data
+  # died on Image.LINEAR under Pillow 10 (patched), .utils.visualizer on the
+  # undeclared cv2, and .engine / .model_zoo pull in the whole config +
+  # hydra/omegaconf + fvcore + iopath stack, so they prove the run: list.
+  imports:
+    - detectron2
+    - detectron2.engine
+    - detectron2.data
+    - detectron2.model_zoo
+    - detectron2.utils.visualizer
+    - detectron2.layers
   # nms_rotated is one of detectron2's own CUDA kernels (csrc/nms_rotated/
   # nms_rotated_cuda.cu), reached through detectron2._C -- so a mis-arch'd
   # build fails here with cudaErrorNoKernelImageForDevice rather than passing
   # a bare import. The two overlapping boxes must collapse to one.
   op: |
     import torch
+    import detectron2.engine, detectron2.data, detectron2.model_zoo
+    import detectron2.utils.visualizer
+    from detectron2.data.transforms import ExtentTransform   # the Image.LINEAR site
     from detectron2.layers import nms_rotated
     boxes = torch.tensor([[10., 10., 20., 20., 0.], [10., 10., 20., 20., 5.],
                           [60., 60., 10., 10., 0.]], device="cuda")
