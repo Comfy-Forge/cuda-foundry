@@ -60,3 +60,49 @@ import ast as _ast
 _ast.parse(_t)
 _sp.write_text(_t)
 print("torchao patch: CUTLASS include dirs and MSVC flags enabled on Windows")
+
+
+# ── Windows: export the PyInit_ symbol distutils insists on ─────────────────
+# With CUTLASS enabled, every CUDA translation unit of _C compiled under MSVC
+# (run 34596571344) and the build died at LINK: torchao's _C,
+# _C_cutlass_90a and _C_cutlass_100a are torch-ops libraries -- TORCH_LIBRARY
+# registrations, loaded with torch.ops.load_library, no Python module in
+# them -- and distutils on Windows passes /EXPORT:PyInit_<name> to link.exe
+# regardless (LNK2001: unresolved external symbol PyInit__C). ld on Linux
+# never asks. One stub source, compiled into each of the three, exports a
+# PyInit that refuses to be imported; the name is pasted from the
+# -DTORCH_EXTENSION_NAME torch already puts on every compile line, and the
+# whole file is empty off Windows (#ifdef _WIN32), so one tarball serves both
+# platforms. mxfp8_cuda is a real pybind module and needs nothing.
+_stub = _Path("torchao/csrc/cuw_pyinit_stub.cpp")
+_stub.write_text('''// cuda-foundry (packages/torchao/patches/torchao.py): this library registers
+// torch ops and is loaded with torch.ops.load_library; it has no Python
+// module. distutils on Windows still links it with /EXPORT:PyInit_<name>, so
+// export one that says so instead of failing the link with LNK2001.
+#ifdef _WIN32
+#include <Python.h>
+#define CUW_PASTE2(a, b) a##b
+#define CUW_PASTE(a, b) CUW_PASTE2(a, b)
+extern "C" __declspec(dllexport) PyObject *CUW_PASTE(PyInit_, TORCH_EXTENSION_NAME)(void) {
+    PyErr_SetString(PyExc_ImportError,
+                    "this torchao library registers torch ops and is loaded with "
+                    "torch.ops.load_library; it is not an importable module");
+    return nullptr;
+}
+#endif
+''')
+_t = _sp.read_text()
+_old_ext = "    ext_modules = []\n"
+require(_t.count(_old_ext) == 1, "torchao: the ext_modules initialiser was not found once")
+_t = _t.replace(_old_ext, '''    # cuda-foundry: the PyInit stub every torch-ops library needs on Windows
+    # (empty elsewhere); see packages/torchao/patches/torchao.py.
+    _cuw_stub = os.path.join(extensions_dir, "cuw_pyinit_stub.cpp")
+    sources.append(_cuw_stub)
+    if cutlass_90a_sources:
+        cutlass_90a_sources.append(_cuw_stub)
+    if cutlass_100a_sources:
+        cutlass_100a_sources.append(_cuw_stub)
+''' + _old_ext, 1)
+_ast.parse(_t)
+_sp.write_text(_t)
+print("torchao patch: PyInit stub attached to the torch-ops libraries")
