@@ -94,11 +94,25 @@ def main() -> int:
                             "with full network access")
 
     # 4. every generated recipe must carry the guard (a hand-edit would be
-    #    caught by regen-check, but this states the invariant directly).
+    #    caught by regen-check, but this states the invariant directly). The
+    #    build script is file-backed -- recipes/<name>/build.sh, named by the
+    #    recipe's `build.script.file` -- so the guard is looked for in the
+    #    file the build runs, and the recipe must still point at it. A
+    #    hand-written recipe (pccm) inlines its script and is checked as text.
     for recipe in sorted((REPO / "recipes").glob("*/recipe.yaml")):
         if recipe.parent.name.startswith("_"):
             continue  # canary and friends assert the property themselves
-        if "nonet.py" not in recipe.read_text():
+        text = recipe.read_text()
+        sibling = recipe.parent / "build.sh"
+        if "file: ${{ \"build_win.py\" if win else \"build.sh\" }}" in text:
+            if not sibling.is_file():
+                problems.append(f"{recipe.relative_to(REPO)}: names build.sh as its "
+                                f"script and there is no build.sh beside it")
+            elif not any("nonet.py" in l and "pip" in l
+                         for l in strip_comments(sibling.read_text())):
+                problems.append(f"{sibling.relative_to(REPO)}: the compile no "
+                                f"longer runs under nonet.py")
+        elif "nonet.py" not in text:
             problems.append(f"{recipe.relative_to(REPO)}: no nonet.py guard in the "
                             f"build script")
 
@@ -108,7 +122,7 @@ def main() -> int:
             print("  - " + p, file=sys.stderr)
         return 1
     print("lint: no --allow-network; compile runs under nonet.py; guard fails "
-          "closed; all generated recipes carry it")
+          "closed; every recipe's build script carries it")
     return 0
 
 

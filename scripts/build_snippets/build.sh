@@ -1,6 +1,9 @@
-# One build script, three modes. Templated verbatim into every generated
-# recipe, so a shard job and its link job run byte-identical compiles — which
-# is what makes the ccache handoff replay instead of recompile.
+# One build script, three modes. Copied beside every generated recipe (with
+# the package's build_env substituted at the hook below) and named by the
+# recipe's `build.script.file`, so a shard job and its link job run
+# byte-identical compiles — which is what makes the ccache handoff replay
+# instead of recompile. File-backed, so rattler-build never renders it through
+# minijinja: brace-hash, brace-brace and brace-percent are allowed here again.
 #
 #   CUW_MODE=full   compile + install (unsharded packages)
 #   CUW_MODE=shard  compile only this shard's slice, then exit 0
@@ -143,6 +146,22 @@ export CPPFLAGS="-I$CUDA_HOME/include ${CPPFLAGS:-}"
 export CFLAGS="-I$CUDA_HOME/include ${CFLAGS:-}"
 export CXXFLAGS="-I$CUDA_HOME/include ${CXXFLAGS:-}"
 export NVCC_PREPEND_FLAGS="-I$CUDA_HOME/include ${NVCC_PREPEND_FLAGS:-}"
+
+# ---- no build-machine paths in the shipped binaries ---------------------
+# conda-forge's compiler activation already maps the DEBUG records
+# (-fdebug-prefix-map); this extends the same mapping to __FILE__ and every
+# other place the preprocessor records a path, so an assertion message or a
+# CUDA kernel's registered source name reads /usr/local/src/conda/<pkg>/...
+# rather than this runner's work dir. The names are conda-forge's own. nvcc
+# takes it through -Xcompiler for the host-side compile. Trailing, and read by
+# nvcc from the environment, so it never appears on the command line ccache
+# hashes; the shard/link handoff is unaffected (and $SRC_DIR is identical
+# across those jobs anyway, because the workflow builds with --no-build-id).
+CUW_PREFIX_MAP="-ffile-prefix-map=$SRC_DIR=/usr/local/src/conda/${PKG_NAME:-pkg} -ffile-prefix-map=$PREFIX=/usr/local/src/conda-prefix"
+export CFLAGS="${CFLAGS:-} $CUW_PREFIX_MAP"
+export CXXFLAGS="${CXXFLAGS:-} $CUW_PREFIX_MAP"
+export CPPFLAGS="${CPPFLAGS:-} $CUW_PREFIX_MAP"
+export NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS:-} -Xcompiler -ffile-prefix-map=$SRC_DIR=/usr/local/src/conda/${PKG_NAME:-pkg} -Xcompiler -ffile-prefix-map=$PREFIX=/usr/local/src/conda-prefix"
 
 # ---- package-declared build environment (package.yml `build_env`) -------
 # Values computed from $PREFIX cannot live in the recipe's build.script.env:
@@ -315,20 +334,18 @@ esac
 # back to, so a broken handoff fails loudly here instead of quietly installing
 # somebody else's build. (The seccomp filter would also refuse it -- this is
 # the same belt-and-braces as declaring force_source_build alongside L1.)
-# Counted with positional parameters rather than a bash array, and that is
-# NOT a style choice. rattler-build renders this script through minijinja
-# BEFORE running it, and minijinja opens a comment on the two-character
-# sequence brace-hash -- which is exactly what a bash array-length
-# expansion starts with (dollar, brace, hash, name). The comment never
-# closes, so the render fails and rattler-build reports only:
+# Counted with positional parameters rather than a bash array. That used to
+# be forced: this script was inlined into the recipe, rattler-build renders
+# an inline script through minijinja before running it, and minijinja opens a
+# comment on the two-character sequence brace-hash -- exactly what a bash
+# array-length expansion starts with -- so the render failed with only
 #   Error:   x Script failed to execute
-# with no script output and no "Running build script" header at all,
-# because the script never existed to be run. Measured: an array-length
-# expansion fails, while array assignment, a subscripted element and a
-# whole-array expansion all render fine -- it is that one digraph alone.
-# Two other minijinja openers are the same trap and must never appear in
-# this file either: brace-brace (an expression) and brace-percent (a
-# statement). This comment therefore spells all three out in words.
+# and no script output at all. The script is file-backed now and file-backed
+# scripts are not rendered (rattler_build_script/src/execution.rs), so the
+# three minijinja openers are no longer forbidden here. The positional form
+# stays because it works and is one line shorter; the history stays because
+# the failure mode is invisible enough to be worth remembering if this file
+# is ever inlined again.
 shopt -s nullglob
 set -- "$CUW_WHEELHOUSE"/*.whl
 shopt -u nullglob
@@ -382,7 +399,36 @@ echo "ledger: $COMPILED compile(s) recorded for $MODULES installed module(s)"
 CUW_WHL_BASE="$(basename "$CUW_WHEEL")"
 CUW_DI="$SITE/$(echo "$CUW_WHL_BASE" | cut -d- -f1,2).dist-info"
 if [ -d "$CUW_DI" ]; then
-  rm -f "$CUW_DI/direct_url.json" "$CUW_DI/RECORD"
+  # ---- strip the shipped shared objects ---------------------------------
+  # RECORD is the one authoritative list of what THIS package installed, so
+  # it is read here, before it is removed, and only the .so files it names
+  # are touched -- never the host environment's. --strip-unneeded removes
+  # the symbols a shared object does not need for dynamic linking (debug and
+  # local symbols); SASS lives in ELF sections, not symbols, so the
+  # cuobjdump census downstream sees exactly what it saw before. The wheel
+  # was taken before this point and is unaffected; auditwheel rewrites it
+  # anyway. $STRIP is conda-forge's binutils from the compiler activation.
+  CUW_STRIP="${STRIP:-strip}"
+  CUW_STRIPPED=0
+  while IFS=, read -r cuw_rel _; do
+    case "$cuw_rel" in *.so|*.so.*) ;; *) continue ;; esac
+    cuw_abs="$SITE/$cuw_rel"
+    [ -f "$cuw_abs" ] || continue
+    if "$CUW_STRIP" --strip-unneeded "$cuw_abs"; then
+      CUW_STRIPPED=$((CUW_STRIPPED + 1))
+    else
+      echo "::error::$CUW_STRIP --strip-unneeded failed on $cuw_rel" >&2
+      exit 1
+    fi
+  done < "$CUW_DI/RECORD"
+  echo "stripped $CUW_STRIPPED shared object(s) listed in $(basename "$CUW_DI")/RECORD"
+  # REQUESTED is pip's "installed by explicit request" marker, a fact about
+  # this build's pip invocation and nothing about the consumer's env.
+  # RECORD's removal has a consequence worth knowing: without it `pip
+  # uninstall` refuses ("Cannot uninstall ... no RECORD file"), which is the
+  # right answer for a file set conda owns. build.files.exclude in the recipe
+  # removes all three again at packaging, so an early exit cannot ship them.
+  rm -f "$CUW_DI/direct_url.json" "$CUW_DI/RECORD" "$CUW_DI/REQUESTED"
   echo "dist-info hygiene: scrubbed $(basename "$CUW_DI")"
 else
   # Not a warning to ignore: it means the wheel's own dist-info is not where
