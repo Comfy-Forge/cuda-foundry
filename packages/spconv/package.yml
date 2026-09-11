@@ -75,16 +75,17 @@ run_deps:
 # translation units before anything compiles -- plus pybind11's headers for
 # the ccimport build, and the CUDA runtime library core_cc links. cumm is
 # OUR OWN .conda from this channel, flavour-locked, which is why the build's
-# channel list includes the channel this repo publishes to. cuda-version is
-# pinned to the cell for the reason cumm's package.yml gives: a torch-free
-# host inherits no CUDA window from anywhere.
+# channel list includes the channel this repo publishes to. The host's
+# cuda-version pin is the template's (it pins the cell for every package),
+# so a torch-free host no longer needs to state it here. cumm's own
+# run_exports carry the same glob to run: as well; the run_deps entry above
+# stays because the wheel sidecar is written from package.yml.
 host_deps:
   - pccm >=0.4.16
   - ccimport >=0.4.4
   - pybind11
   - numpy
   - cumm >=0.7.11,<0.8.0 cuda${{ cuda_short }}_*
-  - cuda-version ${{ cuda_compiler_version }}.*
 
 # spconv compiles cumm's tensorview headers, and tensorview/tensor.h
 # includes <curand.h> (measured: the first local build died on exactly

@@ -252,7 +252,6 @@ requirements:
     - pybind11
     - numpy
     - cumm >=0.7.11,<0.8.0 cuda${{ cuda_short }}_*
-    - cuda-version ${{ cuda_compiler_version }}.*
   run:
     - python
     # Every package here ships compiled CUDA kernels, so it states that about

@@ -63,16 +63,14 @@ host_deps: []
 
 build_deps: []
 
-# conda-forge ships a `torch-scatter`, so carrying this name hides theirs
-# under strict channel priority. Looked at rather than assumed (anaconda.org,
-# 2026-09-11): that line stops at 2.1.1, linux-64/osx only, built against
-# pytorch <1.14 / <2.1 with cudatoolkit 11 -- nothing in it can solve beside
-# any torch this channel offers (>= 2.4, cuda >= 12.4). Their live line is
-# `pytorch_scatter`, a distinct name this does not touch. So carrying
-# torch-scatter completely across the conda-torch grid removes no reachable
-# coverage, and the obligation "complete" states is the one the matrix meets
-# by construction: every (cuda, torch, python) cell the channel has a torch for.
-carry: complete
+# conda-forge ships a `torch-scatter` (2.1.1 at most, linux-64/osx, against
+# pytorch <2.1 with cudatoolkit 11 -- anaconda.org, 2026-09-11; their live
+# line is `pytorch_scatter`, a distinct name). Under strict channel priority
+# carrying the name hides that whole line, whatever it could or could not
+# solve beside, so the obligation is to carry it completely: every (cuda,
+# torch, python) cell the channel has a torch for, which the matrix meets by
+# construction.
+carry: complete  # shadows conda-forge's line for this cell; see ARCHITECTURE.md "Shadowing"
 
 verify:
   import: torch_scatter

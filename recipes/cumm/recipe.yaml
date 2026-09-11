@@ -252,7 +252,6 @@ requirements:
     - pybind11
     - numpy
     - sympy
-    - cuda-version ${{ cuda_compiler_version }}.*
     - cuda-nvrtc-dev
   run:
     - python
@@ -298,6 +297,13 @@ requirements:
       - libcusolver-dev
       - libcusparse-dev
       - cuda-nvtx-dev
+  # package.yml `run_exports`: what THIS package exports to its consumers,
+  # so a sibling that builds against it inherits the flavour glob instead of
+  # hand-writing it (cumm -> spconv). The same argument ARCHITECTURE.md makes
+  # about conda-torch's pytorch, applied where this repo is the producer.
+  run_exports:
+    weak:
+      - cumm >=0.7.11,<0.8.0 cuda${{ cuda_short }}_*
 
 
 tests:

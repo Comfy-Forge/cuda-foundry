@@ -136,16 +136,15 @@ build_env:
 
 # conda-forge ships `pyg-lib` (0.6.0: cpu builds on linux-64/win-64/osx and
 # cuda129 builds on linux-64 for torch 2.9/2.10, read from anaconda.org on
-# 2026-09-11), so carrying this name hides that line under strict channel
-# priority. Decided: carry it completely -- the obligation is every
-# (cuda, torch, python) cell conda-torch has a torch for, which the matrix
-# emits by construction once dispatched with the filters open. Two things
-# worth knowing about what "complete" costs here: conda-forge has NO build
-# for torch 2.8 (this cell), so nothing reachable is lost for it; and our
-# version is 0.5.0 where conda-forge's is 0.6.0, so a consumer pinning
-# `pyg-lib >=0.6` on torch 2.9+ would be UNSAT until the pin here moves --
-# a version-policy call, recorded rather than decided by a build.
-carry: complete
+# 2026-09-11). Under strict channel priority carrying this name hides that
+# WHOLE line -- every build of it, not only the cells ours overlap -- so the
+# obligation is to carry it completely: every (cuda, torch, python) cell
+# conda-torch has a torch for, which the matrix emits by construction once
+# dispatched with the filters open. One cost to know about: our version is
+# 0.5.0 where conda-forge's is 0.6.0, so a consumer pinning `pyg-lib >=0.6`
+# on torch 2.9+ is UNSAT until the pin here moves -- a version-policy call,
+# recorded rather than decided by a build.
+carry: complete  # shadows conda-forge's line for this cell; see ARCHITECTURE.md "Shadowing"
 
 verify:
   import: pyg_lib

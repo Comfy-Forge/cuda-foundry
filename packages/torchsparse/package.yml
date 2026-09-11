@@ -88,12 +88,12 @@ build_env:
 build_env_win:
   CUW_SPARSEHASH_INCLUDE: $PREFIX/Library/include
 
-# conda-forge ships a `torchsparse`: 1.3.0/1.4.0 against pytorch 1.7/1.8 with
-# cudatoolkit 10.2-11.2 (anaconda.org, 2026-09-11). Nothing in that line can
-# solve beside any torch this channel offers, so carrying the name hides
-# nothing reachable; the obligation "complete" states is met by the matrix
-# by construction.
-carry: complete
+# conda-forge ships a `torchsparse` (1.3.0/1.4.0 against pytorch 1.7/1.8 with
+# cudatoolkit 10.2-11.2 -- anaconda.org, 2026-09-11). Under strict channel
+# priority carrying the name hides that whole line, whatever it could solve
+# beside, so the obligation is to carry it completely across every cell the
+# channel has a torch for, which the matrix meets by construction.
+carry: complete  # shadows conda-forge's line for this cell; see ARCHITECTURE.md "Shadowing"
 
 verify:
   import: torchsparse

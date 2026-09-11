@@ -107,19 +107,17 @@ run_deps:
 #     libcudart comes from the toolkit in build: and its run dep from the
 #     template.
 #
-# cuda-version pinned to the cell. A torch-linked package inherits its host
-# CUDA window from pytorch's pin; a torch-free one inherits nothing, and an
-# unpinned host would resolve the newest cuda-nvrtc-dev (13.x) while the
-# build env's toolkit is 12.8 -- two majors in one link line, and a
-# run_export naming a CUDA the cell never compiled against. Written as the
-# recipe's own jinja so it follows the cell.
+# The host's cuda-version window is the template's business now: it pins
+# `cuda-version <cell>.*` in host: for every package, so a torch-free host
+# cannot resolve the newest cuda-nvrtc-dev (13.x) against a 12.8 toolkit --
+# which is what an unpinned host did here before, two majors in one link
+# line and a run_export naming a CUDA the cell never compiled against.
 host_deps:
   - pccm >=0.4.16
   - ccimport >=0.4.4
   - pybind11
   - numpy
   - sympy
-  - cuda-version ${{ cuda_compiler_version }}.*
   - cuda-nvrtc-dev
 
 # core_cc records DT_NEEDED on libnvrtc.so.12 (verify.expect_linked below
@@ -128,6 +126,17 @@ host_deps:
 # artifact in the channel links, and this is the one package that does.
 keep_run_exports:
   - cuda-nvrtc-dev
+
+# What THIS package exports to its consumers: the version window upstream
+# spconv states, with the CUDA flavour glob this channel writes into the
+# build string. A weak export, so spconv (and anyone else with cumm in
+# host:) inherits the lock instead of hand-writing it -- ARCHITECTURE.md's
+# argument about conda-torch's pytorch, applied to the one package here that
+# has a consumer in the same channel. spconv still spells the glob in its
+# own run_deps because tools/make_wheel.py writes the wheel sidecar from
+# package.yml, not from the rendered recipe.
+run_exports:
+  - cumm >=0.7.11,<0.8.0 cuda${{ cuda_short }}_*
 
 # cumm finds the toolkit through `which nvcc` and takes BOTH its include
 # path and its link path from that prefix -- <prefix>/targets/x86_64-linux/
