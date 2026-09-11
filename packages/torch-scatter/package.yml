@@ -1,0 +1,92 @@
+name: torch-scatter
+pypi_name: torch_scatter
+import_name: torch_scatter
+# setup.py: __version__ = '2.1.2', and that is what the built wheel carries
+# (make_wheel.py gates on the two agreeing). The pinned commit is past the
+# 2.1.2 tag on master, which is why it is a SHA and not the tag.
+version: "2.1.2"
+
+# MIT, read from the repo's own LICENSE at the pinned rev.
+license: MIT
+homepage: https://github.com/rusty1s/pytorch_scatter
+summary: PyTorch extension library of optimized scatter operations, compiled against the conda-torch channel
+
+source_repo: rusty1s/pytorch_scatter
+source_rev: edeb04224f80f44c4765a05d34fbdde154df057b
+# No .gitmodules at this rev; a plain clone is the whole source.
+clone_recursive: false
+patch_script: packages/torch-scatter/patches/torch_scatter.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels, reasoning included:
+#
+# jobs 1 / nvcc_threads 3 (owner call 2026-08-26). MEMORY-NEUTRAL reshape:
+# 3 jobs x 1 thread and 1 job x 3 threads both run three cicc processes. What
+# changes is WHERE the parallelism lives -- and here it could not live at the
+# process level at all.
+# Measured: 3 CUDA sources, 8 extensions, 20min at 25% CPU.
+# setuptools builds extensions SERIALLY
+# (_distutils/command/build_ext.py::_build_extensions_serial), so MAX_JOBS only
+# ever reaches the ninja run inside ONE extension -- and these hold too few
+# sources for it to matter. nvcc --threads parallelises across GENCODE TARGETS
+# inside a single TU, which is work that actually exists here.
+#
+# Two things changed since that measurement, both deliberate: the patch drops
+# the CPU twin (8 extensions -> 4, half the TUs), and it drops upstream's
+# `use_ninja=False`, so each extension's 1-3 sources now go through ninja
+# rather than distutils' serial loop. Neither touches peak memory, which is
+# what these two numbers are for.
+jobs: 1
+nvcc_threads: 3
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py: install_requires = [] (pytest/pytest-cov are the `test` extra).
+# The farm's PEP 658 sidecar agrees: no Requires-Dist outside extras. torch is
+# supplied by the recipe's flavour-locked pytorch dep.
+run_deps: []
+
+# csrc/cuda/*.cu include <cuda.h> and torch headers only; no CUDA library
+# beyond the runtime. cuda.h ships in cuda-cudart-dev.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+# conda-forge ships a `torch-scatter`, so carrying this name hides theirs
+# under strict channel priority. Looked at rather than assumed (anaconda.org,
+# 2026-09-11): that line stops at 2.1.1, linux-64/osx only, built against
+# pytorch <1.14 / <2.1 with cudatoolkit 11 -- nothing in it can solve beside
+# any torch this channel offers (>= 2.4, cuda >= 12.4). Their live line is
+# `pytorch_scatter`, a distinct name this does not touch. So carrying
+# torch-scatter completely across the conda-torch grid removes no reachable
+# coverage, and the obligation "complete" states is the one the matrix meets
+# by construction: every (cuda, torch, python) cell the channel has a torch for.
+carry: complete
+
+verify:
+  import: torch_scatter
+  # scatter_max and segment_csr are torch_scatter's OWN CUDA kernels
+  # (scatter_add is torch's scatter_add_ and would prove nothing). Both are
+  # run on CUDA tensors and compared against a dense torch reference, so a
+  # mis-arch'd build fails with cudaErrorNoKernelImageForDevice here rather
+  # than passing a bare import.
+  op: |
+    import torch, torch_scatter
+    src = torch.randn(200, 8, device="cuda")
+    idx = torch.randint(0, 16, (200,), device="cuda")
+    out, arg = torch_scatter.scatter_max(src, idx, dim=0, dim_size=16)
+    ref = torch.full((16, 8), float("-inf"), device="cuda").scatter_reduce(
+        0, idx.unsqueeze(-1).expand_as(src), src, "amax", include_self=False)
+    ref[torch.isinf(ref)] = 0
+    assert torch.allclose(out, ref), (out - ref).abs().max()
+    # arg indexes the winning row per (segment, column); empty segments get dim_size
+    filled = ref != 0
+    picked = src.gather(0, arg.clamp(max=src.size(0) - 1))
+    assert (picked[filled] == out[filled]).all(), "scatter_max argmax does not point at the max"
+    # segment_csr: sum over CSR segments, against a cumsum reference
+    x = torch.randn(64, 4, device="cuda")
+    ptr = torch.tensor([0, 10, 25, 25, 64], device="cuda")
+    seg = torch_scatter.segment_csr(x, ptr, reduce="sum")
+    ref2 = torch.stack([x[a:b].sum(0) for a, b in zip(ptr[:-1].tolist(), ptr[1:].tolist())])
+    assert torch.allclose(seg, ref2, atol=1e-4), (seg - ref2).abs().max()

@@ -1,0 +1,86 @@
+name: torch-cluster
+pypi_name: torch_cluster
+import_name: torch_cluster
+# setup.py: __version__ = '1.6.3', and that is what the built wheel carries.
+# The pinned commit is past the 1.6.3 tag on master, hence a SHA.
+version: "1.6.3"
+
+# MIT, read from the repo's own LICENSE at the pinned rev.
+license: MIT
+homepage: https://github.com/rusty1s/pytorch_cluster
+summary: PyTorch extension library of optimized graph cluster algorithms, compiled against the conda-torch channel
+
+source_repo: rusty1s/pytorch_cluster
+source_rev: af7b9f0af6b74be1594eb3d0a1685470cbb21265
+# No .gitmodules at this rev; a plain clone is the whole source.
+clone_recursive: false
+patch_script: packages/torch-cluster/patches/torch_cluster.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels, reasoning included:
+#
+# jobs 1 / nvcc_threads 3 (owner call 2026-08-26). MEMORY-NEUTRAL reshape:
+# 3 jobs x 1 thread and 1 job x 3 threads both run three cicc processes. What
+# changes is WHERE the parallelism lives -- and here it could not live at the
+# process level at all.
+# Measured: 7 CUDA sources, 25% CPU.
+# setuptools builds extensions SERIALLY
+# (_distutils/command/build_ext.py::_build_extensions_serial), so MAX_JOBS only
+# ever reaches the ninja run inside ONE extension -- and these hold too few
+# sources for it to matter. nvcc --threads parallelises across GENCODE TARGETS
+# inside a single TU, which is work that actually exists here.
+#
+# The patch drops the CPU twin and upstream's use_ninja=False; peak memory is
+# unchanged, which is what these two numbers are for.
+jobs: 1
+nvcc_threads: 3
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py: install_requires = ['scipy'] (pytest/pytest-cov are the `test`
+# extra); the farm's sidecar declares exactly `scipy`. torch_cluster/knn.py
+# and radius.py fall back to scipy.spatial on CPU, so it is a real runtime
+# import. torch is supplied by the recipe's flavour-locked pytorch dep.
+run_deps:
+  - scipy
+
+# csrc/cuda/rw_cuda.cu includes <curand.h>/<curand_kernel.h> and uses the
+# DEVICE API only (curand_init/curand_uniform in-kernel), which is header-only
+# -- so the -dev package for the headers, and no libcurand link results.
+# Everything else is <cuda.h> and torch headers.
+host_deps:
+  - cuda-cudart-dev
+  - libcurand-dev
+
+build_deps: []
+
+# conda-forge does NOT ship a `torch-cluster`; its build of this project is
+# named `pytorch_cluster` (checked on anaconda.org, 2026-09-11). Our name is
+# distinct, so nothing of theirs is shadowed under strict channel priority.
+carry: distinct-name
+
+verify:
+  import: torch_cluster
+  # knn and fps are torch_cluster's own CUDA kernels. knn on CUDA is checked
+  # against a dense cdist/topk reference; fps is checked for the invariants a
+  # correct sampling must have. The bf16 knn call is the patch under test:
+  # without the BFloat16 dispatch it raises NotImplementedError. A mis-arch'd
+  # build fails here with cudaErrorNoKernelImageForDevice.
+  op: |
+    import torch
+    from torch_cluster import knn, fps, radius
+    x = torch.randn(300, 3, device="cuda")
+    y = torch.randn(40, 3, device="cuda")
+    k = 5
+    row, col = knn(x, y, k)               # row: index into y, col: index into x
+    ref = torch.cdist(y, x).topk(k, largest=False).indices    # [40, k]
+    got = torch.zeros_like(ref)
+    got[row, torch.arange(k, device="cuda").repeat(40)] = col   # each y has exactly k rows
+    assert (got.sort(1).values == ref.sort(1).values).all(), "knn disagrees with cdist"
+    row16, col16 = knn(x.bfloat16(), y.bfloat16(), k)
+    assert row16.numel() == 40 * k, row16.numel()
+    idx = fps(x, ratio=0.25, random_start=False)
+    assert idx.numel() == 75 and idx.unique().numel() == 75, idx.numel()
+    r_row, r_col = radius(x, y, 0.5, max_num_neighbors=64)
+    d = (y[r_row] - x[r_col]).norm(dim=1)
+    assert (d <= 0.5 + 1e-5).all(), d.max()

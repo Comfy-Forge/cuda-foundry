@@ -1,0 +1,121 @@
+name: torchsparse
+pypi_name: torchsparse
+import_name: torchsparse
+# torchsparse/version.py at the v2.0.0 TAG says __version__ = '2.0.0b', which
+# setuptools normalises to 2.0.0b0 -- and that is what the built wheel
+# carries. The farm's gate blocked the aspirational "2.0.0" for exactly this
+# reason; make_wheel.py gates on the same agreement here.
+version: "2.0.0b0"
+
+# MIT, read from the repo's own LICENSE at the pinned rev.
+license: MIT
+homepage: https://github.com/mit-han-lab/torchsparse
+summary: High-performance sparse convolution for point clouds (MIT HAN Lab), compiled against the conda-torch channel
+
+# Sparse convolution for point clouds. Gap this fills (farm notes, still
+# true): EVERY upstream channel is dead -- pypi.org/simple/torchsparse 404s,
+# the README index pypi.hanlab.ai 404s, the install.py fallback index 404s,
+# and the v2.0.0/v1.4.0 GH releases carry zero assets. Source build only.
+source_repo: mit-han-lab/torchsparse
+# The v2.0.0 tag, dereferenced to its commit.
+source_rev: 1a10fda15098f3bf4fa2d01f8bee53e85762abcf
+clone_recursive: false
+patch_script: packages/torchsparse/patches/torchsparse.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: five 100-120KB implicit-GEMM TUs; heavy
+# tail. Plain CUDAExtension with no gencode of its own -- it inherits
+# TORCH_CUDA_ARCH_LIST, so the shared grid arch lists apply unchanged.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py declares no install_requires at all (the farm's sidecar carries
+# none) and the repo's requirements.txt lists backports.cached_property,
+# numpy, tqdm, typing-extensions, wheel. Read against the sources rather
+# than copied: `import torchsparse` runs torchsparse/utils/tune.py, which
+# imports numpy AND tqdm at module level, and nn/modules/conv.py imports
+# numpy -- both are genuine runtime imports. backports.cached_property is a
+# py<3.8 shim behind a try/except, typing-extensions is imported nowhere,
+# and wheel is a build tool. torch is supplied by the recipe's
+# flavour-locked pytorch dep.
+run_deps:
+  - numpy
+  - tqdm
+
+# Two kinds of host deps here, and the distinction matters:
+#   * IMPORT-TIME build deps. setup.py does `from torchsparse import
+#     __version__`, which imports the whole package -- so numpy and tqdm must
+#     be importable by the HOST python before a single TU compiles. They
+#     cannot go in build_deps: that env's packages are not importable from
+#     the host interpreter (see the template's note on the split).
+#   * headers. hashmap_cpu.hpp / query_cpu.cpp include
+#     <google/dense_hash_map>: conda-forge's sparsehash, header-only, 2.0.4
+#     on linux-64 AND win-64 (checked 2026-09-11). The farm used EPEL on
+#     Linux and vendored a tarball on Windows; one conda package on both is
+#     the point of building here. convolution_cuda.cu includes <cublas_v2.h>
+#     (the header only; no cuBLAS call is made), and the rest is <cuda.h>,
+#     <cuda_runtime.h>, thrust and torch headers.
+host_deps:
+  - numpy
+  - tqdm
+  - sparsehash
+  - cuda-cudart-dev
+  - libcublas-dev
+
+build_deps: []
+
+# setup.py has no include_dirs, and the sparsehash headers live in the host
+# prefix -- $PREFIX/include on Linux, %PREFIX%\Library\include on win-64 (a
+# conda prefix keeps the Unix tree under Library there; torchvision's codecs
+# were silently lost to exactly this difference). The patch injects
+# include_dirs=[$CUW_SPARSEHASH_INCLUDE] and REFUSES to build if the variable
+# does not point at google/dense_hash_map, so a wrong path fails at setup
+# time rather than three minutes into the compile.
+build_env:
+  CUW_SPARSEHASH_INCLUDE: $PREFIX/include
+build_env_win:
+  CUW_SPARSEHASH_INCLUDE: $PREFIX/Library/include
+
+# conda-forge ships a `torchsparse`: 1.3.0/1.4.0 against pytorch 1.7/1.8 with
+# cudatoolkit 10.2-11.2 (anaconda.org, 2026-09-11). Nothing in that line can
+# solve beside any torch this channel offers, so carrying the name hides
+# nothing reachable; the obligation "complete" states is met by the matrix
+# by construction.
+carry: complete
+
+verify:
+  import: torchsparse
+  # The whole sparse-conv pipeline on CUDA -- hashing (hash_cuda), kernel-map
+  # query (hash_query_cuda) and the gather/GEMM/scatter of conv3d -- against
+  # dense references. A 1x1x1 sparse conv is exactly a linear layer on the
+  # features, so that reference is unarguable; the CUDA hash is also checked
+  # against the package's own CPU hash. A mis-arch'd build fails here with
+  # cudaErrorNoKernelImageForDevice rather than passing a bare import.
+  op: |
+    import torch, torchsparse
+    from torchsparse import SparseTensor
+    from torchsparse import nn as spnn
+    import torchsparse.nn.functional as F
+    torch.manual_seed(0)
+    coords = torch.unique(torch.randint(0, 8, (300, 3)), dim=0)
+    coords = torch.cat([coords, torch.zeros(coords.size(0), 1, dtype=coords.dtype)], 1).int()
+    n = coords.size(0)
+    h_gpu = F.sphash(coords.cuda())
+    h_cpu = F.sphash(coords)
+    assert (h_gpu.cpu() == h_cpu).all(), "hash_cuda disagrees with hash_cpu"
+    feats = torch.randn(n, 6, device="cuda")
+    x = SparseTensor(feats, coords.cuda())
+    conv = spnn.Conv3d(6, 5, kernel_size=1, bias=False).cuda()
+    y = conv(x)
+    ref = feats @ conv.kernel.view(6, 5)
+    assert torch.allclose(y.F, ref, atol=1e-4), (y.F - ref).abs().max()
+    conv3 = spnn.Conv3d(6, 5, kernel_size=3, bias=False).cuda()
+    y3 = conv3(x)
+    assert y3.F.shape == (n, 5) and torch.isfinite(y3.F).all()
+    # every output row must aggregate more than its own voxel somewhere:
+    # with 3^3 neighbourhoods on a dense-ish 8^3 grid, y3 != the centre-tap
+    # product alone proves the kernel map found neighbours
+    centre = feats @ conv3.kernel[13].view(6, 5)
+    assert not torch.allclose(y3.F, centre), "k=3 conv used only the centre tap"

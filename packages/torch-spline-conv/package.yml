@@ -1,0 +1,81 @@
+name: torch-spline-conv
+pypi_name: torch_spline_conv
+import_name: torch_spline_conv
+# setup.py: __version__ = '1.2.2', and that is what the built wheel carries.
+# The pinned commit is past the 1.2.2 tag on master, hence a SHA.
+version: "1.2.2"
+
+# MIT, read from the repo's own LICENSE at the pinned rev.
+license: MIT
+homepage: https://github.com/rusty1s/pytorch_spline_conv
+summary: Spline-based convolution operators for PyTorch, compiled against the conda-torch channel
+
+source_repo: rusty1s/pytorch_spline_conv
+source_rev: 986b41c8d8149635e748bd369e998effff10099e
+# No .gitmodules at this rev; a plain clone is the whole source.
+clone_recursive: false
+patch_script: packages/torch-spline-conv/patches/torch_spline_conv.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels, reasoning included:
+#
+# jobs 1 / nvcc_threads 3 (owner call 2026-08-26). MEMORY-NEUTRAL reshape:
+# 3 jobs x 1 thread and 1 job x 3 threads both run three cicc processes. What
+# changes is WHERE the parallelism lives -- and here it could not live at the
+# process level at all.
+# Measured: 2 CUDA sources, 25% CPU.
+# setuptools builds extensions SERIALLY
+# (_distutils/command/build_ext.py::_build_extensions_serial), so MAX_JOBS only
+# ever reaches the ninja run inside ONE extension -- and these hold too few
+# sources for it to matter. nvcc --threads parallelises across GENCODE TARGETS
+# inside a single TU, which is work that actually exists here.
+#
+# The patch drops the CPU twin and upstream's use_ninja=False; peak memory is
+# unchanged, which is what these two numbers are for.
+jobs: 1
+nvcc_threads: 3
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py: install_requires = [] (pytest/pytest-cov are the `test` extra);
+# the farm's sidecar agrees. torch is supplied by the recipe's flavour-locked
+# pytorch dep.
+run_deps: []
+
+# csrc/cuda/*.cu include <cuda.h> and torch headers only.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+# conda-forge does NOT ship a `torch-spline-conv`; its build of this project
+# is named `pytorch_spline_conv` (checked on anaconda.org, 2026-09-11). Our
+# name is distinct, so nothing of theirs is shadowed under strict channel
+# priority.
+carry: distinct-name
+
+verify:
+  import: torch_spline_conv
+  # spline_basis and spline_weighting are the package's two CUDA kernels
+  # (basis_cuda.cu, weighting_cuda.cu). The reference is the package's OWN
+  # CPU implementation of the same ops, compiled from csrc/cpu/ into the same
+  # extension -- a different code path, not the kernel under test. A
+  # mis-arch'd build fails here with cudaErrorNoKernelImageForDevice rather
+  # than passing a bare import.
+  op: |
+    import torch
+    from torch_spline_conv import spline_basis, spline_weighting
+    E, D, Min, Mout = 128, 2, 8, 4
+    pseudo = torch.rand(E, D)
+    kernel_size = torch.tensor([5, 5])
+    is_open = torch.tensor([1, 0], dtype=torch.uint8)
+    x = torch.randn(E, Min)
+    w = torch.randn(25, Min, Mout)
+    b_cpu, i_cpu = spline_basis(pseudo, kernel_size, is_open, 1)
+    b_gpu, i_gpu = spline_basis(pseudo.cuda(), kernel_size.cuda(), is_open.cuda(), 1)
+    assert torch.allclose(b_gpu.cpu(), b_cpu, atol=1e-5), (b_gpu.cpu() - b_cpu).abs().max()
+    assert (i_gpu.cpu() == i_cpu).all()
+    y_cpu = spline_weighting(x, w, b_cpu, i_cpu)
+    y_gpu = spline_weighting(x.cuda(), w.cuda(), b_gpu, i_gpu)
+    assert y_gpu.shape == (E, Mout)
+    assert torch.allclose(y_gpu.cpu(), y_cpu, atol=1e-4), (y_gpu.cpu() - y_cpu).abs().max()

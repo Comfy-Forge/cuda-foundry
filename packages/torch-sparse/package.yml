@@ -1,0 +1,85 @@
+name: torch-sparse
+pypi_name: torch_sparse
+import_name: torch_sparse
+# setup.py: __version__ = '0.6.18', and that is what the built wheel carries.
+# The pinned commit is past the 0.6.18 tag on master, hence a SHA.
+version: "0.6.18"
+
+# MIT, read from the repo's own LICENSE at the pinned rev.
+license: MIT
+homepage: https://github.com/rusty1s/pytorch_sparse
+summary: PyTorch extension library of optimized autograd sparse matrix operations, compiled against the conda-torch channel
+
+source_repo: rusty1s/pytorch_sparse
+source_rev: 2be752eb2e12d4c76d29c7a11d0f0b77cfd9ff45
+# .gitmodules pins third_party/parallel-hashmap (header-only; setup.py adds
+# it to include_dirs). Nothing else is fetched.
+clone_recursive: true
+patch_script: packages/torch-sparse/patches/torch_sparse.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels, reasoning included:
+#
+# jobs 1 / nvcc_threads 3 (owner call 2026-08-26). MEMORY-NEUTRAL reshape:
+# 3 jobs x 1 thread and 1 job x 3 threads both run three cicc processes. What
+# changes is WHERE the parallelism lives -- and here it could not live at the
+# process level at all.
+# Measured: 24 extensions x 1-3 sources, 43% avg CPU, 23min.
+# setuptools builds extensions SERIALLY
+# (_distutils/command/build_ext.py::_build_extensions_serial), so MAX_JOBS only
+# ever reaches the ninja run inside ONE extension -- and these hold too few
+# sources for it to matter. nvcc --threads parallelises across GENCODE TARGETS
+# inside a single TU, which is work that actually exists here.
+#
+# The patch drops the CPU twin, so 12 extensions rather than 24; peak memory
+# is unchanged, which is what these two numbers are for.
+jobs: 1
+nvcc_threads: 3
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py: install_requires = ['scipy'] (pytest/pytest-cov are the `test`
+# extra); the farm's sidecar declares exactly `scipy`. It is a genuine
+# runtime import -- torch_sparse/tensor.py converts to and from
+# scipy.sparse -- not a build tool. torch is supplied by the recipe's
+# flavour-locked pytorch dep.
+run_deps:
+  - scipy
+
+# csrc/cuda/*.cu include <cuda.h> and torch headers; no CUDA library beyond
+# the runtime. (The cuSPARSE the name suggests is never used: spmm is
+# upstream's own kernel, and the torch-implied libcusparse-dev the template
+# adds is there for ATen's headers, not for this package's sources.)
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+# conda-forge does NOT ship a `torch-sparse`; its build of this project is
+# named `pytorch_sparse` (checked on anaconda.org, 2026-09-11). Our name is
+# distinct, so nothing of theirs is shadowed under strict channel priority
+# and there is no completeness obligation to inherit from their line.
+carry: distinct-name
+
+verify:
+  import: torch_sparse
+  # spmm is torch_sparse's own CUDA kernel (csrc/cuda/spmm_cuda.cu): a
+  # SparseTensor @ dense on CUDA, checked against torch's dense matmul, so a
+  # mis-arch'd build fails with cudaErrorNoKernelImageForDevice rather than
+  # passing a bare import. The bf16 line is the patch under test: without the
+  # BFloat16 dispatch this raises NotImplementedError.
+  op: |
+    import torch
+    from torch_sparse import SparseTensor, matmul
+    d = torch.randn(64, 48, device="cuda")
+    d[torch.rand_like(d) < 0.7] = 0
+    b = torch.randn(48, 16, device="cuda")
+    A = SparseTensor.from_dense(d)
+    out = A @ b
+    assert torch.allclose(out, d @ b, atol=1e-4), (out - d @ b).abs().max()
+    out16 = matmul(A.to(torch.bfloat16), b.to(torch.bfloat16))
+    assert out16.dtype == torch.bfloat16
+    assert torch.allclose(out16.float(), d @ b, atol=0.5, rtol=0.1), (out16.float() - d @ b).abs().max()
+    # and a reduction kernel with a different code path
+    mx = matmul(A, b, reduce="max")
+    assert mx.shape == (64, 16) and torch.isfinite(mx).all()

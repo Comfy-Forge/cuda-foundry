@@ -1,0 +1,74 @@
+name: torch-generic-nms
+pypi_name: torch_generic_nms
+import_name: torch_generic_nms
+# setup.py: version="0.1", and that is what the built wheel carries. The repo
+# has no tags, so setup.py IS the version (cuda-wheels publishes it as
+# torch_generic_nms-0.1+cu128torch2.8).
+version: "0.1"
+
+# BSD-3-Clause, read from the repo's own LICENSE at the pinned rev.
+license: BSD-3-Clause
+homepage: https://github.com/ronghanghu/torch_generic_nms
+summary: NMS over Nx4 boxes or an NxN pairwise IoU matrix for PyTorch, compiled against the conda-torch channel
+
+source_repo: ronghanghu/torch_generic_nms
+source_rev: fcf02b41ea9b37988b244ef80583af17baa4a7f0
+clone_recursive: false
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: one .cu (generic_nms.cu), so this is
+# comfortable.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py defines requirements = ["torch"] and then never passes it to
+# setup(), so upstream's own wheel declares nothing; the farm's sidecar has
+# no Requires-Dist. torch is supplied by the recipe's flavour-locked pytorch
+# dep.
+run_deps: []
+
+# generic_nms.cu includes ATen/cuda/CUDAContext.h, c10/cuda/CUDAGuard.h and
+# torch/extension.h; nothing beyond the CUDA runtime.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+# Not on conda-forge (checked 2026-09-11); nothing to shadow.
+carry: complete
+
+verify:
+  import: torch_generic_nms
+  # Both kernel paths -- Nx4 boxes and NxN IoU matrix -- on CUDA, against a
+  # dense greedy NMS reference computed in plain torch. A mis-arch'd build
+  # fails here with cudaErrorNoKernelImageForDevice rather than passing a
+  # bare import.
+  op: |
+    import torch
+    from torch_generic_nms import generic_nms
+    torch.manual_seed(0)
+    n = 40
+    xy = torch.rand(n, 2, device="cuda") * 20
+    wh = torch.rand(n, 2, device="cuda") * 10 + 2
+    boxes = torch.cat([xy, xy + wh], 1)
+    scores = torch.rand(n, device="cuda")
+    lt = torch.maximum(boxes[:, None, :2], boxes[None, :, :2])
+    rb = torch.minimum(boxes[:, None, 2:], boxes[None, :, 2:])
+    inter = (rb - lt).clamp(min=0).prod(-1)
+    area = wh.prod(-1)
+    iou = inter / (area[:, None] + area[None, :] - inter)
+    def ref_nms(iou, scores, thr):
+        order = scores.argsort(descending=True).tolist()
+        keep = []
+        for i in order:
+            if all(iou[i, j] <= thr for j in keep):
+                keep.append(i)
+        return keep
+    ref = ref_nms(iou, scores, 0.3)
+    k1 = generic_nms(boxes, scores, 0.3, False).tolist()
+    k2 = generic_nms(iou, scores, 0.3, True).tolist()
+    assert k1 == ref, (k1, ref)
+    assert k2 == ref, (k2, ref)
+    assert 0 < len(ref) < n, len(ref)

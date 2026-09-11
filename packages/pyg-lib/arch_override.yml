@@ -1,0 +1,33 @@
+# Overrides of the shared arch policy (defaults/arch_policy.yml)
+# for this package only. Ported from cuda-wheels' packages/pyg_lib, with
+# the rows respelled in the space-separated TORCH_CUDA_ARCH_LIST form this
+# repo's overrides use (see packages/flash-attn/arch_override.yml).
+#
+# pyg_lib keeps Pascal/Volta (6.0/7.0) alive for older cards. CUDA 13.x
+# removed compute_60/70 from nvcc entirely, so those rows floor at 7.5 like
+# the shared policy -- a static list would kill every cu130/cu132 build with
+# "nvcc fatal: Unsupported gpu architecture".
+#
+# WIDENED 2026-08-26 in the farm, alongside the arch bridge in
+# patches/pyg_lib.py. Until that bridge landed this list was decorative:
+# upstream's CMakeLists.txt chose CMAKE_CUDA_ARCHITECTURES from a hardcoded
+# if-ladder keyed on the nvcc version and never read TORCH_CUDA_ARCH_LIST, so
+# the wheels actually shipped the ladder's set (cu13.0: 75;80;86;90;100;120)
+# regardless of what this file said. Making the bridge honour a narrower list
+# would have DELETED native SASS for 8.6 / 10.0 / 12.0 from wheels that ship
+# it, so these rows are the union of the old list and what the ladder was
+# really building. What the bridge buys is the redundant half of the work --
+# the ladder's tags were unsuffixed, so cmake emitted -real AND -virtual for
+# every arch (12 device passes on cu13.0 where the config asks for 8, PTX on
+# six archs where one is declared).
+#
+# aarch64 is NOT listed here and is governed by arch_policy_aarch64, which is
+# the point: the ladder has no sm_87 at any CUDA version, so ARM wheels were
+# shipping without the one arch ARM most needs. The bridge fixes that.
+arch_list_by_cuda:
+  "12.4": 6.0 7.0 7.5 8.0 8.6 9.0+PTX
+  "12.6": 6.0 7.0 7.5 8.0 8.6 9.0+PTX
+  "12.8": 6.0 7.0 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX
+  "12.9": 6.0 7.0 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX
+  "13.0": 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX
+  "13.2": 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX

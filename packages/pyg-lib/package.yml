@@ -1,0 +1,102 @@
+name: pyg-lib
+pypi_name: pyg_lib
+import_name: pyg_lib
+# setup.py: __version__ = '0.5.0' (CMakeLists: PYG_VERSION 0.5.0); the built
+# wheel carries 0.5.0.
+version: "0.5.0"
+
+# MIT, read from the repo's own LICENSE at the pinned rev (LICENSE_radix_sort
+# is the BSD notice for a vendored kernel; the package licence is MIT).
+license: MIT
+homepage: https://github.com/pyg-team/pyg-lib
+summary: Low-level graph neural network operations for PyG, compiled against the conda-torch channel
+
+source_repo: pyg-team/pyg-lib
+# The 0.5.0 tag, dereferenced to its commit so two artifacts of one version
+# come from the same source.
+source_rev: ff87d1bb043fdce072ebba1d87d06c59188affcc
+# Five submodules, all compiled or included from the tree: cutlass, cccl,
+# cuCollections, parallel-hashmap (headers) and METIS (built into libpyg on
+# non-MSVC).
+clone_recursive: true
+patch_script: packages/pyg-lib/patches/pyg_lib.py
+
+links_torch: true
+
+# Ported from cuda-wheels: "cmake --build with no -j upstream; reached via the
+# CMAKE_BUILD_PARALLEL_LEVEL mirror. Vendored CUTLASS TUs -> heavy tail, keep
+# at 3." Here the mirror is explicit -- build_env below sets
+# CMAKE_BUILD_PARALLEL_LEVEL from MAX_JOBS, because nothing else in this repo
+# does (torchaudio's package.yml records the same gap for the same reason).
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py: install_requires = [] + mkl_dependencies(), and the MKL branch is
+# off unless USE_MKL_BLAS=1 (it is not set here). `triton`, `test` and `dev`
+# are extras. The farm's sidecar agrees: no Requires-Dist outside extras.
+# torch is supplied by the recipe's flavour-locked pytorch dep.
+run_deps: []
+
+# The four .cu files include <cuda.h>, cutlass (vendored, header-only) and
+# cuco (vendored, header-only); thrust/cub come from the vendored cccl
+# submodule, not from the toolkit. No CUDA library beyond the runtime is
+# used -- and nvrtc, which TorchConfig.cmake would otherwise put on the link
+# line, is filtered out by the patch.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps:
+  # setup.py shells out to `cmake`; without this the build silently used
+  # whatever cmake was on PATH, which is exactly the host leak the
+  # from-source guarantee exists to make impossible (torchaudio's package.yml
+  # records the same finding).
+  - cmake
+
+# Upstream escape hatches, read by setup.py / CMakeLists.txt:
+#   FORCE_NINJA   selects -GNinja. Upstream only does so when the *python*
+#                 `ninja` package is importable; the recipe's ninja is conda's
+#                 binary, so without this cmake would pick Unix Makefiles on
+#                 linux-64 and MSBuild on win-64 -- and on win-64 the compile
+#                 ledger (L3) is read out of .ninja_log, so a non-ninja build
+#                 there ships nothing.
+#   CMAKE_BUILD_PARALLEL_LEVEL
+#                 upstream's `cmake --build .` passes no -j, and cmake reads
+#                 this variable; MAX_JOBS never reaches it. Without this the
+#                 33 TUs compile serially whatever `jobs` says.
+build_env:
+  FORCE_NINJA: "1"
+  CMAKE_BUILD_PARALLEL_LEVEL: $MAX_JOBS
+
+# conda-forge ships `pyg-lib` (0.6.0: cpu builds on linux-64/win-64/osx and
+# cuda129 builds on linux-64 for torch 2.9/2.10, read from anaconda.org on
+# 2026-09-11), so carrying this name hides that line under strict channel
+# priority. Decided: carry it completely -- the obligation is every
+# (cuda, torch, python) cell conda-torch has a torch for, which the matrix
+# emits by construction once dispatched with the filters open. Two things
+# worth knowing about what "complete" costs here: conda-forge has NO build
+# for torch 2.8 (this cell), so nothing reachable is lost for it; and our
+# version is 0.5.0 where conda-forge's is 0.6.0, so a consumer pinning
+# `pyg-lib >=0.6` on torch 2.9+ would be UNSAT until the pin here moves --
+# a version-policy call, recorded rather than decided by a build.
+carry: complete
+
+verify:
+  import: pyg_lib
+  # Two of libpyg's own CUDA kernels, each checked against a dense torch
+  # reference: segment_matmul (cutlass grouped GEMM, ops/cuda/matmul_kernel.cu)
+  # and sampled_add (ops/cuda/sampled_kernel.cu). A mis-arch'd build fails
+  # here with cudaErrorNoKernelImageForDevice rather than passing an import.
+  op: |
+    import torch, pyg_lib
+    from pyg_lib.ops import segment_matmul, sampled_add
+    x = torch.randn(30, 16, device="cuda")
+    ptr = torch.tensor([0, 10, 25, 30], device="cuda")
+    w = torch.randn(3, 16, 8, device="cuda")
+    out = segment_matmul(x, ptr, w)
+    ref = torch.cat([x[a:b] @ w[i] for i, (a, b) in enumerate(zip(ptr[:-1].tolist(), ptr[1:].tolist()))])
+    assert torch.allclose(out, ref, atol=1e-3), (out - ref).abs().max()
+    a = torch.randn(20, 8, device="cuda"); b = torch.randn(20, 8, device="cuda")
+    li = torch.randint(0, 20, (50,), device="cuda"); ri = torch.randint(0, 20, (50,), device="cuda")
+    s = sampled_add(a, b, li, ri)
+    assert torch.allclose(s, a[li] + b[ri], atol=1e-5), (s - (a[li] + b[ri])).abs().max()

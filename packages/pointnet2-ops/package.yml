@@ -1,0 +1,76 @@
+name: pointnet2-ops
+pypi_name: pointnet2_ops
+import_name: pointnet2_ops
+# pointnet2_ops_lib/pointnet2_ops/_version.py: __version__ = "3.0.0", exec'd
+# by setup.py; the built wheel carries 3.0.0.
+version: "3.0.0"
+
+# The repo ships an UNLICENSE file (public domain dedication), read at the
+# pinned rev; the SPDX identifier for it is Unlicense.
+license: Unlicense
+homepage: https://github.com/erikwijmans/Pointnet2_PyTorch
+summary: PointNet++ CUDA ops (furthest point sampling, ball query, grouping, interpolation) for PyTorch, compiled against the conda-torch channel
+
+source_repo: erikwijmans/Pointnet2_PyTorch
+# master @ 2021-07-30; the repo is dormant and has no release tags.
+source_rev: b5ceb6d9ca0467ea34beb81023f96ee82228f626
+clone_recursive: false
+# The extension is a sub-project: the repo root's setup.py is the PointNet++
+# training code (`pointnet2`), and the wheel we want comes from
+# pointnet2_ops_lib/setup.py. build.sh / build_win.py cd here before
+# `pip wheel .`. The patch runs at the repo root and addresses the file by
+# this path.
+build_subdir: pointnet2_ops_lib
+patch_script: packages/pointnet2-ops/patches/pointnet2_ops.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: 4 small .cu (ball_query, group_points,
+# interpolate, sampling) plus their .cpp bindings in ONE extension, so
+# MAX_JOBS reaches every TU through ninja.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py: requirements = ["torch>=1.4"], nothing else; the farm's sidecar
+# carries no Requires-Dist at all. torch is supplied by the recipe's
+# flavour-locked pytorch dep.
+run_deps: []
+
+# _ext-src/src/*.cu include <cuda.h>, <cuda_runtime.h> and torch headers.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+# Not on conda-forge (checked 2026-09-11); nothing to shadow.
+carry: complete
+
+verify:
+  import: pointnet2_ops
+  # pointnet2_utils falls back to JIT-compiling the extension with
+  # torch.utils.cpp_extension.load when `pointnet2_ops._ext` fails to import
+  # -- so a bare import proves nothing, and worse, a broken artifact would
+  # quietly compile itself on the user's machine. First assert the loaded
+  # _ext is the shipped module. Then run two of its kernels on CUDA against
+  # dense references: three_nn against cdist/topk, and furthest_point_sample
+  # against a greedy max-min loop (deterministic: upstream starts at index 0).
+  op: |
+    import os, torch, pointnet2_ops
+    from pointnet2_ops import pointnet2_utils as U
+    assert U._ext.__name__ == "pointnet2_ops._ext", U._ext
+    assert os.path.dirname(U._ext.__file__) == os.path.dirname(pointnet2_ops.__file__), U._ext.__file__
+    torch.manual_seed(0)
+    known = torch.rand(2, 50, 3, device="cuda")
+    unknown = torch.rand(2, 20, 3, device="cuda")
+    dist, idx = U.three_nn(unknown, known)
+    ref_d, ref_i = torch.cdist(unknown, known).topk(3, dim=-1, largest=False)
+    assert (idx == ref_i).all(), "three_nn indices disagree with cdist"
+    assert torch.allclose(dist, ref_d, atol=1e-4), (dist - ref_d).abs().max()
+    xyz = torch.rand(1, 64, 3, device="cuda")
+    got = U.furthest_point_sample(xyz, 8)[0].tolist()
+    pts, picked, mind = xyz[0], [0], torch.full((64,), float("inf"), device="cuda")
+    for _ in range(7):
+        mind = torch.minimum(mind, ((pts - pts[picked[-1]]) ** 2).sum(-1))
+        picked.append(int(mind.argmax()))
+    assert got == picked, (got, picked)
