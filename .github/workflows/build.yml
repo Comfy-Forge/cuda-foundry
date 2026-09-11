@@ -618,6 +618,11 @@ jobs:
           CELL_PLATFORM: ${{ matrix.cell.platform }}
           CELL_CUDA: ${{ matrix.cell.cuda }}
           CELL_PYTHON: ${{ matrix.cell.python }}
+          # The manifest declares a cuda system requirement and the runner
+          # has no GPU, so __cuda must be overridden exactly as the
+          # rattler-build test step does -- run 34623084964 died here with
+          # "missing virtual packages: __cuda >= 12.8".
+          CONDA_OVERRIDE_CUDA: ${{ matrix.cell.cuda }}
         run: |
           set -euo pipefail
           shopt -s nullglob
