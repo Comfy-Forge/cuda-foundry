@@ -97,7 +97,18 @@ EXPECTED_VENDORED = {
 # PyPI's `pillow`, but conda has `pytorch` for PyPI's `torch`), so the
 # translation is explicit and anything unknown is passed through unchanged
 # rather than silently guessed at.
-CONDA_TO_PYPI = {"pytorch": "torch", "pillow": "pillow"}
+CONDA_TO_PYPI = {
+    "pytorch": "torch",
+    "pillow": "pillow",
+    # conda-forge splits OpenCV into libopencv / opencv / py-opencv; the
+    # python bindings are py-opencv, and PyPI's project for that module is
+    # opencv-python (mmcv imports cv2 at module scope).
+    "py-opencv": "opencv-python",
+    # conda-forge's `matplotlib` is a metapackage that drags pyqt in; the
+    # library itself is matplotlib-base, and PyPI has only `matplotlib`
+    # (detectron2).
+    "matplotlib-base": "matplotlib",
+}
 
 # Never advertised as a wheel dependency, on either index. These wheels are
 # compiled against ONE exact (cuda, torch) ABI, and that fact lives only in

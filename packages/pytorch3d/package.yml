@@ -1,0 +1,74 @@
+name: pytorch3d
+pypi_name: pytorch3d
+import_name: pytorch3d
+# setup.py reads __version__ = "0.7.9" out of pytorch3d/__init__.py; nothing
+# appends a suffix, so the built wheel carries exactly this.
+version: "0.7.9"
+
+# BSD-3-Clause, read from the repo's own LICENSE at the pinned rev ("BSD
+# License ... For PyTorch3D software", three-clause text).
+license: BSD-3-Clause
+homepage: https://github.com/facebookresearch/pytorch3d
+summary: PyTorch3D, 3D deep learning with compiled CUDA ops, built against the conda-torch channel
+
+source_repo: facebookresearch/pytorch3d
+# v0.7.9, dereferenced to the commit (git ls-remote --tags, 2026-09-11).
+source_rev: 33824be3cbc87a7dd1db0f6a9a9de9ac81b2d0ba
+# The farm sets clone_recursive: true here; the repo has no .gitmodules at
+# v0.7.9, so that was a no-op and is not carried.
+clone_recursive: false
+patch_script: packages/pytorch3d/patches/pytorch3d.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: "jobs 4 (restored 2026-08-26). Same shape
+# as gsplat: many medium TUs, no heavy tail, no recorded OOM at 4." 31 .cu and
+# 36 .cpp under pytorch3d/csrc; the pulsar renderer is the largest family.
+jobs: 4
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py: install_requires=["iopath"], and that is the whole of the
+# non-torch runtime claim upstream makes. Read against the imports:
+#   iopath   pytorch3d/io/utils.py, mtl_io.py -- a real import-time need
+#   numpy    31 modules import it; upstream leaves it implicit via torch
+# omegaconf and PIL are imported only by implicitron and the io/vis
+# subpackages, which are not reached by `import pytorch3d`; they stay extras
+# as upstream has them. The wheel's PEP 658 sidecar on the farm agrees:
+# `Requires-Dist: iopath` and nothing else outside extras.
+run_deps:
+  - iopath
+  - numpy
+
+# csrc includes cuda_runtime, thrust (tuple only) and cub. setup.py looks for
+# CUB under CUB_HOME / $CONDA_PREFIX/include/cub and merely warns if it finds
+# neither; CUDA 12's own <cub/cub.cuh> ships in cuda-cccl, which the recipe
+# already puts in build:, and that is the one the compile uses.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # conda-forge has no pytorch3d; nothing to shadow
+
+verify:
+  import: pytorch3d
+  # knn_points runs pytorch3d's own KNN kernel (csrc/knn/knn.cu), so a
+  # mis-arch'd build fails with cudaErrorNoKernelImageForDevice here and
+  # nowhere else. Checked against a brute-force answer, not just for shape.
+  op: |
+    import torch
+    from pytorch3d.ops import knn_points
+    p1 = torch.randn(1, 64, 3, device="cuda")
+    p2 = torch.randn(1, 128, 3, device="cuda")
+    dists, idx, _ = knn_points(p1, p2, K=4)
+    assert idx.shape == (1, 64, 4), idx.shape
+    ref = torch.cdist(p1, p2).topk(4, largest=False).indices
+    assert torch.equal(idx.sort(dim=-1).values, ref.sort(dim=-1).values)
+    # and a second kernel family: the mesh rasterizer
+    from pytorch3d.structures import Meshes
+    from pytorch3d.renderer import rasterize_meshes
+    verts = torch.tensor([[-1., -1., 1.], [1., -1., 1.], [0., 1., 1.]], device="cuda")
+    faces = torch.tensor([[0, 1, 2]], device="cuda")
+    pix, zbuf, bary, dist = rasterize_meshes(Meshes([verts], [faces]), image_size=16, faces_per_pixel=1)
+    assert (pix >= 0).any(), "rasterizer covered no pixel"

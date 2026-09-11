@@ -1,0 +1,95 @@
+name: mmcv
+pypi_name: mmcv
+import_name: mmcv
+# mmcv/version.py: __version__ = '1.7.2'; setup.py get_version() reads it.
+version: "1.7.2"
+
+# Apache-2.0, read from the repo's own LICENSE at the pinned rev.
+license: Apache-2.0
+homepage: https://github.com/open-mmlab/mmcv
+summary: OpenMMLab computer vision foundation library (1.x, with CUDA ops), compiled against the conda-torch channel
+
+# The 1.x branch on purpose: mmcv 2.x dropped ops that SANA-WM and other
+# ComfyUI node packs pin to (farm note). PyPI's 1.x convention is that the
+# published `mmcv` IS the full-with-ops build and `mmcv-lite` the sibling
+# without; upstream's setup.py spells that as MMCV_WITH_OPS=1 plus a name flip
+# to `mmcv-full`, which the patch pins back to `mmcv`.
+source_repo: open-mmlab/mmcv
+# v1.7.2, dereferenced to the commit (git ls-remote --tags, 2026-09-11).
+source_rev: 4c01b026f0afa5a91a5f54aea313788da1e40f95
+clone_recursive: false            # no .gitmodules at v1.7.2
+patch_script: packages/mmcv/patches/mmcv.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels. ~56 .cu op kernels (NMS, RoIAlign, deform
+# conv, ...) plus ~54 .cpp; no CUTLASS, no heavy tail.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies: requirements/runtime.txt, read against the imports ──────
+# setup.py install_requires = parse_requirements('requirements/runtime.txt'):
+#   addict, numpy, packaging, Pillow, pyyaml, regex (win32 only), yapf
+# plus opencv-python(-headless)>=3 appended when cv2 is not importable at
+# build time.
+#
+# yapf STAYS, and this corrects ARCHITECTURE.md's example of it as a build
+# tool leaked into runtime deps. Measured against v1.7.2: mmcv/__init__.py
+# does `from .utils import *`, mmcv/utils/__init__.py imports .config, and
+# mmcv/utils/config.py has `import yapf` and `from yapf.yapflib.yapf_api
+# import FormatCode` at MODULE scope (lines 18-20) -- Config.pretty_text
+# formats generated config source with it. `import mmcv` fails without yapf.
+# A code formatter as a runtime dependency is odd; it is nonetheless what
+# the code does.
+#   addict     mmcv/utils/config.py:19, module scope        -> required
+#   cv2        mmcv/image/{io,colorspace,geometric,...}.py, imported by
+#              `from .image import *` in mmcv/__init__.py   -> required
+#   PIL        mmcv/image/io.py (pillow backend)            -> required
+#   pyyaml     mmcv/fileio handlers                          -> required
+#   packaging  mmcv/version.py, mmcv/utils/version_utils.py -> required
+#   regex      optional: config.py falls back to `re` on ImportError, and
+#              upstream only asks for it on win32. Not carried.
+# Extras (tests/all/build/optional: ninja, psutil, pytest-runner, onnx, ...)
+# are extras and dropped; ninja/psutil are build tools regardless.
+#
+# py-opencv is conda-forge's name for the cv2 module; tools/make_wheel.py
+# maps it to PyPI's opencv-python for the sidecar.
+run_deps:
+  - addict
+  - numpy
+  - packaging
+  - pillow
+  - pyyaml
+  - yapf
+  - py-opencv >=3
+
+# mmcv/ops/csrc includes only torch headers and the CUDA runtime.
+host_deps:
+  - cuda-cudart-dev
+
+# setup.py imports psutil (guarded) to size MAX_JOBS when the env leaves it
+# unset; ours is always set, so it is not needed. ninja comes from the recipe.
+build_deps: []
+
+carry: complete   # conda-forge has no mmcv 1.x; nothing to shadow
+
+verify:
+  import: mmcv
+  # nms and roi_align are two of mmcv's own CUDA kernels (csrc/pytorch/cuda/
+  # nms_cuda.cu, roi_align_cuda.cu) reached through mmcv._ext, so a mis-arch'd
+  # build fails with cudaErrorNoKernelImageForDevice here.
+  op: |
+    import torch, mmcv
+    from mmcv.ops import nms, roi_align
+    boxes = torch.tensor([[0., 0., 10., 10.], [1., 1., 11., 11.], [50., 50., 60., 60.]],
+                         device="cuda")
+    scores = torch.tensor([0.9, 0.8, 0.7], device="cuda")
+    dets, keep = nms(boxes, scores, 0.5)
+    assert keep.numel() == 2, keep
+    feat = torch.arange(64., device="cuda").view(1, 1, 8, 8)
+    rois = torch.tensor([[0., 0., 0., 4., 4.]], device="cuda")
+    out = roi_align(feat, rois, (2, 2), 1.0, 2, "avg", True)
+    assert out.shape == (1, 1, 2, 2) and torch.isfinite(out).all(), out
+    # Config.pretty_text is the yapf-at-import path -- the reason yapf is a
+    # runtime dep and not a build tool here.
+    assert "a=1" in mmcv.Config(dict(a=1)).pretty_text.replace(" ", "")

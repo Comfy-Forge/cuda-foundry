@@ -1,0 +1,75 @@
+name: flex-gemm
+pypi_name: flex_gemm
+import_name: flex_gemm
+# pyproject.toml [project] version = "1.0.0" (static); setup.py adds nothing.
+version: "1.0.0"
+
+# MIT, read from the repo's own LICENSE at the pinned rev.
+license: MIT
+homepage: https://github.com/JeffreyXiang/FlexGEMM
+summary: FlexGEMM, sparse convolution backend for TRELLIS-family node packs, compiled against the conda-torch channel
+
+source_repo: JeffreyXiang/FlexGEMM
+# The farm pins this commit directly (upstream has no release tags).
+source_rev: 6dd94a859c26ee8246888502eada3dd8ad85532e
+clone_recursive: false            # no .gitmodules; the farm's `true` was a no-op
+patch_script: packages/flex-gemm/patches/flex_gemm.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: six .cu (hash, serialize, grid_sample,
+# three spconv neighbour-map kernels) and one ext.cpp; no heavy tail.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# pyproject.toml dependencies: torch>=2.4.0, triton (triton-windows on
+# Windows), filelock. Read against the imports:
+#   filelock   flex_gemm/utils/autotuner.py (the autotune cache lock)
+#   triton     flex_gemm/kernels/__init__.py does `from . import triton`
+#              unconditionally; the GEMMs themselves are Triton kernels.
+#   numpy      the farm carried `extra_deps: numpy`; nothing under flex_gemm/
+#              imports it (grep -rn "import numpy" is empty). Not carried.
+#
+# triton is NOT listed, on purpose, and this is a real limitation to know
+# about rather than an omission. tools/make_wheel.py treats triton as part of
+# the torch family (TORCH_NAMES) and never advertises it, because the torch
+# a consumer installs already pins the triton that goes with it -- on Linux,
+# conda-torch's pytorch 2.8 cuda128 depends on `triton ==3.4.0` and the conda
+# package inherits that transitively, exactly like torch itself. On win-64
+# there is no triton anywhere in conda (conda-forge builds it for linux only,
+# and there is no triton-windows package), so listing it would make every
+# win-64 cell UNSAT, while leaving it out means `import flex_gemm` on a
+# win-64 conda env needs a PyPI `triton-windows` installed beside it. That
+# is the same contract the farm's wheel has (`triton-windows>=3.2.0;
+# platform_system == "Windows"` in its sidecar) and it is the honest one.
+run_deps:
+  - filelock
+
+# hilbert.h includes <cuda.h> and <cuda_runtime.h>; nothing else from the
+# toolkit. The farm's `extra_cuda_components: cufft_dev nvtx` was copied from
+# a sibling: no source under flex_gemm/kernels/cuda includes cufft or nvtx.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: flex_gemm
+  # z_order_encode runs flex_gemm's own serialisation kernel
+  # (kernels/cuda/serialize/api.cu) on CUDA, and the same function has a CPU
+  # path -- so the check is CUDA-vs-CPU equality, not shape. A mis-arch'd
+  # build fails here with cudaErrorNoKernelImageForDevice. `import flex_gemm`
+  # itself needs a GPU (utils.load_autotune_cache reads the device name).
+  op: |
+    import torch
+    from flex_gemm.ops.serialize import encode_seq
+    coords = torch.stack(torch.meshgrid(torch.arange(2), torch.arange(4), torch.arange(4),
+                                        torch.arange(4), indexing="ij"), -1).reshape(-1, 4).int()
+    shape = torch.Size([2, 8, 4, 4, 4])
+    on_gpu = encode_seq(coords.cuda(), shape, "z_order").cpu()
+    on_cpu = encode_seq(coords, shape, "z_order")
+    assert torch.equal(on_gpu, on_cpu), (on_gpu[:8], on_cpu[:8])
+    assert on_gpu.unique().numel() == coords.shape[0], "codes are not a bijection"

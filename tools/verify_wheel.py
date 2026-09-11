@@ -158,9 +158,15 @@ def verify(path: Path, args, tmp: Path) -> bool:
         # ---- and they are the SAME dependencies as the conda package --------
         if args.conda:
             cdeps = conda_run_deps(Path(args.conda))
+            # The conda names are translated through the SAME table
+            # make_wheel.py used to write the sidecar (py-opencv ->
+            # opencv-python, matplotlib-base -> matplotlib), so the two
+            # sides are compared in one namespace. A second, private copy of
+            # that mapping here is exactly the kind of thing that drifts.
+            from make_wheel import CONDA_TO_PYPI
             def norm(s):
                 n = re.split(r"[<>=!~\s;\[]", s.strip())[0].lower()
-                return {"pillow": "pillow"}.get(n, n)
+                return CONDA_TO_PYPI.get(n, n).lower()
             cnames = {norm(d) for d in cdeps}
             cnames -= {n.lower() for n in TORCH_NAMES}
             # conda's run: legitimately carries things a wheel cannot express

@@ -1,0 +1,99 @@
+name: detectron2
+pypi_name: detectron2
+import_name: detectron2
+# setup.py get_version() reads `__version__ = "0.6"` out of detectron2/__init__.py
+# and appends D2_VERSION_SUFFIX only when set. The built wheel therefore carries
+# exactly 0.6 (two components, not 0.6.0) and make_wheel.py gates on agreement.
+version: "0.6"
+
+# Apache-2.0, read from the repo's own LICENSE at the pinned rev.
+license: Apache-2.0
+homepage: https://github.com/facebookresearch/detectron2
+summary: FAIR's detection and segmentation platform, compiled against the conda-torch channel
+
+source_repo: facebookresearch/detectron2
+# v0.6, dereferenced to the commit (git ls-remote --tags, 2026-09-11).
+source_rev: d1e04565d3bec8719335b88be9e9b961bf3ec464
+clone_recursive: false            # no .gitmodules at v0.6
+patch_script: packages/detectron2/patches/detectron2.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels. Six .cu (nms_rotated, ROIAlignRotated,
+# deformable conv v1/v2, cocoeval, box_iou_rotated) plus the CPU halves; no
+# CUTLASS, no heavy tail, so the farm's standard pair is comfortable.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies: upstream's install_requires, CURATED ──────────────────
+# setup.py v0.6 install_requires, minus two entries and plus two:
+#   - black==21.4b2      a code formatter, exact-pinned to a 2021 beta. Its
+#                        only use is `import black` INSIDE LazyConfig.to_py()
+#                        (detectron2/config/lazy.py:353), a lazy import in a
+#                        debugging helper -- not an import-time need, and a
+#                        pin no modern environment can satisfy beside anything
+#                        else. Dropped, as the farm's curated list did.
+#   - dataclasses; python_version<'3.7'   a stdlib backport for pythons this
+#                        repo does not build. Dropped.
+#   + numpy              imported by 45 modules; upstream leaves it to torch.
+#   + torchvision        detectron2.layers.roi_align / nms wrap torchvision.ops
+#                        (six modules import it). Upstream deliberately does
+#                        not declare it ("user should install torch/torchvision
+#                        themselves"); here the channel HAS a flavour-locked
+#                        torchvision for every cell, so the conda package can
+#                        say so. make_wheel.py strips it from the sidecar with
+#                        the rest of the torch family, exactly like torch.
+# Extras (shapely, pygments, psutil, panopticapi @ URL) are extras and dropped.
+#
+# matplotlib-base rather than matplotlib: the conda-forge `matplotlib`
+# metapackage drags pyqt in; the library detectron2 imports is the -base one.
+# tools/make_wheel.py maps it back to PyPI's `matplotlib` for the sidecar.
+run_deps:
+  - numpy
+  - pillow >=7.1
+  - matplotlib-base
+  - pycocotools >=2.0.2
+  - termcolor >=1.1
+  - yacs >=0.1.8
+  - tabulate
+  - cloudpickle
+  - tqdm >4.29.0
+  - tensorboard
+  - fvcore >=0.1.5,<0.1.6
+  - iopath >=0.1.7,<0.1.10
+  - future
+  - pydot
+  - omegaconf >=2.1
+  - hydra-core >=1.1
+  - torchvision
+
+# detectron2/layers/csrc includes only torch headers and the CUDA runtime
+# (<cuda_runtime.h>, <ATen/cuda/...>); no CUDA library headers.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: detectron2
+  # nms_rotated is one of detectron2's own CUDA kernels (csrc/nms_rotated/
+  # nms_rotated_cuda.cu), reached through detectron2._C -- so a mis-arch'd
+  # build fails here with cudaErrorNoKernelImageForDevice rather than passing
+  # a bare import. The two overlapping boxes must collapse to one.
+  op: |
+    import torch
+    from detectron2.layers import nms_rotated
+    boxes = torch.tensor([[10., 10., 20., 20., 0.], [10., 10., 20., 20., 5.],
+                          [60., 60., 10., 10., 0.]], device="cuda")
+    scores = torch.tensor([0.9, 0.8, 0.7], device="cuda")
+    keep = nms_rotated(boxes, scores, 0.5)
+    assert keep.numel() == 2, keep
+    # and the other big kernel family, deformable conv (csrc/deformable/)
+    from detectron2.layers import DeformConv
+    conv = DeformConv(4, 4, kernel_size=3, padding=1).cuda()
+    x = torch.randn(1, 4, 8, 8, device="cuda")
+    offset = torch.zeros(1, 18, 8, 8, device="cuda")
+    y = conv(x, offset)
+    assert y.shape == x.shape and torch.isfinite(y).all(), y.shape
