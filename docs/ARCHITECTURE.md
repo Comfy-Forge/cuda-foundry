@@ -15,8 +15,8 @@ both the conda package and the published wheel:
 ```
 pip wheel .                      ← ONE compile, in the conda env, against conda torch
   ├─ pip install <whl> → $PREFIX → rattler-build packages it → .conda
-  ├─ auditwheel repair <whl>                                 → manylinux wheel
-  └─ METADATA from the same dep list                         → PEP 658 sidecar
+  ├─ auditwheel repair <whl>                                 → manylinux wheel (root index)
+  └─ same wheel, curated Requires-Dist in METADATA           → /deps/ twin + PEP 658 sidecar
 ```
 
 This is coherent because a conda package must **not** vendor its shared
@@ -234,6 +234,44 @@ build tool as a runtime dependency. Conda's `build_deps` / `host_deps` /
 `run_deps` split is what stops that recurring — the wheel farm's single
 `extra_deps` field is how `psutil`, a `setup_requires`, came to be declared as
 a runtime dependency of flash-attn.
+
+### Two files per wheel, and why
+
+The published wheel's dependency list lives in **two files with one name**:
+
+| release | file | METADATA `Requires-Dist` | sidecar |
+|---|---|---|---|
+| `<subdir>` | `<name>.whl` | none | none |
+| `<subdir>-deps` | `<name>.whl` | package.yml `run_deps`, translated (`make_wheel.py`) | `<name>.whl.metadata`, byte-identical to that METADATA |
+
+The root index links the first, `/deps/` the second, with the sidecar's sha256
+in `data-core-metadata`. `make_wheel.py` produces the twin by rewriting
+METADATA and RECORD of the stripped wheel and nothing else; `verify_wheel.py`
+fails a twin that differs in any other member, a sidecar that differs from
+the twin's METADATA by a byte, or a sidecar beside the root wheel.
+
+This replaces the original one-file design ("the same wheels, two sidecar
+policies") for a measured reason. PEP 658 says the sidecar and the wheel's
+METADATA "MUST be identical", and pip 26.2.1 enforces it
+(`_check_sidecar_matches_wheel`: Name, Version, Requires-Dist,
+Requires-Python, Provides-Extra): `tools/clean_verify.py` found every wheel
+whose sidecar declared a dependency refused from `/deps/` with "has
+inconsistent Requires-Dist between its PEP 658 .metadata file and the wheel's
+METADATA", and only dependency-free wheels installing. uv 0.11/0.12 accepted
+the mismatch, which is why the defect was invisible to a uv-based consumer.
+Two *release tags* rather than two asset names because pip derives a link's
+filename from the URL's last path component, not from the anchor text, so
+the twin must be served under the canonical `*.whl` name and a flat release
+cannot hold that name twice. Proven on torchvision 0.23.0 from a local index
+built by `generate_index.py --local-assets`: `pip download` from `/deps/`
+resolves numpy and pillow and from the root yields a wheel with zero
+`Requires-Dist`; `uv pip compile` agrees on both.
+
+Wheels published before the twin existed are listed in `/deps/` against
+their root file with nothing advertised -- an honest "no dependencies"
+rather than an advertised sidecar pip would refuse -- until the rebuild wave
+(or `make_wheel.deps_variant_of`, which repackages a published wheel plus its
+old sidecar into the twin) fills the `<subdir>-deps` release.
 
 A correction, because an earlier version of this paragraph used mmcv's `yapf`
 as the second example: it is not one. mmcv 1.7.2's `mmcv/utils/config.py`

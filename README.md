@@ -7,17 +7,24 @@ Compiles the CUDA extensions ComfyUI node packs depend on — `flash-attn`,
 | output | served at | who consumes it |
 |---|---|---|
 | **conda channel** — `.conda` packages, dependencies declared, shared libraries dynamically linked | `comfy-forge.github.io/cuda-foundry` | pixi / conda, comfy-env's solver |
-| **PyPI index** — manylinux wheels, no `Requires-Dist` advertised | `comfy-forge.github.io/pypi-cuda-wheels` | direct-URL installs, which must not let a resolver chase dependencies |
-| **PyPI index, `/deps/`** — the *same* wheels, advertising their PEP 658 `.metadata` sidecars | `comfy-forge.github.io/pypi-cuda-wheels/deps` | a plain `pip install` that needs dependencies resolved |
+| **PyPI index** — manylinux wheels with **no** `Requires-Dist` inside and no sidecar (release `<subdir>`) | `comfy-forge.github.io/pypi-cuda-wheels` | direct-URL installs, which must not let a resolver chase dependencies |
+| **PyPI index, `/deps/`** — each wheel's *twin*: same filename, the curated `Requires-Dist` written into its METADATA, a PEP 658 `.metadata` sidecar byte-identical to it (release `<subdir>-deps`) | `comfy-forge.github.io/pypi-cuda-wheels/deps` | a plain `pip install` that needs dependencies resolved |
 
 The existing `cuda-wheels` index is untouched and keeps serving: comfy-env
 points at it today, and nothing here breaks that. `pypi-cuda-wheels` is this
 repo's own publishing target, and a cutover — if it happens — is a one-line
 change in comfy-env made deliberately, not a side effect of building.
 
-The two PyPI trees are the same files. They differ only in whether the index
-advertises `data-core-metadata`, which is what decides if pip fetches the
-sidecar. Nothing is built twice and the trees cannot drift in content.
+The two PyPI trees serve **two files per wheel, repackaged from one compile**:
+`make_wheel.py` writes the stripped wheel and then rewrites nothing but its
+METADATA and RECORD to make the `/deps/` twin, and `verify_wheel.py` asserts
+the two differ in nothing else. Two files rather than one file with a
+dependency-bearing sidecar, because PEP 658 says the sidecar and the wheel's
+METADATA *must be identical* and pip enforces it (measured: pip 26 refuses
+every wheel whose sidecar declared what its METADATA did not; uv tolerated
+it). Two release tags rather than two asset names, because pip takes a link's
+filename from the URL's last path component, so the twin has to be reachable
+under the canonical `*.whl` name. Nothing is compiled twice.
 
 A cell is one `(package, torch, cuda, python, platform)` combination.
 
