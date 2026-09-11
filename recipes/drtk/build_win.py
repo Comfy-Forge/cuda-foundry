@@ -833,7 +833,13 @@ def main() -> int:
         # A cmake-driven package's setup.py appends CUW_CMAKE_ARGS to its
         # cmake invocation (natten's patch does); torch-driven packages never
         # read it.
-        os.environ["CUW_CMAKE_ARGS"] = f"-DCMAKE_CUDA_COMPILER_LAUNCHER={ccache}"
+        # Forward slashes: the package splits this with shlex, whose POSIX
+        # mode eats backslashes -- run 34594384432 handed cmake
+        # `D:a_tempccache-binccache.exe` and ninja died with "CreateProcess
+        # failed: The system cannot find the file specified" on the first TU
+        # of every shard. cmake takes forward slashes natively.
+        os.environ["CUW_CMAKE_ARGS"] = (
+            f"-DCMAKE_CUDA_COMPILER_LAUNCHER={Path(ccache).as_posix()}")
         log(f"=== CUW_CMAKE_ARGS={os.environ['CUW_CMAKE_ARGS']}")
         subprocess.run([ccache, "-z"], capture_output=True)
 
