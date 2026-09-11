@@ -139,7 +139,7 @@ def build_pe(dest: Path, imports: list[str], linker=(14, 44)) -> None:
 
 
 def make_conda(out: Path, tree: Path, index: dict, about: dict, corrupt_hash: str | None = None,
-               extra_declared: list[str] | None = None) -> Path:
+               extra_declared: list[str] | None = None, licence: bool = True) -> Path:
     """Package `tree` (payload files) as <name>-<version>-<build>.conda."""
     entries = []
     for p in sorted(tree.rglob("*")):
@@ -157,6 +157,9 @@ def make_conda(out: Path, tree: Path, index: dict, about: dict, corrupt_hash: st
     info = tree.parent / "info-src"
     shutil.rmtree(info, ignore_errors=True)
     (info / "info").mkdir(parents=True)
+    if licence:
+        (info / "info" / "licenses").mkdir()
+        (info / "info" / "licenses" / "LICENSE").write_text("MIT\n")
     (info / "info" / "index.json").write_text(json.dumps(index))
     (info / "info" / "about.json").write_text(json.dumps(about))
     (info / "info" / "paths.json").write_text(json.dumps({"paths": entries, "paths_version": 1}))
@@ -184,12 +187,19 @@ def make_prefix(root: Path, packages: dict[str, list[str]]) -> Path:
     shutil.rmtree(root, ignore_errors=True)
     (root / "conda-meta").mkdir(parents=True)
     for name, files in packages.items():
+        names = [f.split("->", 1)[0] for f in files]
         (root / "conda-meta" / f"{name}-1.0-h0_0.json").write_text(
-            json.dumps({"name": name, "version": "1.0", "build": "h0_0", "files": files}))
+            json.dumps({"name": name, "version": "1.0", "build": "h0_0", "files": names}))
         for f in files:
-            p = root / f
+            # "lib/x.so->../targets/x86_64-linux/lib/x.so" makes a symlink, the
+            # layout conda-forge's CUDA packages actually have.
+            rel, _, target = f.partition("->")
+            p = root / rel
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_bytes(b"")
+            if target:
+                p.symlink_to(target)
+            else:
+                p.write_bytes(b"")
     return root
 
 
@@ -456,6 +466,48 @@ def main() -> int:
     ok, out = run_verify(good, tmp, **dict(common, dep_prefix=td / "empty-prefix"))
     check(not ok and fails_on(out, "holds an installed closure"),
           "(f/j) a --dep-prefix with no conda-meta FAILS rather than resolving nothing")
+
+    # ---- licence text, pypi_project ----------------------------------------
+    ok, out = run_verify(make_conda(td / "out-lic", good_tree(td / "lic"), base_index(), base_about(),
+                                    licence=False), tmp, **common)
+    check(not ok and fails_on(out, "info/licenses/"),
+          "an artifact with no info/licenses/ FAILS")
+    vc.PACKAGE_CFG_OVERRIDE["fx"] = {"pypi_project": "fx"}
+    ok, out = run_verify(good, tmp, **common)
+    check(not ok and fails_on(out, "pypi_project"),
+          "package.yml pypi_project set but about.extra.pypi_project absent FAILS")
+    ok, out = run_verify(make_conda(td / "out-proj", good_tree(td / "proj"), base_index(),
+                                    base_about(pypi_project="fx")), tmp, **common)
+    check(ok, "...and PASSES when about.extra records the same project (no purls key needed)")
+    vc.PACKAGE_CFG_OVERRIDE.clear()
+
+    # ---- symlink attribution (rattler-build 0.75's own check gets this wrong)
+    # conda-forge's cuda-cudart owns lib/libcudart.so.12 as a SYMLINK into
+    # targets/x86_64-linux/lib/, where cuda-cudart_linux-64 owns the real
+    # file. A package declaring `cuda-cudart` is neither overdepending nor
+    # underlinked: the declared name is credited with the real file through
+    # the symlink AND through the _linux-64 split.
+    sym_prefix = make_prefix(td / "prefix-sym", {
+        "pytorch": ["lib/python3.12/site-packages/torch/lib/libc10.so"],
+        "cuda-cudart": ["lib/libcudart.so.12->../targets/x86_64-linux/lib/libcudart.so.12"],
+        "cuda-cudart_linux-64": ["targets/x86_64-linux/lib/libcudart.so.12"],
+        "libstdcxx": ["lib/libstdc++.so.6"],
+        "libgcc": ["lib/libgcc_s.so.1"],
+    })
+    ok, out = run_verify(good, tmp, **dict(common, dep_prefix=sym_prefix))
+    check(ok, "a declared cuda-cudart whose lib/libcudart.so.12 is a symlink into the "
+              "_linux-64 split is credited with the real file: no overdepending, no underlinking")
+    if not ok:
+        print(out)
+    split_only = make_prefix(td / "prefix-split", {
+        "pytorch": ["lib/python3.12/site-packages/torch/lib/libc10.so"],
+        "cuda-cudart": [],
+        "cuda-cudart_linux-64": ["lib/libcudart.so.12"],
+        "libstdcxx": ["lib/libstdc++.so.6"],
+        "libgcc": ["lib/libgcc_s.so.1"],
+    })
+    ok, out = run_verify(good, tmp, **dict(common, dep_prefix=split_only))
+    check(ok, "...and where the split package owns the file outright, the metapackage is still credited")
 
     # ---- win-64: PE linker version and import resolution ------------------
     def win_tree(root: Path, imports, linker=(14, 44)) -> Path:

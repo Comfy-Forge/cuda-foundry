@@ -489,6 +489,25 @@ def verify(path: Path, args, tmp: Path) -> bool:
               f"every paths.json sha256/size matches the payload ({checked_hash} files; "
               f"mismatches: {bad_hash[:3]})")
 
+    # ---- the licence travels with the binary --------------------------------
+    # An artifact redistributing compiled upstream code carries the upstream
+    # licence text under info/licenses/ (recipe about.license_file). A
+    # package with no licence file is not publishable; an artifact with none
+    # means the recipe forgot, and this is where that is caught.
+    lic = [p for p in (root / "info" / "licenses").rglob("*") if p.is_file()] \
+        if (root / "info" / "licenses").is_dir() else []
+    rep.check(bool(lic), f"info/licenses/ carries the licence text ({len(lic)} file(s))")
+    # The PyPI identity is a claim (tools/fragment.py turns it into the purl
+    # pixi's conda->pypi map reads). It is stated in package.yml
+    # `pypi_project` and recorded in about.extra; index.json carries no
+    # `purls` key and is not asked for one. The two statements must agree.
+    if cfg:
+        want_proj = str(cfg.get("pypi_project") or "").strip()
+        got_proj = str((about.get("extra") or {}).get("pypi_project") or "").strip()
+        rep.check(want_proj == got_proj,
+                  f"about.extra.pypi_project ({got_proj!r}) agrees with package.yml pypi_project "
+                  f"({want_proj!r}); a purl is emitted iff it is set")
+
     # ---- dist-info hygiene (conda-torch's lessons) -------------------------
     rec = [n for n in files if n.endswith(".dist-info/RECORD")]
     rep.check(not rec, "no RECORD in dist-info (pip uninstall would delete conda's files)")
