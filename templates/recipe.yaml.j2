@@ -107,6 +107,15 @@ build:
       # wrong build.
       CUW_SHARD_SOURCES: << shard_sources | join(";") | tojson >>
 <%- endif %>
+<%- if build_subdir %>
+      # package.yml `build_subdir`: the directory INSIDE the source tree that
+      # holds the setup.py to build. Some upstreams keep the extension in a
+      # subdirectory of a larger repo (pointnet2_ops_lib/ inside
+      # Pointnet2_PyTorch, whose root setup.py is the training code). The
+      # matrix has carried this field since the port and nothing read it, so
+      # `pip wheel .` ran at the root and built the wrong project.
+      CUW_BUILD_SUBDIR: << build_subdir | tojson >>
+<%- endif %>
       # Where the ONE compile leaves its wheel. Outside the work dir and
       # outside $PREFIX, because rattler-build deletes the first and packages
       # the second -- the caller collects the wheel here after the build and

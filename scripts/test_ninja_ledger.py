@@ -93,6 +93,7 @@ def main() -> int:
         check(cuda == ["D:/a/work/ssim.cu"],
               f"only the cuda_compile edge counts as an nvcc TU (got {cuda})")
 
+    failures += continuation_and_fallback_checks()
     failures += partition_checks()
     failures += stats_checks()
     failures += stub_checks()
@@ -104,6 +105,63 @@ def main() -> int:
         return 1
     print("all checks passed")
     return 0
+
+
+def continuation_and_fallback_checks() -> list:
+    """Two ways a real build file differs from the fixture above.
+
+    ccimport (cumm, spconv) writes its build.ninja through ninja_syntax.Writer,
+    which wraps long edges at 78 columns with a trailing `$` -- so the first
+    input of an edge sits on the NEXT line, and a line-at-a-time parser reads
+    the rule name as the source. And torch's BuildExtension overwrites ONE
+    build.ninja per extension in a shared build_temp while .ninja_log there
+    accumulates: for a four-extension package only the last extension's edges
+    survive, so the object path is the only record left for the other three.
+    Both used to produce a ledger that was non-empty and WRONG, which no gate
+    downstream can tell from a correct one.
+    """
+    bw = load()
+    failures: list = []
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "csrc" / "cuda").mkdir(parents=True)
+        (root / "csrc" / "scatter.cpp").write_text("int a;\n")
+        (root / "csrc" / "cuda" / "scatter_cuda.cu").write_text("int b;\n")
+        (root / "csrc" / "version.cpp").write_text("int c;\n")
+        (root / "gen" / "src").mkdir(parents=True)
+        (root / "gen" / "src" / "long_name_component_number_one.cc").write_text("int d;\n")
+        bdir = root / "build" / "temp.win-amd64-cpython-312" / "Release"
+        bdir.mkdir(parents=True)
+        # The surviving build.ninja: the LAST extension (version), plus a
+        # ccimport-style wrapped edge whose input is on a continuation line.
+        (bdir / "build.ninja").write_text(
+            "rule compile\n  command = cl $in /Fo$out\n"
+            f"build {bdir}/csrc/version.obj: compile {root}/csrc/version.cpp\n"
+            f"build {bdir}/gen/objs/long_name_component_number_one.o: $\n"
+            f"    core_cc_cxx_compiler__cc $\n"
+            f"    {root}/gen/src/long_name_component_number_one.cc | $\n"
+            f"    {root}/gen/include/x.h\n")
+        (bdir / ".ninja_log").write_text(
+            "# ninja log v6\n"
+            f"0\t1\t170\t{bdir}/csrc/scatter.obj\tabc\n"
+            f"0\t1\t170\t{bdir}/csrc/cuda/scatter_cuda.obj\tabc\n"
+            f"0\t1\t170\t{bdir}/csrc/version.obj\tabc\n"
+            f"0\t1\t170\t{bdir}/gen/objs/long_name_component_number_one.o\tabc\n"
+            f"0\t1\t170\t{bdir}/csrc/nowhere.obj\tabc\n")
+        units = [u.replace("\\", "/") for u in bw.ninja_translation_units(root)]
+        want_edge = f"{root}/csrc/version.cpp"
+        want_cont = f"{root}/gen/src/long_name_component_number_one.cc"
+        _check(failures, want_edge in units,
+               "the extension whose build.ninja survived maps through its edge")
+        _check(failures, want_cont in units and "core_cc_cxx_compiler__cc" not in " ".join(units),
+               f"a `$`-continued edge maps to its source, not its rule name (got {units})")
+        _check(failures, any(u.endswith("/csrc/scatter.cpp") for u in units)
+               and any(u.endswith("/csrc/cuda/scatter_cuda.cu") for u in units),
+               "objects whose build.ninja was overwritten map back through their path")
+        _check(failures, not any("nowhere" in u for u in units),
+               "an object with no source anywhere in the tree is NOT invented")
+        _check(failures, len(units) == 4, f"exactly the four real TUs (got {len(units)})")
+    return failures
 
 
 def tree_checks() -> list:

@@ -204,6 +204,16 @@ mkdir -p "$CUW_WHEELHOUSE"
 # be able to delete a tree.
 rm -f "$CUW_WHEELHOUSE"/*.whl
 
+# package.yml `build_subdir`: the setup.py to build is not at the source
+# root (pointnet2_ops lives in pointnet2_ops_lib/ inside a repo whose root
+# setup.py is the training code). Everything above is path-independent;
+# everything below runs where setup.py is.
+if [ -n "${CUW_BUILD_SUBDIR:-}" ]; then
+  [ -d "$SRC_DIR/$CUW_BUILD_SUBDIR" ] || { echo "::error::build_subdir '$CUW_BUILD_SUBDIR' does not exist under $SRC_DIR" >&2; exit 1; }
+  cd "$SRC_DIR/$CUW_BUILD_SUBDIR"
+  echo "=== building in subdir: $CUW_BUILD_SUBDIR"
+fi
+
 BUILD_RC=0
 $PYTHON "$RECIPE_DIR/nonet.py" -- $PYTHON -m pip wheel . --no-deps --no-build-isolation \
     --wheel-dir "$CUW_WHEELHOUSE" -vv || BUILD_RC=$?
@@ -213,6 +223,29 @@ HITS=$(printf '%s\n' "$STATS" | awk -F'\t' '$1 ~ /^(direct_cache_hit|preprocesse
 MISSES=$(printf '%s\n' "$STATS" | awk -F'\t' '$1 == "cache_miss" {n+=$2} END{print n+0}')
 COMPILED=$( [ -s "$CUW_LEDGER" ] && wc -l < "$CUW_LEDGER" || echo 0 )
 echo "=== ccache: $HITS hit(s) / $MISSES miss(es); ledger records $COMPILED compile(s)"
+
+# ---- a build with no nvcc translation unit at all -----------------------
+# The seat wrapper is both the ledger and the cache, and it sees nvcc only.
+# A package whose extension is C++ against the CUDA runtime -- cumm: 39 .cc
+# through g++, zero .cu -- never reaches it, so the ledger is empty and
+# ccache saw nothing, which reads exactly like "the wrapper never occupied
+# the seat". The two are told apart by EVIDENCE, not by a declaration:
+# ninja's own .ninja_log, the same record build_win.py reads for L3 on win-64
+# (that file is copied beside every recipe, so its parser is importable
+# here). If ninja compiled real translation units and NONE of them is a .cu,
+# there was nothing for the seat to see: the ninja TUs become the ledger and
+# the ccache assertions below are skipped as inapplicable. Anything else --
+# no ninja log, or a .cu among the ninja TUs -- leaves every assertion in
+# force, so this cannot excuse a wrapper that really did go missing.
+CUW_NO_NVCC_TU=0
+if [ "$BUILD_RC" -eq 0 ] && [ "$COMPILED" -eq 0 ] && [ "$((HITS + MISSES))" -eq 0 ]; then
+  NINJA_TUS=$($PYTHON "$RECIPE_DIR/build_win.py" --ninja-ledger "$PWD" "$CUW_LEDGER" 2>/dev/null || echo 0)
+  if [ "${NINJA_TUS:-0}" -gt 0 ]; then
+    CUW_NO_NVCC_TU=1
+    COMPILED=$NINJA_TUS
+    echo "=== ledger: no nvcc translation unit in this build; ninja compiled $NINJA_TUS C++ TU(s), recorded from .ninja_log"
+  fi
+fi
 
 case "$CUW_MODE" in
   shard)
@@ -227,7 +260,7 @@ case "$CUW_MODE" in
     # A shard that compiled nothing is not automatically wrong (its slice can
     # be empty), but a shard whose wrapper never ran at all is a real defect:
     # it would ship an empty cache and the link job would recompile the world.
-    if [ "$((HITS + MISSES))" -eq 0 ]; then
+    if [ "$((HITS + MISSES))" -eq 0 ] && [ "$CUW_NO_NVCC_TU" -eq 0 ]; then
       echo "::error::shard saw zero ccache lookups -- the wrapper never occupied the nvcc seat, or it stubbed out every translation unit (check CUW_SHARD_INDEX0 against CUW_SHARD_COUNT)" >&2
       exit 1
     fi
@@ -245,7 +278,7 @@ case "$CUW_MODE" in
     # ZERO tolerance, not a ratio. One miss is a whole TU recompiled, and a
     # percentage cannot tell "one nondeterministic TU" from "four shards built
     # for the wrong architecture".
-    if [ "$((HITS + MISSES))" -eq 0 ]; then
+    if [ "$((HITS + MISSES))" -eq 0 ] && [ "$CUW_NO_NVCC_TU" -eq 0 ]; then
       echo "::error::link job saw zero ccache lookups -- no shard cache was restored" >&2
       exit 1
     fi
