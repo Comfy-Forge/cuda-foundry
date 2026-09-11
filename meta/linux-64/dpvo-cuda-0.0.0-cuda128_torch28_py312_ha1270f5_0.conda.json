@@ -1,0 +1,45 @@
+{
+ "arch": "x86_64",
+ "build": "cuda128_torch28_py312_ha1270f5_0",
+ "build_number": 0,
+ "depends": [
+  "python",
+  "__cuda",
+  "pytorch 2.8.* cuda128_*",
+  "numpy",
+  "libstdcxx >=13",
+  "libgcc >=13",
+  "__glibc >=2.28,<3.0.a0",
+  "libcusparse >=12.5.10.65,<13.0a0",
+  "pytorch >=2.8.0,<2.9.0a0",
+  "libtorch >=2.8.0,<2.9.0a0",
+  "libcurand >=10.3.10.19,<11.0a0",
+  "cuda-cudart >=12.9.79,<13.0a0",
+  "libcufft >=11.4.1.4,<12.0a0",
+  "libcublas >=12.9.2.10,<13.0a0",
+  "python_abi 3.12.* *_cp312",
+  "libcusolver >=11.7.5.82,<12.0a0"
+ ],
+ "license": "MIT",
+ "md5": "202fca5df51d5da6455daf9b3fc43848",
+ "name": "dpvo-cuda",
+ "platform": "linux",
+ "provenance": {
+  "arch_list": "7.0 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "12.8",
+  "prebuilt_wheel_used": false,
+  "run_id": "34585920326",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34585920326",
+  "source_rev": "859bbbfdac6c6185f345003b3c473901fcd13ace",
+  "torch_build": "cuda128_repack_py312_h2bed46fa_7"
+ },
+ "purls": [
+  "pkg:pypi/dpvo_cuda@0.0.0"
+ ],
+ "sha256": "880e748489f81f38d1f14ad6d459adf3fb18eb5616fd235da31b9751ec368dbc",
+ "size": 3199873,
+ "subdir": "linux-64",
+ "timestamp": 1789120879331,
+ "version": "0.0.0"
+}
