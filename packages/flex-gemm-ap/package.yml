@@ -8,6 +8,16 @@ version: "1.0.0"
 license: MIT
 homepage: https://github.com/PozzettiAndrea/FlexGEMM-ap
 summary: FlexGEMM-ap, the renamed FlexGEMM fork the ap node packs import as flex_gemm_ap, compiled against the conda-torch channel
+repository: https://github.com/PozzettiAndrea/FlexGEMM-ap
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no flex_gemm_ap project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: PozzettiAndrea/FlexGEMM-ap
 # A fork of JeffreyXiang/FlexGEMM with the package renamed to flex_gemm_ap so it
@@ -28,31 +38,43 @@ nvcc_threads: 1
 # pyproject.toml dependencies: torch>=2.4.0, triton (triton-windows on
 # Windows), filelock. Read against the imports:
 #   filelock   flex_gemm_ap/utils/autotuner.py (the autotune cache lock)
-#   triton     flex_gemm_ap/kernels/__init__.py does `from . import triton`
-#              unconditionally; the GEMMs themselves are Triton kernels.
+#   triton     flex_gemm_ap/kernels/__init__.py:1 does `from . import triton`
+#              unconditionally, and every kernels/triton module imports triton
+#              at load; the GEMMs themselves are Triton kernels. So it IS a
+#              run dep, and it is declared for linux, where conda-forge and
+#              conda-torch both ship it (conda-torch's pytorch already pins the
+#              matching `triton ==x.y.z`; naming it here makes the metadata say
+#              what the import does instead of relying on that transitively).
+#              tools/make_wheel.py still treats triton as part of the torch
+#              family (TORCH_NAMES) and never advertises it in the sidecar.
+#
+#              win-64: NO conda channel has a triton for it (conda-forge builds
+#              linux only; conda-torch has none; PyPI's triton-windows is not
+#              something a conda run: list can name -- measured 2026-09-11,
+#              `pixi search triton` on win-64 finds only tritonclient). An
+#              unconditional `triton` would make every win-64 cell UNSAT, and
+#              a win-64 .conda WITHOUT it would install and then fail on
+#              `import flex_gemm_ap` -- a solve that succeeds and an import that
+#              fails, which is the one outcome this repo refuses to publish.
+#              So the win-64 CONDA is not published at all (conda_platforms
+#              below); the win-64 WHEEL is still built and still works, with
+#              PyPI's `triton-windows` beside it, exactly as the farm's did.
 #   numpy      the farm carried `extra_deps: numpy`; nothing under flex_gemm_ap/
 #              imports it (grep -rn "import numpy" is empty). Not carried.
-#
-# triton is NOT listed, on purpose, and this is a real limitation to know
-# about rather than an omission. tools/make_wheel.py treats triton as part of
-# the torch family (TORCH_NAMES) and never advertises it, because the torch
-# a consumer installs already pins the triton that goes with it -- on Linux,
-# conda-torch's pytorch 2.8 cuda128 depends on `triton ==3.4.0` and the conda
-# package inherits that transitively, exactly like torch itself. On win-64
-# there is no triton anywhere in conda (conda-forge builds it for linux only,
-# and there is no triton-windows package), so listing it would make every
-# win-64 cell UNSAT, while leaving it out means `import flex_gemm_ap` on a
-# win-64 conda env needs a PyPI `triton-windows` installed beside it. That
-# is the same contract the farm's wheel has (`triton-windows>=3.2.0;
-# platform_system == "Windows"` in its sidecar) and it is the honest one.
 run_deps:
   - filelock
+  - { if: linux, then: triton }
+
+# Where the .conda is PUBLISHED. The wheel is still built for every platform
+# in the matrix; only the conda artifact is withheld where its run: list
+# cannot be honest (see triton above). New field: the loader/matrix wiring is
+# S1's (scripts/), recorded here as the package's own statement.
+conda_platforms: [linux-64]
 
 # hilbert.h includes <cuda.h> and <cuda_runtime.h>; nothing else from the
 # toolkit. The farm's `extra_cuda_components: cufft_dev nvtx` was copied from
 # a sibling: no source under flex_gemm_ap/kernels/cuda includes cufft or nvtx.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 
@@ -60,6 +82,10 @@ carry: complete   # not on conda-forge; nothing to shadow
 
 verify:
   import: flex_gemm_ap
+  # `import flex_gemm_ap` reads the device name at import time
+  # (utils.load_autotune_cache -> torch.cuda.get_device_name), so the
+  # import itself cannot run on a GPU-less runner; only the op is checked.
+  import_needs_gpu: true
   # z_order_encode runs flex_gemm_ap's own serialisation kernel
   # (kernels/cuda/serialize/api.cu) on CUDA, and the same function has a CPU
   # path -- so the check is CUDA-vs-CPU equality, not shape. A mis-arch'd
