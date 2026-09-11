@@ -395,6 +395,65 @@ worth keeping written down because neither is about compilers:
   succeeded. `cygpath -u` on both the archive and the `-C` directory is the
   fix; the conversion is guarded on cygpath existing, so Linux is untouched.
 
+### When the translation units do not exist yet: `shard_partition: source`
+
+`shard_sources` assumes the translation units are files in the tarball. natten's
+are not: `setup.py` stamps ~144 CUTLASS kernel instantiations out of templates
+inside `build_ext`, and a glob evaluated before `pip wheel` matches nothing. So
+a package may instead declare `shard_partition: source`, meaning its own build
+reads `CUW_SHARD_INDEX` / `CUW_SHARD_COUNT` and compiles only its slice — on
+both platforms. natten's patched `setup.py` deletes every generated `.cu`
+outside its round-robin slice right after autogen, and the link job
+(`CUW_SHARD_COUNT=0`) builds the whole set.
+
+Three consequences, all *measured* on natten (linux-64 run 34587038137, win-64
+run 34595069482):
+
+- **Linux keeps the seat wrapper as a pure pass-through.** Its hash partition
+  is switched off in this mode; running both would compile the intersection,
+  ~1/N² of the tree per shard. The wrapper still caches and still ledgers every
+  TU: 158 shard ledger entries carried, `158 hit(s) / 0 miss(es)` in the link
+  job, shards between 16 and 48 minutes at `jobs: 1`.
+- **win-64 stubs nothing** and replaces the declared-set check with cache
+  accounting: in a shard, every nvcc TU ninja built must be a stored miss
+  (`misses == nvcc TUs`, and some); in the link job, zero misses as always.
+  Measured: `108 hit(s) / 0 miss(es) over 108 nvcc translation unit(s)`,
+  23 of 23 shard caches merged, shards between 10 and 49 minutes, and the
+  ledger written from ninja's log with 109 translation units (108 nvcc plus
+  `natten.cpp`). The Windows list is 108 TUs rather than Linux's 158
+  because the win-64 arch rows carry no sm_100 (below).
+- **cmake reaches ccache through a different door.** natten is CMake-driven and
+  never reads `PYTORCH_NVCC`. `build_win.py` exports
+  `CUW_CMAKE_ARGS=-DCMAKE_CUDA_COMPILER_LAUNCHER=<ccache.exe>` and the package's
+  `setup.py` appends it to its main configure. Deliberately an *argument*, not
+  the `CMAKE_CUDA_COMPILER_LAUNCHER` environment variable cmake also honours:
+  the environment variable initialises every `try_compile()` test project too,
+  so cmake's CUDA ABI probe went through ccache as well — `6 lookups for 5 nvcc
+  translation units` in every shard of run 34588033649 — and a probe lives in a
+  random `CMakeScratch/TryCompile-XXXXXX/` directory that no cache key matches
+  twice, so the link job could never reach zero misses. `try_compile` does not
+  propagate the launcher *variable* into its test project, so passing it as an
+  argument leaves the probe bare and the real targets cached — the same outcome
+  the Linux wrapper's probe bypass produces from the other side. The nvcc-TU
+  count is case-insensitive on the ninja rule name, because cmake spells its
+  rule `CUDA_COMPILER__<target>_...` where torch writes `cuda_compile`.
+
+Two other things the natten win-64 lane measured, neither about sharding:
+
+- **conda-torch's mirrored `_mkl_302` build has no `torch/include`.** The solver
+  prefers it (higher build number than the `_repack_*`), and it keeps every
+  header under `Library\include` with no `site-packages/torch/include` at all.
+  A CMakeLists that hardcodes `${TORCH_DIR}/include` then finds
+  `torch/extension.h` through `INCLUDE` and cannot find `<torch/all.h>`
+  (run 34587044404, every shard). `torch.utils.cpp_extension.include_paths()`
+  and `library_paths()` know the installed layout on both platforms.
+- **MSVC cannot parse natten's sm_100 FNA backward kernel** —
+  `sm100_fna_bwd_kernel_tma_warpspecialized.hpp(1772): error C2061: syntax
+  error: identifier 'PipelineState'` on 22 of 23 shards of run 34587897208.
+  Hence `arch_list_by_cuda_win` in `arch_override.yml`, read by
+  `generate_matrix.py` for win-64 cells only: the same rows without 10.0,
+  while linux-64 keeps Blackwell DC.
+
 ### What is NOT sharded on win-64, and why
 
 `sharding: 1` means one shard, not none, so on linux-64 every cell runs a
