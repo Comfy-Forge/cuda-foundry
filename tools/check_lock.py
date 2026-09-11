@@ -30,6 +30,40 @@ def load_known_bad() -> dict:
         return json.load(r)
 
 
+def fixed_by_problems(bad: dict, meta_dir: Path, assets_by_subdir: dict | None = None) -> list[str]:
+    """Every `fixed_by` this tool would print must name a build that EXISTS.
+
+    A user re-locks onto whatever this tool prints; a fixed_by that names a
+    build nobody published sends them to an UNSAT solve (known_bad.json once
+    named torchvision ..._2 while the channel carried _1 and _3). A .conda is
+    checked against the committed fragments under meta/<subdir>/ -- the same
+    data the channel is assembled from -- and a .whl against the subdir
+    release's asset list when one is supplied. A fixed_by that is itself
+    listed as known-bad is also a problem: the replacement must not be the
+    next defective build.
+    """
+    problems = []
+    for subdir, entries in bad.items():
+        if subdir.startswith("_"):
+            continue
+        for fn, info in entries.items():
+            fb = info.get("fixed_by")
+            if not fb:
+                problems.append(f"{subdir}/{fn}: no fixed_by")
+                continue
+            if fb in entries:
+                problems.append(f"{subdir}/{fn}: fixed_by {fb} is itself known-bad")
+            if fb.endswith(".conda"):
+                if not (meta_dir / subdir / f"{fb}.json").is_file():
+                    problems.append(f"{subdir}/{fn}: fixed_by {fb} has no fragment under meta/{subdir}/")
+            elif fb.endswith(".whl"):
+                if assets_by_subdir is not None and fb not in assets_by_subdir.get(subdir, set()):
+                    problems.append(f"{subdir}/{fn}: fixed_by {fb} is not an asset of the {subdir} release")
+            else:
+                problems.append(f"{subdir}/{fn}: fixed_by {fb!r} is neither a .conda nor a .whl")
+    return problems
+
+
 def main() -> int:
     paths = [Path(p) for p in sys.argv[1:]] or [Path("pixi.lock")]
     for p in paths:
