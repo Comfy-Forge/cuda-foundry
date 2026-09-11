@@ -30,6 +30,14 @@ package.yml build_subdir.
 
 5. Hardcoded -std=c++17 stripped (three sites) so torch selects the standard.
 
+6. The licence text. sageattention3_blackwell/ has no licence file of its
+   own, so the published artifact -- wheel dist-info and conda info/licenses
+   alike -- carried none. The repo-root LICENSE (Apache-2.0, the licence
+   setup.py's classifier claims) is copied beside the subproject's setup.py,
+   where setuptools' default license_files glob includes it in the wheel and
+   package.yml's license_files names it for the .conda. CUTLASS's BSD-3
+   LICENSE.txt is already carried in with the vendored tree (step 1).
+
 Every substitution asserts on its own.
 """
 import pathlib
@@ -58,6 +66,17 @@ def sub_once(text: str, old: str, new: str, what: str, path: str) -> str:
 root = pathlib.Path(".").resolve() / SUBDIR
 require((root / "setup.py").is_file() and (root / "sageattn3" / "api.py").is_file(),
         f"sageattn3: {SUBDIR}/ does not look like the sageattention3 project at this rev")
+
+# 6. licence -----------------------------------------------------------------
+repo_license = pathlib.Path("LICENSE")
+require(repo_license.is_file() and "Apache License" in repo_license.read_text(encoding="utf-8"),
+        "sageattn3: the repo-root LICENSE is missing or is no longer the Apache-2.0 text")
+sub_license = root / "LICENSE"
+if not sub_license.is_file() or sub_license.read_bytes() != repo_license.read_bytes():
+    shutil.copyfile(repo_license, sub_license)
+    print(f"sageattn3 patch: copied the repo's Apache-2.0 LICENSE -> {SUBDIR}/LICENSE")
+else:
+    print(f"sageattn3 patch: {SUBDIR}/LICENSE already in place")
 
 setup_file = root / "setup.py"
 content = setup_file.read_text()

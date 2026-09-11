@@ -8,9 +8,24 @@ version: "1.0.0"
 
 # Apache-2.0: the repo's LICENSE at the pinned rev, and setup.py's own
 # "License :: OSI Approved :: Apache Software License" classifier.
-license: Apache-2.0
+license: Apache-2.0 AND BSD-3-Clause
 homepage: https://github.com/thu-ml/SageAttention
 summary: SageAttention3, microscaling FP4 attention for Blackwell, compiled against the conda-torch channel
+repository: https://github.com/thu-ml/SageAttention
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# sageattention3_blackwell/ carries no licence of its own; the patch copies the
+# repo-root Apache-2.0 LICENSE beside its setup.py so the wheel's dist-info
+# and info/licenses both get it, and CUTLASS's BSD-3 comes with the tree the
+# patch vendors. Paths relative to the source root, not the build_subdir.
+license_files:
+  - sageattention3_blackwell/LICENSE
+  - sageattention3_blackwell/csrc/cutlass/LICENSE.txt
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no sageattn3 project (404, 2026-09-11).
+pypi_project: null
 
 # The SAME repo and rev as packages/sageattention. The buildable project is
 # the subdirectory sageattention3_blackwell/ (its own setup.py, its own
@@ -49,12 +64,13 @@ nvcc_threads: 1
 #              mean kernel. Part of the torch family here (see
 #              packages/sageattention/package.yml): supplied by conda-torch's
 #              pytorch on linux-64, absent from conda on win-64.
+#              Declared for linux so the metadata says what the import does.
 run_deps:
   - einops
   - packaging
+  - { if: linux, then: triton }
 
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 # Both extensions call cuTensorMapEncodeTiled (TMA) and link -lcuda; the
 # stub lives in cuda-driver-dev on linux-64 and inside cuda-cudart-dev_win-64
 # on win-64. Same arrangement, same reasoning, as packages/sageattention.
@@ -72,6 +88,12 @@ carry: complete   # not on conda-forge; nothing to shadow
 
 verify:
   import: sageattn3
+  # Both extensions link -lcuda for cuTensorMapEncodeTiled: libcuda.so.1 /
+  # nvcuda.dll is the driver, provided by __cuda and by no conda package
+  # (see host_deps_linux above); the DSO gate must not expect one.
+  allow_dso:
+    - libcuda.so.1
+    - nvcuda.dll
   # Blackwell only, by construction: the two modules carry sm_100a and
   # sm_120a cubins and no PTX (arch-conditional images have no
   # forward-compat tail to emit). The op therefore CANNOT run on the

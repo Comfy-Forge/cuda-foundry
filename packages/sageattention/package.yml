@@ -8,6 +8,16 @@ version: "2.2.0"
 license: Apache-2.0
 homepage: https://github.com/thu-ml/SageAttention
 summary: SageAttention 2.2, quantized attention kernels, compiled against the conda-torch channel
+repository: https://github.com/thu-ml/SageAttention
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (thu-ml/SageAttention); PyPI's last release is 1.0.6.
+pypi_project: sageattention
 
 source_repo: thu-ml/SageAttention
 # v2.2.0, dereferenced to the commit (git ls-remote --tags, 2026-09-11).
@@ -42,12 +52,25 @@ nvcc_threads: 1
 # transitively. On win-64 no conda triton exists at all (see flex-gemm's
 # package.yml for the same situation), so a win-64 conda environment needs
 # PyPI's triton-windows beside it -- the contract the farm's wheel has too.
-run_deps: []
+# Declared for linux so the metadata says what the import does (the pin
+# conda-torch's pytorch carries makes it a no-op for the solve).
+#
+#   cuda-cudart-dev  a RUNTIME dep, unusually: the Triton kernels core.py
+#                    imports (quant_per_block, attn_qk_int8_*) are compiled
+#                    on first use, and Triton builds their launcher stub as a
+#                    C extension that #includes <cuda.h> -- a header the
+#                    runtime package (cuda-cudart) does not carry -- so on a
+#                    GPU the dispatcher routes to Triton (sm_86, say) the
+#                    published artifact's sageattn() could not compile its
+#                    launcher (audit finding). tools/make_wheel.py maps it to
+#                    the nvidia-* PyPI name for the sidecar.
+run_deps:
+  - { if: linux, then: triton }
+  - cuda-cudart-dev
 
 # csrc/qattn and csrc/fused include only the CUDA runtime and torch headers,
 # plus <cuda.h> for the Hopper path.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 # _qattn_sm90 (Hopper, qk_int_sv_f8_cuda_sm90.cu) uses TMA and calls
 # cuTensorMapEncodeTiled, a DRIVER API entry point, so upstream links it with
@@ -84,6 +107,13 @@ carry: complete   # not on conda-forge; nothing to shadow
 
 verify:
   import: sageattention
+  # _qattn_sm90 records a DT_NEEDED on libcuda.so.1 (nvcuda.dll on win-64)
+  # for cuTensorMapEncodeTiled -- the driver, not a conda package; see the
+  # host_deps_linux note above. The DSO gate would otherwise refuse a
+  # library nothing in the run: list provides; it is provided by __cuda.
+  allow_dso:
+    - libcuda.so.1
+    - nvcuda.dll
   # The explicit CUDA entry point, not sageattn(): the auto-dispatcher routes
   # sm_86 (RTX 3090, the verifying GPU) to the Triton path and would exercise
   # no cubin this package ships. sageattn_qk_int8_pv_fp16_cuda runs the
