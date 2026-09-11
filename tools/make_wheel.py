@@ -45,6 +45,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(REPO / "tools"))
 
 # PyTorch's own manylinux baseline. Their wheels are manylinux_2_28 (they
 # build in AlmaLinux 8 containers), and our .conda artifacts compute a
@@ -97,11 +98,18 @@ EXPECTED_VENDORED = {
     "libavfilter", "libswscale", "libswresample",    # torchaudio's backends
 }
 
-# conda spec -> PyPI requirement. The names agree for everything these
-# packages declare, but they do NOT agree in general (conda's `pillow` is
-# PyPI's `pillow`, but conda has `pytorch` for PyPI's `torch`), so the
-# translation is explicit and anything unknown is passed through unchanged
-# rather than silently guessed at.
+# conda spec -> PyPI requirement, and the rule that NOTHING is guessed.
+#
+# The names agree for most of what these packages declare, but they do not
+# agree in general (conda's `pytorch` is PyPI's `torch`, conda-forge's
+# `py-opencv` is PyPI's `opencv-python`), and an unknown name used to be
+# passed through unchanged -- which is a guess that a resolver turns into
+# "No matching distribution found" on the user's machine. So every conda
+# name a sidecar may carry is in exactly one of four places: this explicit
+# translation, SAME_ON_PYPI (names checked against pypi.org/simple, 2026-09-11),
+# a sibling package this repo publishes (its pypi_name), or the package's own
+# `sidecar_omit` list for a dependency that has no PyPI counterpart and
+# is not needed for the wheel. Anything else is a hard error.
 CONDA_TO_PYPI = {
     "pytorch": "torch",
     "pillow": "pillow",
@@ -113,7 +121,107 @@ CONDA_TO_PYPI = {
     # library itself is matplotlib-base, and PyPI has only `matplotlib`
     # (detectron2).
     "matplotlib-base": "matplotlib",
+    "typing_extensions": "typing-extensions",
+    "huggingface_hub": "huggingface-hub",
+    "pyyaml": "PyYAML",
 }
+
+# The CUDA toolkit pieces a torch-free package (cumm, spconv) or a
+# runtime-JIT package (sageattention's NVRTC path) needs at RUN time. On
+# conda they are the toolkit's own packages; on PyPI NVIDIA publishes them
+# per CUDA major, suffixed -cu12 for the 12.x line and UNSUFFIXED for 13.x
+# (nvidia-cuda-runtime 13.0.x, checked 2026-09-11). The wheel's local tag
+# says which line the cell is, so the suffix follows the cell.
+CUDA_TO_PYPI = {
+    "cuda-cudart": "nvidia-cuda-runtime",
+    "cuda-cudart-dev": "nvidia-cuda-runtime",
+    "cuda-cccl": "nvidia-cuda-cccl",
+    "cuda-nvcc": "nvidia-cuda-nvcc",
+    "cuda-nvcc-tools": "nvidia-cuda-nvcc",
+    "cuda-nvrtc": "nvidia-cuda-nvrtc",
+    "cuda-nvrtc-dev": "nvidia-cuda-nvrtc",
+    "cuda-cupti": "nvidia-cuda-cupti",
+    "cuda-nvtx": "nvidia-nvtx",
+    "libcublas": "nvidia-cublas",
+    "libcufft": "nvidia-cufft",
+    "libcurand": "nvidia-curand",
+    "libcusolver": "nvidia-cusolver",
+    "libcusparse": "nvidia-cusparse",
+    "libnvjitlink": "nvidia-nvjitlink",
+    "libnvjpeg": "nvidia-nvjpeg",
+}
+
+# Names that ARE their PyPI project (normalised: PEP 503 folds `_` and `-`
+# and case). Every entry was checked to exist on pypi.org/simple.
+SAME_ON_PYPI = {
+    "numpy", "tqdm", "pccm", "ccimport", "sympy", "pycocotools", "termcolor",
+    "yacs", "tabulate", "cloudpickle", "tensorboard", "fvcore", "iopath",
+    "future", "pydot", "omegaconf", "hydra-core", "trimesh", "scipy", "einops",
+    "filelock", "triton", "jaxtyping", "rich", "packaging", "addict", "yapf",
+    "accelerate", "diffusers", "peft", "protobuf", "sentencepiece",
+    "transformers", "plyfile", "zstandard", "easydict", "fire", "lark",
+    "portalocker", "pybind11", "imageio", "networkx", "fsspec", "jinja2",
+    "setuptools", "psutil", "ninja", "scikit-image", "scikit-learn", "opencv-python",
+    "matplotlib", "pandas", "requests", "safetensors", "tokenizers", "timm",
+    "wheel", "cython", "pyparsing", "regex", "six", "attrs", "typeguard",
+}
+
+# conda-only: runtimes and virtual packages a wheel cannot express and never
+# needs to (the manylinux tag and the vendoring do that job).
+CONDA_ONLY = {"libgcc", "libgcc-ng", "libstdcxx", "libstdcxx-ng", "libzlib", "zlib",
+              "python", "python_abi", "cuda-version", "_openmp_mutex", "libgomp",
+              "libjpeg-turbo", "libpng", "libwebp-base", "libwebp"}
+
+
+def _sibling_names() -> dict[str, str]:
+    """conda name -> pypi_name for every package this repo publishes."""
+    out = {}
+    for p in sorted((REPO / "packages").glob("*/package.yml")):
+        try:
+            import yaml
+            d = yaml.safe_load(p.read_text()) or {}
+        except Exception:
+            continue
+        conda = d.get("conda_name") or (d.get("pypi_name") or d.get("name") or "").replace("_", "-")
+        if conda and d.get("pypi_name"):
+            out[conda] = d["pypi_name"]
+    return out
+
+
+def pypi_name_for(conda_name: str, cuda: str = "", sidecar_omit=(), strict: bool = True) -> str | None:
+    """The PyPI project for a conda dependency name; None = not advertised.
+
+    Raises SystemExit for a name in none of the tables -- the sidecar is a
+    promise to a resolver and a guessed name is a promise that fails on the
+    user's machine.
+    """
+    n = conda_name.strip()
+    if n.startswith("__") or n in CONDA_ONLY or n in sidecar_omit:
+        return None
+    if n in CONDA_TO_PYPI:
+        pypi = CONDA_TO_PYPI[n]
+    elif n in CUDA_TO_PYPI:
+        major = (cuda or "12").split(".")[0]
+        pypi = CUDA_TO_PYPI[n] + ("-cu12" if major == "12" else "")
+    elif n in SAME_ON_PYPI or n.replace("_", "-").lower() in SAME_ON_PYPI:
+        pypi = n
+    else:
+        siblings = _sibling_names()
+        if n in siblings:
+            pypi = siblings[n]
+        elif not strict:
+            pypi = n
+        else:
+            sys.exit(
+                f"make_wheel: run dep {conda_name!r} has no PyPI translation. Add it to "
+                f"CONDA_TO_PYPI / CUDA_TO_PYPI (name differs), SAME_ON_PYPI (name is the "
+                f"PyPI project -- check pypi.org/simple/<name>/ first), or the package's "
+                f"`sidecar_omit:` list with a reason (conda-only, not needed by the wheel). "
+                f"A guessed name is a Requires-Dist that fails on the user's machine.")
+    if pypi.lower() in TORCH_NAMES:
+        return None
+    return pypi
+
 
 # Never advertised as a wheel dependency, on either index. These wheels are
 # compiled against ONE exact (cuda, torch) ABI, and that fact lives only in
@@ -136,7 +244,7 @@ def local_tag(cuda: str, pytorch: str) -> str:
     return f"+cu{cuda.replace('.', '')}torch{pytorch}"
 
 
-def conda_spec_to_pep508(spec: str) -> str | None:
+def conda_spec_to_pep508(spec: str, cuda: str = "", sidecar_omit=()) -> str | None:
     """'pillow >=5.3.0' -> 'pillow>=5.3.0'. None if it must not be advertised.
 
     Conda separates name and constraint with whitespace; PEP 508 does not
@@ -151,10 +259,8 @@ def conda_spec_to_pep508(spec: str) -> str | None:
     # `cumm>=0.7.11,<0.8.0cuda128_*` -- a requirement no resolver can parse.
     parts = spec.strip().split(None, 2)
     name = parts[0]
-    if name.startswith("__"):          # virtual package (__cuda, __glibc)
-        return None
-    pypi = CONDA_TO_PYPI.get(name, name)
-    if pypi.lower() in TORCH_NAMES:
+    pypi = pypi_name_for(name, cuda, sidecar_omit)
+    if pypi is None:
         return None
     if len(parts) == 1:
         return pypi
@@ -494,10 +600,91 @@ def add_vendor_extra(root: Path, extra: list[tuple[str, Path]]) -> list[str]:
     return lines
 
 
+
+def check_compiler_provenance(wheel: Path) -> list[str]:
+    """Every extension module in the RAW wheel was compiled by conda-forge's gcc.
+
+    The same gate verify_conda applies to the .conda, applied here BEFORE
+    auditwheel touches the file: a translation unit that went through the
+    runner's /usr/bin/g++ (pyg-lib: its recipe clobbered NVCC_PREPEND_FLAGS
+    and nvcc's -ccbin fell back) is linked against the runner's libstdc++
+    headers and ABI, and auditwheel would happily vendor around it.
+    """
+    from verify_conda import COMMENT_CONDA_FORGE, COMMENT_SYSROOT
+    seen = []
+    with tempfile.TemporaryDirectory() as td:
+        with zipfile.ZipFile(wheel) as z:
+            for n in z.namelist():
+                if not n.endswith(".so") or ".libs/" in n:
+                    continue
+                p = Path(td) / Path(n).name
+                p.write_bytes(z.read(n))
+                out = subprocess.run(["readelf", "-p", ".comment", str(p)],
+                                     capture_output=True, text=True).stdout
+                entries = [m.strip() for m in re.findall(r"^\s*\[\s*[0-9a-fx]+\]\s+(.*)$", out, re.M)]
+                cf = [e for e in entries if COMMENT_CONDA_FORGE.match(e)]
+                foreign = [e for e in entries
+                           if not COMMENT_CONDA_FORGE.match(e) and not COMMENT_SYSROOT.match(e)]
+                if foreign or not cf:
+                    sys.exit(f"make_wheel: {Path(n).name} was not compiled by conda-forge's gcc "
+                             f"alone (.comment: {entries}). A foreign compiler entry means nvcc "
+                             f"fell back to the runner's g++ (check NVCC_PREPEND_FLAGS keeps "
+                             f"-ccbin); refusing to repair and publish it.")
+                seen.append(f"{Path(n).name}: {', '.join(cf)}")
+    return seen
+
+
+def cpython_abi_of_modules(names: list[str]) -> str | None:
+    """'cp312' when any shipped module is a CPython-version-specific extension.
+
+    torchao's wheel is tagged cp39-abi3 and ships torchao/prototype/
+    mxfp8_cuda.cpython-312-x86_64-linux-gnu.so beside its abi3 modules: an
+    extension built WITHOUT Py_LIMITED_API, whose 108 CPython symbols bind it
+    to 3.12 exactly. setuptools tags the wheel from the first extension's
+    py_limited_api and never looks at the others. The module's own filename
+    is the ABI it was built for, and the wheel tag has to say the same.
+    """
+    vers = set()
+    for n in names:
+        m = re.search(r"\.cpython-(\d+)[-.]", Path(n).name)     # .cpython-312-x86_64-linux-gnu.so
+        if m:
+            vers.add(m.group(1))
+        m = re.search(r"\.cp(\d+)-win", Path(n).name)          # .cp312-win_amd64.pyd
+        if m:
+            vers.add(m.group(1))
+    if len(vers) > 1:
+        sys.exit(f"make_wheel: modules built for several CPython ABIs in one wheel: "
+                 f"{sorted(vers)}")
+    return f"cp{vers.pop()}" if vers else None
+
+
+def retag_abi(root: Path, di: Path, stem: list[str]) -> str | None:
+    """Rewrite an abi3 tag to cp<ver> when a module demands it. Returns a note."""
+    mods = [p.relative_to(root).as_posix() for p in root.rglob("*")
+            if p.is_file() and p.suffix in (".so", ".pyd") and ".libs/" not in p.as_posix()]
+    want = cpython_abi_of_modules(mods)
+    py_tag, abi_tag = stem[-3], stem[-2]
+    if want is None or abi_tag == want:
+        return None
+    if abi_tag != "abi3":
+        sys.exit(f"make_wheel: wheel tag {py_tag}-{abi_tag} but a shipped module is built for "
+                 f"{want}; that is not a limited-API mis-tag, it is the wrong interpreter.")
+    stem[-3], stem[-2] = want, want
+    wheel_p = di / "WHEEL"
+    text = wheel_p.read_text(encoding="utf-8")
+    new = re.sub(r"^Tag: [^-\n]+-abi3-", f"Tag: {want}-{want}-", text, flags=re.MULTILINE)
+    if new == text:
+        sys.exit(f"make_wheel: WHEEL carries no abi3 Tag line to rewrite: {text!r}")
+    wheel_p.write_text(new, encoding="utf-8")
+    return (f"retagged {py_tag}-{abi_tag} -> {want}-{want}: a shipped module is a "
+            f"CPython-{want[2:]}-specific extension, so the wheel is not abi3")
+
+
 def finalize(wheel: Path, version_tag: str, arch_list: str,
              run_deps: list[str], expect_version: str = "",
              build_number: str = "",
-             vendor_extra: list[tuple[str, Path]] | None = None) -> tuple[Path, Path, int]:
+             vendor_extra: list[tuple[str, Path]] | None = None,
+             cuda: str = "", sidecar_omit=()) -> tuple[Path, Path, int]:
     """Apply the local version and build tag, strip deps, write the sidecar."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -563,7 +750,7 @@ def finalize(wheel: Path, version_tag: str, arch_list: str,
         # problem the conda split exists to prevent -- gsplat's `ninja`,
         # mmcv's `yapf`, flash-attn's `psutil`.
         text, removed = strip_requires(text)
-        sidecar_reqs = [r for r in (conda_spec_to_pep508(d) for d in run_deps) if r]
+        sidecar_reqs = [r for r in (conda_spec_to_pep508(d, cuda, sidecar_omit) for d in run_deps) if r]
         sidecar_text = add_requires(text, sidecar_reqs)
         meta_p.write_text(text, encoding="utf-8")
 
@@ -589,6 +776,10 @@ def finalize(wheel: Path, version_tag: str, arch_list: str,
                      f".whl, got {len(stem)} field(s)). Refusing to rename it "
                      f"into something that only looks like a wheel.")
         stem[1] = full
+        note = retag_abi(root, new_di, stem)
+        if note:
+            print(f"  abi     : {note}")
+            rebuild_record(root, new_di.name)
 
         # ---- the build tag, which is what makes a rebuild publishable -------
         # A .conda's build string carries the build number (..._h6651153_1), so
@@ -664,6 +855,13 @@ def main() -> int:
     # Conditional entries (`{if: linux, then: triton}`) resolved for THIS
     # platform, so the sidecar says what the .conda for the same subdir says.
     run_deps = pl.resolve_run_deps(cfg.get("run_deps") or [], args.platform)
+    # package.yml `sidecar_omit`: conda run deps with no PyPI counterpart that
+    # the wheel does not need (a reviewed list, each entry with a reason).
+    sidecar_omit = {str(x).split()[0] for x in (cfg.get("sidecar_omit") or [])}
+    # Translate up front, so a name with no mapping fails before anything is
+    # repaired or renamed rather than after twenty minutes of auditwheel.
+    for d in run_deps:
+        conda_spec_to_pep508(d, args.cuda, sidecar_omit)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     print(f"== {args.package}: {args.wheel.name}")
@@ -687,12 +885,15 @@ def main() -> int:
         shutil.copy2(args.wheel, staged)
         final, side, n = finalize(staged, local_tag(args.cuda, args.pytorch),
                                   args.arch_list, run_deps, args.expect_version,
-                                  args.build_number)
+                                  args.build_number, cuda=args.cuda,
+                                  sidecar_omit=sidecar_omit)
         print(f"  win-64  : no repair -- Windows wheels vendor nothing")
         print(f"  wheel   : {final.name}")
         print(f"  sidecar : {side.name}  ({n} Requires-Dist)")
         return 0
 
+    for line in check_compiler_provenance(args.wheel):
+        print(f"  compiler: {line}")
     repaired = repair(args.wheel, args.out_dir, links_torch, args.lib_path,
                       cfg.get("wheel_no_vendor") or [])
 
@@ -709,7 +910,8 @@ def main() -> int:
     extra = resolve_vendor_extra(cfg.get("wheel_vendor_extra") or [], args.lib_path)
     final, side, n = finalize(repaired, local_tag(args.cuda, args.pytorch),
                               args.arch_list, run_deps, args.expect_version,
-                              args.build_number, vendor_extra=extra)
+                              args.build_number, vendor_extra=extra,
+                              cuda=args.cuda, sidecar_omit=sidecar_omit)
     print(f"  wheel   : {final.name}")
     print(f"  sidecar : {side.name}  ({n} Requires-Dist)")
     return 0

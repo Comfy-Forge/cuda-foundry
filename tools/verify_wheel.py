@@ -105,6 +105,23 @@ def verify(path: Path, args, tmp: Path) -> bool:
 
     # ---- the name states the ABI it was compiled for ------------------------
     ver, abi, plat = m["ver"], m["abi"], m["plat"]
+    z = zipfile.ZipFile(path)
+    names = z.namelist()
+    # A module named *.cpython-312-*.so (or *.cp312-win_amd64.pyd) was built
+    # without Py_LIMITED_API and binds to that interpreter exactly; the wheel
+    # tag must say so. torchao shipped cp39-abi3 with such a module inside
+    # (make_wheel now retags; this is the gate that catches a wheel that
+    # got past it).
+    from make_wheel import cpython_abi_of_modules
+    mods = [n for n in names if re.search(r"\.(so|pyd)$", n) and ".libs/" not in n]
+    want_abi = cpython_abi_of_modules(mods)
+    if want_abi:
+        rep.check(abi == want_abi and m["py"] == want_abi,
+                  f"wheel tag is {want_abi}-{want_abi}, as its CPython-specific module(s) "
+                  f"demand (tag says {m['py']}-{abi})")
+    else:
+        rep.check(abi == "abi3" or abi == m["py"],
+                  f"abi tag {abi} is consistent with python tag {m['py']}")
     rep.check("+cu" in ver and "torch" in ver,
               f"version carries the (cuda, torch) local tag: {ver}")
     is_win = args.platform.startswith("win")
@@ -121,8 +138,6 @@ def verify(path: Path, args, tmp: Path) -> bool:
         rep.check("manylinux_2_28" in plat,
                   f"platform tag includes PyTorch's 2.28 baseline: {plat}")
 
-    z = zipfile.ZipFile(path)
-    names = z.namelist()
     di = [n for n in names if n.endswith(".dist-info/METADATA")]
     if not rep.check(len(di) == 1, "exactly one dist-info/METADATA"):
         return False
@@ -163,10 +178,11 @@ def verify(path: Path, args, tmp: Path) -> bool:
             # opencv-python, matplotlib-base -> matplotlib), so the two
             # sides are compared in one namespace. A second, private copy of
             # that mapping here is exactly the kind of thing that drifts.
-            from make_wheel import CONDA_TO_PYPI
+            from make_wheel import pypi_name_for
             def norm(s):
-                n = re.split(r"[<>=!~\s;\[]", s.strip())[0].lower()
-                return CONDA_TO_PYPI.get(n, n).lower()
+                n = re.split(r"[<>=!~\s;\[]", s.strip())[0]
+                p = pypi_name_for(n, args.cuda, strict=False) or n
+                return p.lower().replace("_", "-")
             cnames = {norm(d) for d in cdeps}
             cnames -= {n.lower() for n in TORCH_NAMES}
             # conda's run: legitimately carries things a wheel cannot express
@@ -202,6 +218,9 @@ def verify(path: Path, args, tmp: Path) -> bool:
                 if digest or size:
                     bad.append(f"{name}: RECORD must carry no hash or size")
                 continue
+            if name not in names:
+                bad.append(f"{name}: listed in RECORD but absent from the wheel")
+                continue
             data = z.read(name)
             want = "sha256=" + base64.urlsafe_b64encode(
                 hashlib.sha256(data).digest()).rstrip(b"=").decode()
@@ -230,6 +249,19 @@ def verify(path: Path, args, tmp: Path) -> bool:
                   f"would load a second copy of it")
         exts = [n for n in names if n.lower().endswith(".pyd")]
         rep.check(bool(exts), f"wheel contains extension module(s) ({len(exts)})")
+        # The same linker-version gate verify_conda applies on win-64.
+        from verify_conda import MSVC_LINKER, pe_header
+        bad = []
+        for n in exts:
+            h = pe_header(z.read(n))
+            if h is None:
+                bad.append((Path(n).name, "not a PE"))
+                continue
+            maj, mino, _ = h
+            lo, hi = MSVC_LINKER.get(getattr(args, "expect_msvc", "") or "", (20, 50))
+            if maj != 14 or not (lo <= mino < hi):
+                bad.append((Path(n).name, f"linker {maj}.{mino}"))
+        rep.check(not bad, f"every .pyd was linked by the conda MSVC toolset ({bad[:3]})")
 
         # Torch linkage from the PE import table. PE stores imported DLL names
         # as plain ASCII, so a byte scan finds them without a PE parser; this is
@@ -271,11 +303,24 @@ def _verify_elf_binaries(rep, z, names, args, tmp: Path) -> None:
     exts = [n for n in names if n.endswith(".so") and ".libs/" not in n]
     rep.check(bool(exts), f"wheel contains extension module(s) ({len(exts)})")
 
+    from verify_conda import COMMENT_CONDA_FORGE, COMMENT_SYSROOT
     torch_linked = []
     for n in exts:
         data = z.read(n)
         p = tmp / "ext.so"
         p.write_bytes(data)
+        # Compiler provenance, the same gate verify_conda applies to the
+        # .conda: `.comment` must name conda-forge's gcc and nothing foreign.
+        # auditwheel does not care who compiled a module; this does.
+        com = subprocess.run(["readelf", "-p", ".comment", str(p)],
+                             capture_output=True, text=True).stdout
+        entries = [x.strip() for x in re.findall(r"^\s*\[\s*[0-9a-fx]+\]\s+(.*)$", com, re.M)]
+        cf = [e for e in entries if COMMENT_CONDA_FORGE.match(e)]
+        foreign = [e for e in entries
+                   if not COMMENT_CONDA_FORGE.match(e) and not COMMENT_SYSROOT.match(e)]
+        rep.check(bool(cf) and not foreign,
+                  f"{Path(n).name}: compiled by conda-forge's gcc alone "
+                  f"(.comment: {entries})")
         dyn = subprocess.run(["readelf", "-d", str(p)],
                              capture_output=True, text=True).stdout
         rpaths = [ln for ln in dyn.splitlines()
@@ -357,6 +402,10 @@ def main() -> int:
                     help="packages/<folder>, to read links_torch")
     ap.add_argument("--platform", default="linux-64",
                     help="target platform of the wheel: linux-64 or win-64")
+    ap.add_argument("--cuda", default="",
+                    help="the cell's CUDA version, for the cu12/cu13 PyPI name suffix")
+    ap.add_argument("--expect-msvc", default="",
+                    help="win-64: vs2019 or vs2022, which the PE linker version must match")
     ap.add_argument("--tmp", type=Path, default=Path("/tmp/verify-wheel"))
     args = ap.parse_args()
     args.tmp.mkdir(parents=True, exist_ok=True)
