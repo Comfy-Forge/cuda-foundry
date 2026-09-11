@@ -124,14 +124,20 @@ carry: complete
 
 verify:
   import: spconv
-  # The real thing: a sparse 3-D convolution on CUDA through spconv.pytorch
+  # The real thing: sparse 3-D convolutions on CUDA through spconv.pytorch
   # (which loads cumm's core_cc, then spconv's), against torch's dense
-  # conv3d on the same voxels. A 1x1x1 SubMConv3d is exactly a linear layer
-  # on the features -- that reference is unarguable -- and a 3x3x3
-  # SparseConv3d is compared against F.conv3d over the densified grid at
-  # every output voxel, which is the whole implicit-GEMM path the AOT kernels
-  # exist for. A mis-arch'd core_cc fails here with
+  # conv3d on the same voxels. A 3x3x3 SparseConv3d is compared with
+  # F.conv3d over the densified grid at EVERY output voxel, and a 3x3x3
+  # SubMConv3d (output = input coordinates) at every input voxel -- the
+  # kernel-map build plus the implicit-GEMM AOT kernels, which is what this
+  # package exists for. Measured against the published artifact on an RTX
+  # 3090: both agree with torch to 4e-4. A mis-arch'd core_cc fails here with
   # cudaErrorNoKernelImageForDevice rather than passing a bare import.
+  #
+  # A 1x1x1 SubMConv3d is deliberately NOT compared against a linear layer:
+  # upstream's kernel-volume-1 path reads its own [out,1,1,1,in] weight as
+  # [in, out] (x @ weight.view(in, out), measured), so "features @ W.T" is
+  # the wrong reference for upstream's semantics, whatever the kernel does.
   op: |
     import torch, torch.nn.functional as F
     import spconv.pytorch as spconv
@@ -143,15 +149,18 @@ verify:
     coords_b = torch.cat([bidx, coords], 1).int().cuda()      # [batch, z, y, x]
     feats = torch.randn(n, 4, device="cuda")
     x = spconv.SparseConvTensor(feats, coords_b, [D, D, D], 1)
-    sub1 = spconv.SubMConv3d(4, 6, 1, bias=False).cuda()
-    y = sub1(x)
-    ref = feats @ sub1.weight.view(6, 4).t()
-    assert torch.allclose(y.features, ref, atol=1e-4), (y.features - ref).abs().max()
+    dense_in = x.dense()                                        # [1, 4, D, D, D]
     conv = spconv.SparseConv3d(4, 5, 3, padding=1, bias=False).cuda()
     y3 = conv(x)
-    dense_in = x.dense()                                        # [1, 4, D, D, D]
     w = conv.weight.permute(0, 4, 1, 2, 3).contiguous()         # [out, k, k, k, in] -> [out, in, k, k, k]
     dense_ref = F.conv3d(dense_in, w, padding=1)
     got = y3.dense()
     assert got.shape == dense_ref.shape, (got.shape, dense_ref.shape)
     assert torch.allclose(got, dense_ref, atol=1e-3), (got - dense_ref).abs().max()
+    sub = spconv.SubMConv3d(4, 5, 3, bias=False).cuda()
+    ys = sub(x)
+    assert torch.equal(ys.indices, x.indices), "submanifold conv must keep the input coordinates"
+    ws = sub.weight.permute(0, 4, 1, 2, 3).contiguous()
+    occ = (dense_in.abs().sum(1, keepdim=True) > 0).float()
+    sub_ref = F.conv3d(dense_in, ws, padding=1) * occ
+    assert torch.allclose(ys.dense(), sub_ref, atol=1e-3), (ys.dense() - sub_ref).abs().max()
