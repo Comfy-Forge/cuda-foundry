@@ -7,9 +7,22 @@ import_name: gsplat
 version: "1.5.3"
 
 # Apache-2.0, read from the repo's own LICENSE at the pinned rev.
-license: Apache-2.0
+license: Apache-2.0 AND MIT
 homepage: https://github.com/nerfstudio-project/gsplat
 summary: Differentiable Gaussian splatting rasterization, compiled against the conda-torch channel
+repository: https://github.com/nerfstudio-project/gsplat
+documentation: https://docs.gsplat.studio
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# Apache-2.0 LICENSE plus glm's MIT (the submodule; header-only, compiled in).
+license_files:
+  - LICENSE
+  - gsplat/cuda/csrc/third_party/glm/copying.txt
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (nerfstudio-project/gsplat).
+pypi_project: gsplat
 
 source_repo: nerfstudio-project/gsplat
 # Tag v1.5.3, resolved to the commit it points at rather than carried as a
@@ -44,7 +57,9 @@ nvcc_threads: 1
 # point; ninja is in build_deps where the recipe template already puts it.
 # The farm's PEP 658 sidecar declares `Requires-Dist: ninja` because its
 # single extra_deps field had nowhere else to put it (ARCHITECTURE.md,
-# "Dependencies: derive, then curate").
+# "Dependencies: derive, then curate"). The patch also drops it from
+# setup.py's install_requires, so the wheel's own METADATA agrees with this
+# list and `pip check` passes on the conda side, which never installs ninja.
 #
 # torch is supplied by the recipe's flavour-locked pytorch dep.
 #
@@ -69,13 +84,11 @@ run_deps:
 # The .cu sources include cuda_runtime.h, cooperative_groups.h and
 # cub/cub.cuh; glm is the vendored submodule. cooperative_groups ships in
 # cuda-cudart-dev, cub in cuda-cccl (already in build:).
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 
-# conda-forge does not ship gsplat; nothing to shadow.
-carry: complete
+carry: complete  # shadows conda-forge's line for this cell; see ARCHITECTURE.md "Shadowing"
 
 verify:
   import: gsplat

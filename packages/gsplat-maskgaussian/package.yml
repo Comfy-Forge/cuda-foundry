@@ -15,9 +15,24 @@ version: "1.5.3"
 # License.txt is the Tencent HY-World 2.0 Community License; the subdirectory
 # carries no licence file of its own. Both are stated, and the patch copies
 # License.txt into the relocated tree so the artifact carries it.
-license: Apache-2.0 AND LicenseRef-Tencent-HY-World-2.0-Community-License
+license: Apache-2.0 AND LicenseRef-Tencent-HY-World-2.0-Community-License AND MIT
 homepage: https://github.com/Tencent-Hunyuan/HY-World-2.0
 summary: HY-World 2.0's gsplat fork with MaskGaussian densification and distloss, compiled against the conda-torch channel
+repository: https://github.com/Tencent-Hunyuan/HY-World-2.0
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# The HY-World text the patch copies in, nerfstudio's Apache-2.0 LICENSE
+# (fetched by the patch from gsplat v1.5.3, sha256-pinned -- the fork ships
+# gsplat's code without its licence), and glm's MIT.
+license_files:
+  - LICENSE.HY-World-2.0.txt
+  - LICENSE.gsplat-Apache-2.0.txt
+  - gsplat/cuda/csrc/third_party/glm/copying.txt
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no gsplat_maskgaussian project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: Tencent-Hunyuan/HY-World-2.0
 source_rev: ee5d5bc02c92671486ab6dd81f0cba577d0478c8
@@ -41,7 +56,8 @@ nvcc_threads: 1
 # Identical import surface to vanilla gsplat at this rev (checked: the
 # fork's gsplat/ imports the same set), so the same curated list -- see
 # packages/gsplat/package.yml for the reasoning on each entry, including why
-# the farm's `ninja` is a build tool and stays out.
+# the farm's `ninja` is a build tool and stays out (the patch drops it from
+# install_requires too, so the wheel's METADATA and `pip check` agree).
 run_deps:
   - numpy
   - jaxtyping
@@ -49,8 +65,7 @@ run_deps:
   - packaging
   - typing_extensions
 
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

@@ -30,6 +30,17 @@ passes as long as ANY edit landed, which is how the predecessor's dead
    HTML, images and a PDF along with its 426 headers -- 19 MB uncompressed,
    18% of the farm's published wheel. The headers stay (gsplat's JIT fallback
    in cuda/_backend.py points extra_include_paths at them); the rest goes.
+   Also the submodule's `.git` GITLINK: a recursive clone leaves a one-line
+   `.git` FILE ("gitdir: ../../.git/modules/...") in the glm directory, and
+   MANIFEST.in's `recursive-include gsplat/cuda/csrc *` shipped it in the
+   published artifact. prune_glm_docs only removes a .git DIRECTORY (the
+   maskgaussian fork's own clone), so the file is unlinked here.
+5. `ninja` out of install_requires. It is the build tool torch's
+   BuildExtension drives, and the only runtime path that could want it is
+   the JIT fallback that runs when this package's own extension is missing;
+   package.yml keeps it out of run: for that reason, and the wheel's METADATA
+   must agree or `pip check` reports a missing requirement the conda side
+   deliberately never installs.
 
 Upstream never reads its own arch flags from the local GPU -- it relies on
 torch's TORCH_CUDA_ARCH_LIST handling, and nothing it puts in nvcc_flags
@@ -86,6 +97,14 @@ else:
                      f"nvcc_flags: {line.strip()!r}; that makes torch drop "
                      f"TORCH_CUDA_ARCH_LIST entirely")
 
+    # 5. ninja is a build tool, not a runtime requirement
+    content, n_ninja = re.subn(r'^(\s*)"ninja",\n', "", content, count=1, flags=re.M)
+    require(n_ninja == 1 and '"ninja"' not in content,
+            "expected exactly one `\"ninja\",` line in gsplat setup.py's "
+            "install_requires -- upstream changed; refusing to ship METADATA that "
+            "demands a build tool the conda package never installs")
+    print("gsplat patch: ninja dropped from install_requires (build tool)")
+
     setup_file.write_text(MARKER + "\n" + content, encoding="utf-8")
 
 # 3. sm<70 fallback for the match collectives
@@ -108,4 +127,9 @@ require((glm / "glm" / "glm.hpp").is_file(),
         f"{glm}/glm/glm.hpp is missing -- the submodule was not checked out; "
         f"package.yml must set clone_recursive: true")
 prune_glm_docs(glm)
+gitlink = glm / ".git"
+if gitlink.is_file():
+    gitlink.unlink()
+    print("gsplat patch: removed the glm submodule's .git gitlink from the payload")
+require(not gitlink.exists(), f"{gitlink} still exists after pruning")
 print("gsplat patch: done")

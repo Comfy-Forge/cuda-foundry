@@ -29,7 +29,18 @@ Five edits, each asserted on its own:
    fallback in cuda/_backend.py includes them.
 4. MSVC host flags / the C++ standard / cg::labeled_partition -- the same three
    fixes as packages/gsplat/patches/gsplat.py, for the same reasons: the
-   fork's setup.py and csrc/ are vanilla gsplat's at these lines.
+   fork's setup.py and csrc/ are vanilla gsplat's at these lines. Likewise
+   `ninja` comes out of install_requires (a build tool; the conda package
+   never installs it and `pip check` must agree).
+5. THE APACHE-2.0 TEXT. package.yml declares `Apache-2.0 AND LicenseRef-
+   Tencent-HY-World-2.0-Community-License` because the fork IS nerfstudio's
+   gsplat, but HY-World stripped gsplat's LICENSE when vendoring it, so the
+   published artifact carried only the Tencent text. The patch fetches
+   nerfstudio's LICENSE at the exact commit vanilla gsplat v1.5.3 is pinned
+   to (937e2991) -- Apache-2.0 with the Nerfstudio copyright line --
+   sha256-pinned, and writes it as LICENSE.gsplat-Apache-2.0.txt, a name
+   setuptools' default license_files glob (LICEN[CS]E*) includes in the
+   wheel's dist-info; package.yml's license_files names it for info/licenses.
 """
 
 import glob
@@ -49,6 +60,11 @@ REPO_LICENSE = Path("License.txt")
 GLM_REPO = "https://github.com/g-truc/glm.git"
 GLM_REV = "33b4a621a697a305bc3a7610d290677b96beb181"   # gsplat v1.5.3's submodule
 GLM_DIR = Path("gsplat/cuda/csrc/third_party/glm")
+# nerfstudio's LICENSE at gsplat v1.5.3's commit (packages/gsplat source_rev).
+GSPLAT_LICENSE_URL = ("https://raw.githubusercontent.com/nerfstudio-project/gsplat/"
+                      "937e29912570c372bed6747a5c9bf85fed877bae/LICENSE")
+GSPLAT_LICENSE_SHA256 = "96a4f89293c0df19880da9b0e35f67589f5885ea61b224ef16bb2bd599a8a44d"
+GSPLAT_LICENSE_FILE = Path("LICENSE.gsplat-Apache-2.0.txt")
 MARKER = "# patched-by: cuda-foundry gsplat_maskgaussian"
 
 
@@ -107,6 +123,10 @@ def patch_setup_py() -> None:
     content, n_std = strip_std_flags(content)
     require(n_std > 0, "no hardcoded -std flag in setup.py -- upstream changed; "
                        "refusing to build against an unverified flag set")
+    content, n_ninja = re.subn(r'^(\s*)"ninja",\n', "", content, count=1, flags=re.M)
+    require(n_ninja == 1 and '"ninja"' not in content,
+            'expected exactly one `"ninja",` in setup.py install_requires -- '
+            "upstream changed; refusing to ship METADATA demanding a build tool")
     for lineno, line in enumerate(content.splitlines(), 1):
         if "nvcc_flags" in line and ("-arch" in line or "-gencode" in line):
             sys.exit(f"gsplat_maskgaussian patch: setup.py:{lineno} puts an arch "
@@ -136,6 +156,41 @@ def fetch_glm() -> None:
             f"include path and Common.h expect it")
 
 
+def fetch_gsplat_license() -> None:
+    """The Apache-2.0 text the fork dropped, from the gsplat it was cut from."""
+    import hashlib
+    import time
+    import urllib.request
+    if GSPLAT_LICENSE_FILE.is_file():
+        got = hashlib.sha256(GSPLAT_LICENSE_FILE.read_bytes()).hexdigest()
+        require(got == GSPLAT_LICENSE_SHA256,
+                f"{GSPLAT_LICENSE_FILE} exists but its sha256 is {got}, not the "
+                f"pinned {GSPLAT_LICENSE_SHA256}")
+        print(f"gsplat_maskgaussian patch: {GSPLAT_LICENSE_FILE} already present")
+        return
+    last = None
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(GSPLAT_LICENSE_URL, timeout=60) as r:
+                data = r.read()
+            break
+        except Exception as e:  # noqa: BLE001 - retried, then reported
+            last = e
+            time.sleep(2 ** attempt)
+    else:
+        raise SystemExit(f"PATCH FAILED: could not fetch {GSPLAT_LICENSE_URL}: {last}")
+    got = hashlib.sha256(data).hexdigest()
+    require(got == GSPLAT_LICENSE_SHA256,
+            f"{GSPLAT_LICENSE_URL}: sha256 {got} does not match the pinned "
+            f"{GSPLAT_LICENSE_SHA256} -- the file served changed; re-verify by hand")
+    require(b"Apache License" in data and b"Nerfstudio" in data,
+            "the fetched gsplat LICENSE is not the Apache-2.0 text with the "
+            "Nerfstudio copyright line")
+    GSPLAT_LICENSE_FILE.write_bytes(data)
+    print(f"gsplat_maskgaussian patch: wrote {GSPLAT_LICENSE_FILE} "
+          f"(Apache-2.0, sha256 verified, {len(data)} bytes)")
+
+
 def guard_partition() -> None:
     n_lp = guard_labeled_partition_in_files(
         sorted(glob.glob("gsplat/cuda/csrc/*.cu")), required=False)
@@ -152,9 +207,16 @@ def guard_partition() -> None:
 def main() -> None:
     relocate()
     patch_setup_py()
+    fetch_gsplat_license()
     fetch_glm()
     guard_partition()
     prune_glm_docs(GLM_DIR)     # removes .git too (it is in _GLM_PRUNE_DIRS)
+    gitlink = GLM_DIR / ".git"  # a submodule-style gitlink FILE, if one ever appears
+    if gitlink.is_file():
+        gitlink.unlink()
+    require(not gitlink.exists(), f"{gitlink} survives pruning")
+    require(Path("LICENSE.HY-World-2.0.txt").is_file() and GSPLAT_LICENSE_FILE.is_file(),
+            "both licence texts must be in the tree that ships")
     print("gsplat_maskgaussian patch: done")
 
 
