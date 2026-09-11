@@ -237,7 +237,7 @@ def ninja_edges(src_dir: Path) -> dict:
     """
     edges: dict = {}
     for ninja in src_dir.glob("**/build.ninja"):
-        for line in ninja.read_text(encoding="utf8", errors="replace").splitlines():
+        for line in _logical_lines(ninja.read_text(encoding="utf8", errors="replace")):
             if not line.startswith("build "):
                 continue
             head, rest = _split_edge(line[len("build "):])
@@ -265,7 +265,74 @@ def ninja_translation_units(src_dir: Path) -> list[str]:
         hit = edges.get(_norm(out))
         if hit:
             units.append(hit[1])
+            continue
+        # No surviving edge for this output. torch's BuildExtension writes ONE
+        # build.ninja per extension into the same build_temp and overwrites it
+        # for the next -- while .ninja_log in that directory accumulates. For a
+        # package with several extensions (torch_scatter has four, torch_sparse
+        # twelve) only the LAST extension's edges are still on disk, and a
+        # ledger built from edges alone covered only that one. The object's
+        # path is the other record: distutils names it <build_temp>/<source
+        # path without suffix>.obj, so the source is recoverable from it
+        # whenever exactly one file with that stem exists in the tree.
+        src = _source_for_object(src_dir, out)
+        if src:
+            units.append(src)
     return units
+
+
+def _logical_lines(text: str) -> list:
+    """Ninja's line continuation reversed: a line ending in `$` continues.
+
+    ninja_syntax.Writer wraps long edges at 78 columns, and ccimport (cumm,
+    spconv) writes its build files through it -- so an edge's first input
+    lands on the line AFTER `build <out>: <rule> $`. torch writes each edge on
+    one line, which is why the parser never needed this before.
+    """
+    out: list = []
+    buf = ""
+    for raw in text.splitlines():
+        if raw.endswith("$"):
+            buf += raw[:-1]
+            continue
+        out.append(buf + raw)
+        buf = ""
+    if buf:
+        out.append(buf)
+    return out
+
+
+_TU_SUFFIXES = (".cu", ".cpp", ".cc", ".cxx", ".c")
+
+
+def _source_for_object(src_dir: Path, out: str) -> str:
+    """The translation unit behind an object whose edge is gone, or ''.
+
+    distutils' object_filenames() keeps the source's relative path and swaps
+    the suffix, under build_temp (`build/temp.<plat>/Release/` on Windows,
+    `build/temp.<plat>/` on Linux), so `.../Release/csrc/cuda/x.obj` came from
+    `csrc/cuda/x.<suffix>` relative to the setup.py directory. Refuses to guess
+    when zero or several candidates exist: a wrong entry in the ledger is
+    worse than a missing one.
+    """
+    # Separators normalised, case kept: Linux reaches this too (build.sh's
+    # ninja-ledger fallback), and its filesystem is case-sensitive.
+    o = out.replace("\\", "/")
+    m = re.search(r"/build/temp\.[^/]+/(?:[Rr]elease/|[Dd]ebug/)?(.+)\.(?:obj|o)$", o)
+    if not m:
+        return ""
+    parts = m.group(1).split("/")
+    # A source given to setup() as an ABSOLUTE path loses only its drive/root
+    # under build_temp (`a/work/csrc/x.obj`), so try the longest suffix of
+    # the path first and stop at the first that names exactly one file.
+    for i in range(len(parts)):
+        rel = "/".join(parts[i:])
+        found = [q for q in (src_dir / (rel + suf) for suf in _TU_SUFFIXES) if q.is_file()]
+        if len(found) == 1:
+            return str(found[0].resolve())
+        if len(found) > 1:
+            return ""
+    return ""
 
 
 def ninja_cuda_units(src_dir: Path) -> list[str]:
@@ -700,6 +767,16 @@ def main() -> int:
     prefix = Path(env("PREFIX"))
     build_prefix = Path(env("BUILD_PREFIX"))
     src_dir = Path(env("SRC_DIR", os.getcwd()))
+    # package.yml `build_subdir`: the setup.py to build is not at the source
+    # root. Everything below -- the compile, the ninja log, the partition --
+    # is relative to where setup.py is, so that directory IS the source dir
+    # from here on. Same rule as build.sh.
+    subdir = env("CUW_BUILD_SUBDIR", "")
+    if subdir:
+        src_dir = src_dir / subdir
+        if not src_dir.is_dir():
+            die(f"build_subdir {subdir!r} does not exist under SRC_DIR")
+        log(f"=== building in subdir: {subdir}")
     python = env("PYTHON", sys.executable)
     wheelhouse = Path(env("CUW_WHEELHOUSE", r"C:\cuw\wheelhouse"))
     shard_count = int(env("CUW_SHARD_COUNT", "0") or "0")
@@ -835,5 +912,29 @@ def main() -> int:
     return 0
 
 
+def ninja_ledger_cli(build_dir: str, ledger: str) -> int:
+    """`build_win.py --ninja-ledger <dir> <ledger>`: the L3 fallback for Linux.
+
+    build.sh calls this when its nvcc-seat ledger is empty and ccache saw no
+    lookup, to find out whether that is a broken seat or a build with no nvcc
+    translation unit (cumm: C++ only, against the CUDA runtime). It writes the
+    ninja-recorded TUs to the ledger and prints their count -- but ONLY when
+    none of them is a .cu: a .cu that ninja built and the seat never saw is
+    precisely the broken-seat case, and then this prints 0 and writes nothing,
+    leaving build.sh's assertions in force. Never called on win-64, where the
+    ledger is written by main() from the same parser.
+    """
+    units = ninja_translation_units(Path(build_dir))
+    if not units or any(u.lower().endswith(".cu") for u in units):
+        print(0)
+        return 0
+    with open(ledger, "a", encoding="utf8") as f:
+        f.write("\n".join(units) + "\n")
+    print(len(units))
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "--ninja-ledger":
+        raise SystemExit(ninja_ledger_cli(sys.argv[2], sys.argv[3]))
     raise SystemExit(main())
