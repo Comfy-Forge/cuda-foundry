@@ -3,13 +3,29 @@ pypi_name: flash_attn
 import_name: flash_attn
 version: "2.8.3"
 
-# BSD-3-Clause, read from the repo's own LICENSE at the pinned tag.
+# BSD-3-Clause, read from the repo's own LICENSE at the pinned rev.
 license: BSD-3-Clause
 homepage: https://github.com/Dao-AILab/flash-attention
 summary: Fast and memory-efficient exact attention, compiled against the conda-torch channel
+repository: https://github.com/Dao-AILab/flash-attention
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# Upstream's BSD-3 LICENSE and CUTLASS's BSD-3 (csrc/cutlass, the submodule
+# the patch initialises; every kernel is instantiated from its templates).
+license_files:
+  - LICENSE
+  - csrc/cutlass/LICENSE.txt
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (Dao-AILab/flash-attention, Tri Dao).
+pypi_project: flash_attn
 
 source_repo: Dao-AILab/flash-attention
-source_rev: v2.8.3
+# The v2.8.3 tag, dereferenced to its commit (git ls-remote --tags,
+# 2026-09-11): a tag can be moved, a commit cannot, and the provenance
+# stamped into every artifact must name a specific tree.
+source_rev: 060c9188beec3a8b62b33a3bfa6d5d2d44975fab
 clone_recursive: false          # the patch inits only csrc/cutlass; see README
 patch_script: packages/flash-attn/patches/flash_attn.py
 free_disk_space: true
@@ -99,8 +115,7 @@ run_deps:
 
 # csrc/flash_attn includes no CUDA library headers beyond the runtime;
 # cutlass is a header-only vendored submodule.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps:
   - packaging
