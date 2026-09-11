@@ -25,12 +25,22 @@ patch_script: packages/nunchaku/patches/nunchaku.py
 
 links_torch: true
 
-# Ported verbatim from cuda-wheels: "Upstream hardcodes --threads=len(
-# sm_targets) (~5); the farm's trailing --threads=1 wins. Cap jobs for the
-# CUTLASS-heavy kernels." ~25 CUDA TUs, eight of them Block-Sparse-Attention
-# flash kernels; the farm measured the whole build at ~99 minutes on a
-# hosted runner at these knobs.
-jobs: 3
+# From cuda-wheels: "Upstream hardcodes --threads=len(sm_targets) (~5); the
+# farm's trailing --threads=1 wins. Cap jobs for the CUTLASS-heavy kernels."
+# ~25 CUDA TUs, eight of them Block-Sparse-Attention flash kernels; the farm
+# measured the whole build at ~99 minutes on a hosted runner at jobs 3.
+#
+# jobs 2, not the farm's 3 (2026-09-11). On win-64 -- 16 GB, no swap
+# parachute -- run 34586341160 had the three hdim128 flash kernels
+# (flash_fwd_block_hdim128_{fp16,bf16}_sm80, flash_fwd_hdim128_*) in flight
+# together from 10:15 to 10:47 and the third died with
+#   error : '""%CICC_PATH%\cicc"' died with status 0xC0000409
+# after the other two had finished, 52 minutes into an otherwise clean build.
+# Two concurrent CUTLASS peaks is the shape a hosted runner survives; three
+# is the shape that killed this one. Linux gets the same value because
+# package.yml has one, and it costs Linux ~a third more wall clock on the
+# same eight kernels; it changes nothing about what is compiled.
+jobs: 2
 nvcc_threads: 1
 
 # ── dependencies: pyproject.toml [project] dependencies, read against use ──

@@ -48,7 +48,7 @@ build:
       # change WHAT is compiled -- they are scheduling only, the arch list and
       # every compiler flag are unaffected -- so a machine with more memory
       # raising them cannot produce a different artifact.
-      MAX_JOBS: ${{ env.get("CUW_MAX_JOBS", default="3") }}
+      MAX_JOBS: ${{ env.get("CUW_MAX_JOBS", default="2") }}
       CUW_NVCC_THREADS: ${{ env.get("CUW_NVCC_THREADS", default="1") }}
       # ---- ccache: config must live HERE, not in the outer shell -------
       CUW_MODE: ${{ env.get("CUW_MODE", default="full") }}
