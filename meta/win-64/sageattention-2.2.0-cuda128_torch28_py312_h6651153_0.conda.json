@@ -1,0 +1,45 @@
+{
+ "arch": "x86_64",
+ "build": "cuda128_torch28_py312_h6651153_0",
+ "build_number": 0,
+ "depends": [
+  "python",
+  "__cuda",
+  "pytorch 2.8.* cuda128_*",
+  "vc >=14.3,<15",
+  "vc14_runtime >=14.44.35208",
+  "ucrt >=10.0.20348.0",
+  "cuda-version >=12.8,<13",
+  "libcufft >=11.4.1.4,<12.0a0",
+  "libcusparse >=12.5.10.65,<13.0a0",
+  "libcublas >=12.9.2.10,<13.0a0",
+  "libcusolver >=11.7.5.82,<12.0a0",
+  "cuda-cudart >=12.9.79,<13.0a0",
+  "python_abi 3.12.* *_cp312",
+  "pytorch >=2.8.0,<2.9.0a0",
+  "libtorch >=2.8.0,<2.9.0a0",
+  "libcurand >=10.3.10.19,<11.0a0"
+ ],
+ "license": "Apache-2.0",
+ "md5": "87a29a15522d7cdaeb6d5be5208dd5e6",
+ "name": "sageattention",
+ "platform": "win",
+ "provenance": {
+  "arch_list": "8.0 8.6 8.9 9.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "12.8",
+  "prebuilt_wheel_used": false,
+  "run_id": "34590753445",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34590753445",
+  "source_rev": "eb615cf6cf4d221338033340ee2de1c37fbdba4a",
+  "torch_build": "cuda128_mkl_py312_hc0cb929_302"
+ },
+ "purls": [
+  "pkg:pypi/sageattention@2.2.0"
+ ],
+ "sha256": "7bebdcf72e6eb007b3a8fd19d8534071990db615986f44d3a80d97a094eed54e",
+ "size": 16285865,
+ "subdir": "win-64",
+ "timestamp": 1789123590435,
+ "version": "2.2.0"
+}
