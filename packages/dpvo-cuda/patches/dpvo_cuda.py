@@ -34,6 +34,21 @@ appears nowhere at 859bbbf) and could not tell.
      Surfaces only under C++20 (torch >= 2.12 on Windows), inert at 2.8;
      applied anyway so one Eigen tree is right for every cell.
 
+  7. Trim the Python payload to what the kernels need. Upstream's
+     find_packages() ships the whole DPVO application under dpvo/ -- 35
+     modules -- and the audit of the published artifact found seven of them
+     unimportable: the pipeline needs torch_scatter, einops, kornia, pypose,
+     numba, yacs, cv2, matplotlib, scipy, plyfile, evo, torchvision and two
+     C++ programs setup.py never builds (dpviewer, dpretrieval). pypose is on
+     no conda channel for either platform, so the pipeline cannot be made
+     importable by declaring dependencies. What stays is the compiled half
+     this package exists for: the three extension modules, dpvo/lietorch
+     (the Lie-group wrapper over lietorch_backends, numpy + torch only) and
+     the two thin wrappers over cuda_corr / cuda_ba (dpvo/altcorr,
+     dpvo/fastba, torch only). Every module left in the wheel imports with
+     the declared run deps; lietorch/run_tests.py goes too (a script that
+     imports a top-level `lietorch` that is not installed).
+
 setup.py emits no arch flag and reads no GPU: the cell's TORCH_CUDA_ARCH_LIST
 is authoritative. Asserted at the end.
 """
@@ -151,6 +166,48 @@ sub_count(mf,
           "Eigen arg() (real overload)", 1)
 require("EIGEN_USING_STD(arg)" not in mf.read_text(),
         "dpvo_cuda: an EIGEN_USING_STD(arg) site survives in MathFunctions.h")
+
+# ── 7. payload: kernels + lietorch + the two thin wrappers ───────────────
+import shutil  # noqa: E402
+
+KEEP_DIRS = {"altcorr", "fastba", "lietorch"}
+KEEP_FILES = {"__init__.py"}
+pkg = pathlib.Path("dpvo")
+require(pkg.is_dir() and (pkg / "lietorch" / "groups.py").is_file(),
+        "dpvo_cuda: dpvo/lietorch/groups.py is not where the pinned rev keeps it")
+dropped = []
+for entry in sorted(pkg.iterdir()):
+    if entry.is_dir():
+        if entry.name in KEEP_DIRS or entry.name == "__pycache__":
+            continue
+        shutil.rmtree(entry)
+        dropped.append(entry.name + "/")
+    elif entry.name not in KEEP_FILES:
+        entry.unlink()
+        dropped.append(entry.name)
+run_tests = pkg / "lietorch" / "run_tests.py"
+if run_tests.is_file():
+    run_tests.unlink()
+    dropped.append("lietorch/run_tests.py")
+left = sorted(str(p.relative_to(pkg)) for p in pkg.rglob("*.py"))
+expected = ["__init__.py", "altcorr/__init__.py", "altcorr/correlation.py",
+            "fastba/__init__.py", "fastba/ba.py", "lietorch/__init__.py",
+            "lietorch/broadcasting.py", "lietorch/gradcheck.py",
+            "lietorch/group_ops.py", "lietorch/groups.py"]
+require(left == expected,
+        f"dpvo_cuda: the trimmed dpvo/ package holds {left}, expected exactly "
+        f"{expected} -- upstream's layout changed; re-read the imports before "
+        f"deciding what ships")
+# Nothing left may import outside torch/numpy/the extensions/its own package.
+allowed = {"torch", "numpy", "cuda_corr", "cuda_ba", "lietorch_backends"}
+for p in pkg.rglob("*.py"):
+    for m in re.finditer(r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))",
+                         p.read_text(encoding="utf-8"), re.M):
+        mod = (m.group(1) or m.group(2)).split(".")[0]
+        require(mod in allowed or mod in sys.stdlib_module_names or
+                (m.group(1) or "").startswith("."),
+                f"dpvo_cuda: {p} imports {mod!r}, which run_deps do not cover")
+print(f"dpvo_cuda patch: payload trimmed to kernels + lietorch; dropped {dropped}")
 
 # ── the cell's arch list must stay authoritative ─────────────────────────
 for lineno, line in enumerate(pathlib.Path("setup.py").read_text().splitlines(), 1):
