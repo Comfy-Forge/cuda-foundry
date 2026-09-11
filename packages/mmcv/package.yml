@@ -5,9 +5,25 @@ import_name: mmcv
 version: "1.7.2"
 
 # Apache-2.0, read from the repo's own LICENSE at the pinned rev.
-license: Apache-2.0
+license: Apache-2.0 AND LicenseRef-NVIDIA-License
 homepage: https://github.com/open-mmlab/mmcv
 summary: OpenMMLab computer vision foundation library (1.x, with CUDA ops), compiled against the conda-torch channel
+repository: https://github.com/open-mmlab/mmcv
+documentation: https://mmcv.readthedocs.io/en/1.x/
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# LICENSES.md names the two ops under the NVIDIA licence (upfirdn2d,
+# fused_bias_leakyrelu), both compiled into mmcv._ext.
+license_files:
+  - LICENSE
+  - LICENSES.md
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# PyPI's `mmcv` 1.7.2 is the ops-LESS distribution (the ops build was `mmcv-full`);
+# this artifact is the with-ops build under the plain name, so no PyPI project is
+# the same thing.
+pypi_project: null
 
 # The 1.x branch on purpose: mmcv 2.x dropped ops that SANA-WM and other
 # ComfyUI node packs pin to (farm note). PyPI's 1.x convention is that the
@@ -54,6 +70,15 @@ nvcc_threads: 1
 #
 # py-opencv is conda-forge's name for the cv2 module; tools/make_wheel.py
 # maps it to PyPI's opencv-python for the sidecar.
+#
+#   torchvision  mmcv/runner/checkpoint.py:17 `import torchvision` at module
+#              scope, unconditionally -- so `import mmcv.runner` (every
+#              mmdet/mmseg-era consumer) fails without it. Upstream leaves
+#              it undeclared, as it leaves torch; here the channel has a
+#              flavour-locked torchvision for every cell, so the conda package
+#              says so (make_wheel.py strips it from the sidecar with the
+#              rest of the torch family). The published artifact could not
+#              import mmcv.runner.
 run_deps:
   - addict
   - numpy
@@ -62,24 +87,32 @@ run_deps:
   - pyyaml
   - yapf
   - py-opencv >=3
+  - torchvision
 
 # mmcv/ops/csrc includes only torch headers and the CUDA runtime.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 # setup.py imports psutil (guarded) to size MAX_JOBS when the env leaves it
 # unset; ours is always set, so it is not needed. ninja comes from the recipe.
 build_deps: []
 
-carry: complete   # conda-forge has no mmcv 1.x; nothing to shadow
+carry: complete  # shadows conda-forge's line for this cell; see ARCHITECTURE.md "Shadowing"
 
 verify:
   import: mmcv
+  # GPU-less import surface (S2's CI test): the package root, the compiled
+  # ops module, and mmcv.runner (the torchvision site above).
+  imports:
+    - mmcv
+    - mmcv.ops
+    - mmcv.runner
+    - mmcv.cnn
   # nms and roi_align are two of mmcv's own CUDA kernels (csrc/pytorch/cuda/
   # nms_cuda.cu, roi_align_cuda.cu) reached through mmcv._ext, so a mis-arch'd
   # build fails with cudaErrorNoKernelImageForDevice here.
   op: |
     import torch, mmcv
+    import mmcv.runner, mmcv.cnn
     from mmcv.ops import nms, roi_align
     boxes = torch.tensor([[0., 0., 10., 10.], [1., 1., 11., 11.], [50., 50., 60., 60.]],
                          device="cuda")
