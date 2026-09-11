@@ -74,7 +74,11 @@ print("torchao patch: CUTLASS include dirs and MSVC flags enabled on Windows")
 # -DTORCH_EXTENSION_NAME torch already puts on every compile line, and the
 # whole file is empty off Windows (#ifdef _WIN32), so one tarball serves both
 # platforms. mxfp8_cuda is a real pybind module and needs nothing.
-_stub = _Path("torchao/csrc/cuw_pyinit_stub.cpp")
+# Outside torchao/csrc on purpose: setup.py globs csrc/**/*.cpp into the _C
+# source list, so a stub placed there was collected by the glob AND appended
+# below, and ninja refused the duplicate ("multiple rules generate
+# cuw_pyinit_stub.obj", run 34598019311).
+_stub = _Path("torchao/cuw_pyinit_stub.cpp")
 _stub.write_text('''// cuda-foundry (packages/torchao/patches/torchao.py): this library registers
 // torch ops and is loaded with torch.ops.load_library; it has no Python
 // module. distutils on Windows still links it with /EXPORT:PyInit_<name>, so
@@ -96,7 +100,7 @@ _old_ext = "    ext_modules = []\n"
 require(_t.count(_old_ext) == 1, "torchao: the ext_modules initialiser was not found once")
 _t = _t.replace(_old_ext, '''    # cuda-foundry: the PyInit stub every torch-ops library needs on Windows
     # (empty elsewhere); see packages/torchao/patches/torchao.py.
-    _cuw_stub = os.path.join(extensions_dir, "cuw_pyinit_stub.cpp")
+    _cuw_stub = os.path.join("torchao", "cuw_pyinit_stub.cpp")
     sources.append(_cuw_stub)
     if cutlass_90a_sources:
         cutlass_90a_sources.append(_cuw_stub)
