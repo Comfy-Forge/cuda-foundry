@@ -8,9 +8,28 @@ import_name: nunchaku
 version: "1.2.1"
 
 # Apache-2.0, read from the repo's LICENCE.txt at the pinned rev.
-license: Apache-2.0
+license: Apache-2.0 AND BSD-3-Clause AND MIT
 homepage: https://github.com/nunchaku-ai/nunchaku
 summary: Nunchaku, SVDQuant 4-bit diffusion inference engine, compiled against the conda-torch channel
+repository: https://github.com/nunchaku-ai/nunchaku
+documentation: https://nunchaku.readthedocs.io
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# Apache-2.0 LICENCE.txt plus every submodule compiled or included into
+# _C: CUTLASS (BSD-3), nlohmann json (MIT), mio (MIT), spdlog (MIT) and
+# Block-Sparse-Attention (BSD-3, MIT HAN Lab).
+license_files:
+  - LICENCE.txt
+  - third_party/cutlass/LICENSE.txt
+  - third_party/json/LICENSE.MIT
+  - third_party/mio/LICENSE
+  - third_party/spdlog/LICENSE
+  - third_party/Block-Sparse-Attention/LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# PyPI's `nunchaku` is an unrelated changepoint-detection library (Yu Huo).
+pypi_project: null
 
 # The repo moved twice (mit-han-lab -> nunchaku-tech -> nunchaku-ai; the old
 # names 301). PyPI's `nunchaku` is an UNRELATED changepoint library; nothing
@@ -71,7 +90,6 @@ run_deps:
 # cuda-nvtx is linux-only, which is why the recipe's torch floor names it
 # only there). Everything else is the CUDA runtime and torch.
 host_deps:
-  - cuda-cudart-dev
   - cuda-nvtx-dev
 
 build_deps: []

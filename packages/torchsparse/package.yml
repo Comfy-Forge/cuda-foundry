@@ -11,6 +11,17 @@ version: "2.0.0b0"
 license: MIT
 homepage: https://github.com/mit-han-lab/torchsparse
 summary: High-performance sparse convolution for point clouds (MIT HAN Lab), compiled against the conda-torch channel
+repository: https://github.com/mit-han-lab/torchsparse
+documentation: https://torchsparse-docs.github.io
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no torchsparse project (404, 2026-09-11); every upstream index is dead.
+pypi_project: null
 
 # Sparse convolution for point clouds. Gap this fills (farm notes, still
 # true): EVERY upstream channel is dead -- pypi.org/simple/torchsparse 404s,
@@ -61,7 +72,6 @@ host_deps:
   - numpy
   - tqdm
   - sparsehash
-  - cuda-cudart-dev
   - libcublas-dev
 
 build_deps: []

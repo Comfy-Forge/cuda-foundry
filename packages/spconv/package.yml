@@ -9,6 +9,18 @@ version: "2.3.8"
 license: Apache-2.0
 homepage: https://github.com/traveller59/spconv
 summary: Spatially sparse convolution (spconv v2), compiled against conda-forge's CUDA toolkit and this channel's cumm
+repository: https://github.com/traveller59/spconv
+documentation: https://github.com/traveller59/spconv/tree/master/docs
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (traveller59/spconv, Yan Yan); PyPI's plain `spconv` is the
+# CPU-only build and its CUDA builds are spconv-cuXXX, but the project is one.
+pypi_project: spconv
 
 source_repo: traveller59/spconv
 # The v2.3.8 tag, dereferenced. No .gitmodules at this rev.
@@ -73,7 +85,6 @@ host_deps:
   - numpy
   - cumm >=0.7.11,<0.8.0 cuda${{ cuda_short }}_*
   - cuda-version ${{ cuda_compiler_version }}.*
-  - cuda-cudart-dev
 
 # spconv compiles cumm's tensorview headers, and tensorview/tensor.h
 # includes <curand.h> (measured: the first local build died on exactly

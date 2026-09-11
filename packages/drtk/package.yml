@@ -8,6 +8,17 @@ version: "0.1.0"
 license: MIT
 homepage: https://github.com/facebookresearch/DRTK
 summary: Meta's Differentiable Rendering Toolkit (rasterize, render, edge_grad, msi, mipmap), compiled against the conda-torch channel
+repository: https://github.com/facebookresearch/DRTK
+documentation: https://facebookresearch.github.io/DRTK/
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# PyPI's `drtk` (100.0.0, 'sharmajiii') is a squatted placeholder, not Meta's DRTK.
+pypi_project: null
 
 source_repo: facebookresearch/DRTK
 source_rev: c5a3e523435b4daa37572c0653d6686531c787b2
@@ -56,8 +67,7 @@ run_deps:
 
 # src/ includes cuda_runtime.h and cub/cub.cuh (cuda-cccl, in build:); the
 # rest is torch and its own headers under src/include.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

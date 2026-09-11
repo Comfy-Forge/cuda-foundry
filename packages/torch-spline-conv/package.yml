@@ -9,6 +9,16 @@ version: "1.2.2"
 license: MIT
 homepage: https://github.com/rusty1s/pytorch_spline_conv
 summary: Spline-based convolution operators for PyTorch, compiled against the conda-torch channel
+repository: https://github.com/rusty1s/pytorch_spline_conv
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (rusty1s/pytorch_spline_conv, Matthias Fey).
+pypi_project: torch_spline_conv
 
 source_repo: rusty1s/pytorch_spline_conv
 source_rev: 986b41c8d8149635e748bd369e998effff10099e
@@ -43,8 +53,7 @@ nvcc_threads: 3
 run_deps: []
 
 # csrc/cuda/*.cu include <cuda.h> and torch headers only.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

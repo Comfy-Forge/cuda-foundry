@@ -13,9 +13,22 @@ version: "0.0.1"
 # MIT, read from the repository's LICENSE at the pinned rev (Microsoft's,
 # byte-identical to upstream's). The o-voxel/ subdirectory has no licence
 # file of its own; the patch carries the repository's in.
-license: MIT
+license: MIT AND MPL-2.0
 homepage: https://github.com/visualbruno/TRELLIS.2
 summary: visualbruno fork of TRELLIS.2's o-voxel, importable as o_voxel_vb beside plain o_voxel, compiled against the conda-torch channel
+repository: https://github.com/visualbruno/TRELLIS.2
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# The repository's MIT LICENSE, carried into the hoisted tree by the patch,
+# and the MPL-2.0 of the Eigen 3.4.0 the patch vendors at third_party/eigen.
+license_files:
+  - LICENSE
+  - third_party/eigen/COPYING.MPL2
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no o_voxel_vb project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: visualbruno/TRELLIS.2
 source_rev: 65d1e13b4a92296036044df0633242bb9e95abf6
@@ -60,8 +73,7 @@ run_deps:
   - flex-gemm-vb
   - nvdiffrast
 
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

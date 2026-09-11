@@ -12,6 +12,16 @@ version: "0.0.0"
 license: MIT
 homepage: https://github.com/rahul-goel/fused-ssim
 summary: Fused differentiable SSIM for PyTorch, compiled against the conda-torch channel
+repository: https://github.com/rahul-goel/fused-ssim
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no fused_ssim project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: rahul-goel/fused-ssim
 source_rev: 328dc9836f513d00c4b5bc38fe30478b4435cbb5
@@ -40,8 +50,7 @@ run_deps: []
 
 # ssim.cu / ssim.h / ext.cpp include only torch headers; no CUDA library
 # headers beyond the runtime.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

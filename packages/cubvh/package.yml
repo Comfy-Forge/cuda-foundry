@@ -11,9 +11,24 @@ version: "0.1.2"
 # Source Code License for instant neural graphics primitives" (non-commercial
 # research use). Both ship in the wheel's dist-info/licenses. Stated as the
 # conjunction rather than "MIT" alone, which would misdescribe the artifact.
-license: MIT AND LicenseRef-NVIDIA-Source-Code-License-instant-ngp
+license: MIT AND LicenseRef-NVIDIA-Source-Code-License-instant-ngp AND MPL-2.0
 homepage: https://github.com/ashawkey/cubvh
 summary: CUDA BVH acceleration structure for PyTorch (ray tracing, distance queries, sparse marching cubes), compiled against the conda-torch channel
+repository: https://github.com/ashawkey/cubvh
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# LICENSE (MIT), LICENSE_NVIDIA (the instant-ngp BVH core), and the
+# vendored Eigen submodule's MPL-2.0 -- header-only, but every template it
+# provides is compiled into _cubvh, so its licence ships with the binary.
+license_files:
+  - LICENSE
+  - LICENSE_NVIDIA
+  - third_party/eigen/COPYING.MPL2
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no cubvh project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: ashawkey/cubvh
 source_rev: 7855c000f95e43742081060d869702b2b2b33d1f
@@ -46,8 +61,7 @@ run_deps:
 
 # src/*.cu include only torch and cuda_runtime headers plus the vendored
 # Eigen; no CUDA library headers beyond the runtime.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps:
   - ninja

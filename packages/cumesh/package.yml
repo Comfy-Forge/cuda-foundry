@@ -8,9 +8,26 @@ version: "0.0.1"
 # MIT, read from the repo's own LICENSE at the pinned rev (Jianfeng Xiang,
 # 2025). The vendored third_party/cubvh carries its own MIT plus the
 # instant-ngp NVIDIA source-code licence for the BVH core; xatlas is MIT.
-license: MIT AND LicenseRef-NVIDIA-Source-Code-License-instant-ngp
+license: MIT AND LicenseRef-NVIDIA-Source-Code-License-instant-ngp AND MPL-2.0
 homepage: https://github.com/JeffreyXiang/CuMesh
 summary: CUDA mesh processing (simplification, remeshing, UV atlas) for TRELLIS.2, compiled against the conda-torch channel
+repository: https://github.com/JeffreyXiang/CuMesh
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# The repo's MIT LICENSE; the cubvh submodule's MIT + NVIDIA instant-ngp
+# texts (the BVH core compiled into _cubvh); xatlas's MIT (compiled into
+# _xatlas); and Eigen's MPL-2.0, reached through cubvh's own submodule.
+license_files:
+  - LICENSE
+  - third_party/cubvh/LICENSE
+  - third_party/cubvh/LICENSE_NVIDIA
+  - third_party/xatlas/LICENSE
+  - third_party/cubvh/third_party/eigen/COPYING.MPL2
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# PyPI's `cumesh` (0.1.0, Congjie He) is an unrelated project, not JeffreyXiang/CuMesh.
+pypi_project: null
 
 source_repo: JeffreyXiang/CuMesh
 source_rev: cf1a2f07304b5fe388ed86a16e4a0474599df914
@@ -49,8 +66,7 @@ run_deps:
 # and cub/cub.cuh and nothing else from the toolkit (grep for curand, cufft,
 # nvToolsExt, nvtx3: no hits). That list was copied from a sibling, not
 # measured, and is not carried. The runtime headers are all this needs.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

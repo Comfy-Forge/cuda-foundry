@@ -10,6 +10,17 @@ version: "2.1.2"
 license: MIT
 homepage: https://github.com/rusty1s/pytorch_scatter
 summary: PyTorch extension library of optimized scatter operations, compiled against the conda-torch channel
+repository: https://github.com/rusty1s/pytorch_scatter
+documentation: https://pytorch-scatter.readthedocs.io
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (rusty1s/pytorch_scatter, Matthias Fey).
+pypi_project: torch_scatter
 
 source_repo: rusty1s/pytorch_scatter
 source_rev: edeb04224f80f44c4765a05d34fbdde154df057b
@@ -48,8 +59,7 @@ run_deps: []
 
 # csrc/cuda/*.cu include <cuda.h> and torch headers only; no CUDA library
 # beyond the runtime. cuda.h ships in cuda-cudart-dev.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

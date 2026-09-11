@@ -10,6 +10,17 @@ version: "0.4.0"
 license: LicenseRef-NVIDIA-Source-Code-License-1-Way-Commercial
 homepage: https://github.com/NVlabs/nvdiffrast
 summary: Modular primitives for high-performance differentiable rendering, compiled against the conda-torch channel
+repository: https://github.com/NVlabs/nvdiffrast
+documentation: https://nvlabs.github.io/nvdiffrast/
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE.txt
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no nvdiffrast project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: NVlabs/nvdiffrast
 # Tag v0.4.0, resolved to the commit it points at.
@@ -46,8 +57,7 @@ run_deps:
 
 # csrc/ includes cuda_runtime.h and torch's bundled pybind11 headers; nothing
 # beyond the runtime.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

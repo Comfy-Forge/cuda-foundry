@@ -13,6 +13,16 @@ version: "0.0.1"
 license: LicenseRef-NVIDIA-Source-Code-License-nvdiffrec
 homepage: https://github.com/NVlabs/nvdiffrec
 summary: nvdiffrec's render/ package (renderutils CUDA kernels, lights, materials), compiled against the conda-torch channel
+repository: https://github.com/NVlabs/nvdiffrec
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE.txt
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no nvdiffrec_render project (404, 2026-09-11); the name is this repo's.
+pypi_project: null
 
 source_repo: NVlabs/nvdiffrec
 source_rev: a3e73909a01887c8a135235ff860dd23a045cc1b
@@ -52,8 +62,7 @@ run_deps:
 # c_src/common.h includes <cuda.h>; the kernels use the runtime only (no
 # driver-API calls, no nvrtc -- those -l flags in upstream's JIT ldflags are
 # not needed by the AOT extension and setup.py does not pass them).
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

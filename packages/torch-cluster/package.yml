@@ -9,6 +9,16 @@ version: "1.6.3"
 license: MIT
 homepage: https://github.com/rusty1s/pytorch_cluster
 summary: PyTorch extension library of optimized graph cluster algorithms, compiled against the conda-torch channel
+repository: https://github.com/rusty1s/pytorch_cluster
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (rusty1s/pytorch_cluster, Matthias Fey).
+pypi_project: torch_cluster
 
 source_repo: rusty1s/pytorch_cluster
 source_rev: af7b9f0af6b74be1594eb3d0a1685470cbb21265
@@ -49,7 +59,6 @@ run_deps:
 # -- so the -dev package for the headers, and no libcurand link results.
 # Everything else is <cuda.h> and torch headers.
 host_deps:
-  - cuda-cudart-dev
   - libcurand-dev
 
 build_deps: []

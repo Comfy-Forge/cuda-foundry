@@ -11,9 +11,22 @@ version: "0.0.0"
 # LICENSE.md at the pinned rev is the Inria/MPII "Gaussian-Splatting License"
 # (non-commercial research use). It is not on the SPDX list, so it is named
 # as a LicenseRef; the text ships in the wheel's dist-info/licenses.
-license: LicenseRef-Gaussian-Splatting-License
+license: LicenseRef-Gaussian-Splatting-License AND MIT
 homepage: https://github.com/ashawkey/diff-gaussian-rasterization
 summary: ashawkey's depth-and-alpha fork of the 3DGS differentiable rasterizer, compiled against the conda-torch channel
+repository: https://github.com/ashawkey/diff-gaussian-rasterization
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# LICENSE.md is the Gaussian-Splatting licence; glm (MIT, submodule) is
+# header-only and compiled into the rasterizer.
+license_files:
+  - LICENSE.md
+  - third_party/glm/copying.txt
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no diff_gaussian_rasterization project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: ashawkey/diff-gaussian-rasterization
 # Pinned off main before the full-grid build (farm, 2026-08): an unpinned HEAD
@@ -38,8 +51,7 @@ run_deps: []
 
 # rasterizer_impl.cu includes cuda_runtime.h, cub/cub.cuh (device radix
 # sort), cooperative_groups.h; glm is vendored. cub is in cuda-cccl (build:).
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

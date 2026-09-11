@@ -14,9 +14,26 @@ version: "1.0"
 # MIT, read from the repo's own LICENSE at the pinned rev (Jianfeng Xiang;
 # the fork keeps upstream's file). third_party/cubvh carries MIT plus the
 # instant-ngp NVIDIA source-code licence for the BVH core; xatlas is MIT.
-license: MIT AND LicenseRef-NVIDIA-Source-Code-License-instant-ngp
+license: MIT AND LicenseRef-NVIDIA-Source-Code-License-instant-ngp AND MPL-2.0
 homepage: https://github.com/visualbruno/CuMesh
 summary: visualbruno fork of CuMesh (CUDA mesh processing for TRELLIS.2), importable as cumesh_vb beside plain cumesh, compiled against the conda-torch channel
+repository: https://github.com/visualbruno/CuMesh
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# Same set as cumesh: the fork committed third_party/cubvh flat (with its
+# MIT + NVIDIA texts) and third_party/xatlas; Eigen is vendored by the
+# patch at third_party/cubvh/third_party/eigen, MPL-2.0 text included.
+license_files:
+  - LICENSE
+  - third_party/cubvh/LICENSE
+  - third_party/cubvh/LICENSE_NVIDIA
+  - third_party/xatlas/LICENSE
+  - third_party/cubvh/third_party/eigen/COPYING.MPL2
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no cumesh_vb project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: visualbruno/CuMesh
 source_rev: d10e54c30ddd03d11472c1431693f985501c7966
@@ -53,8 +70,7 @@ run_deps:
 # Same tree shape as cumesh: cuda.h, cuda_runtime.h, cuda_fp16.h, cub. No
 # curand/cufft/nvtx header anywhere (grep at the pinned rev), whatever the
 # farm's copied `extra_cuda_components` said.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

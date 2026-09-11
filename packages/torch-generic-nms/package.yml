@@ -10,6 +10,16 @@ version: "0.1"
 license: BSD-3-Clause
 homepage: https://github.com/ronghanghu/torch_generic_nms
 summary: NMS over Nx4 boxes or an NxN pairwise IoU matrix for PyTorch, compiled against the conda-torch channel
+repository: https://github.com/ronghanghu/torch_generic_nms
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no torch_generic_nms project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: ronghanghu/torch_generic_nms
 source_rev: fcf02b41ea9b37988b244ef80583af17baa4a7f0
@@ -31,8 +41,7 @@ run_deps: []
 
 # generic_nms.cu includes ATen/cuda/CUDAContext.h, c10/cuda/CUDAGuard.h and
 # torch/extension.h; nothing beyond the CUDA runtime.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

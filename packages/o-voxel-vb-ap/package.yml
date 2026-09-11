@@ -13,9 +13,22 @@ version: "0.0.1"
 
 # MIT, read from the repository's LICENSE at the pinned rev (Microsoft's).
 # The o-voxel/ subdirectory has no licence file; the patch carries it in.
-license: MIT
+license: MIT AND MPL-2.0
 homepage: https://github.com/PozzettiAndrea/Trellis.2.drtk
 summary: o-voxel from the Trellis.2.drtk fork (no nvdiffrast half), importable as o_voxel_vb_ap, compiled against the conda-torch channel
+repository: https://github.com/PozzettiAndrea/Trellis.2.drtk
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# The repository's MIT LICENSE, carried into the hoisted tree by the patch,
+# and the MPL-2.0 of the Eigen 3.4.0 the patch vendors at third_party/eigen.
+license_files:
+  - LICENSE
+  - third_party/eigen/COPYING.MPL2
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no o_voxel_vb_ap project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: PozzettiAndrea/Trellis.2.drtk
 source_rev: 200ba8cb5a4039db8acde3c09edc43a0031b4098
@@ -49,8 +62,7 @@ run_deps:
   - zstandard
   - pillow
 
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

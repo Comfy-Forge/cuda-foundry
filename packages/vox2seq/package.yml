@@ -14,6 +14,17 @@ version: "0.0.0"
 license: MIT
 homepage: https://github.com/microsoft/TRELLIS
 summary: vox2seq from TRELLIS (CUDA z-order and Hilbert voxel serialization), compiled against the conda-torch channel
+repository: https://github.com/microsoft/TRELLIS
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# The repository's MIT LICENSE, carried into the hoisted tree by the patch.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no vox2seq project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: microsoft/TRELLIS
 source_rev: f17fdf12d8f17a6a09225f01756d141285dc848f
@@ -36,8 +47,7 @@ run_deps: []
 
 # src/*.cu include cuda.h, cuda_runtime.h, cooperative_groups and torch
 # headers only.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 

@@ -13,6 +13,16 @@ version: "0.2"
 license: BSD-3-Clause
 homepage: https://github.com/ronghanghu/cc_torch
 summary: CUDA connected-components labeling for PyTorch, compiled against the conda-torch channel
+repository: https://github.com/ronghanghu/cc_torch
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no cc_torch project (404, 2026-09-11).
+pypi_project: null
 
 source_repo: ronghanghu/cc_torch
 source_rev: 446e9360ed10d3c8d03925ccb5f220ccb62009de
@@ -47,8 +57,7 @@ run_deps: []
 # Only what the source actually #includes. connected_components.cu includes
 # <cuda_runtime.h> and torch/extension.h; nothing else. Everything else torch
 # needs arrives through pytorch's own run_exports.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 
