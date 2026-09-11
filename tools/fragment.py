@@ -52,30 +52,49 @@ def read_index_json(conda_path: Path) -> tuple[dict, dict, dict]:
         return index, optional("info/about.json"), optional("info/run_exports.json")
 
 
-# Every artifact here is a PyPI project we compiled, so the purl comes from
-# the package's own pypi_name in packages/<folder>/package.yml rather than a
-# hardcoded table. Without it the package is a hash-stranger to pixi's
-# conda->pypi map and a pack declaring the same name as a pypi dependency
-# gets a SECOND copy installed from PyPI on top of ours -- the failure
-# conda-torch proved with torch.
-def purl_for(name: str, version: str, about: dict | None = None) -> str | None:
+# A purl is a claim: pixi's conda->pypi map reads `pkg:pypi/<project>` and
+# treats this artifact as that PyPI project, which is what stops a pack that
+# declares the same name as a pypi dependency getting a SECOND copy installed
+# from PyPI on top of ours -- the failure conda-torch proved with torch. So
+# the purl must name a project this artifact GENUINELY provides. It used to be
+# derived from pypi_name for every package, and about 20 of those were false:
+# 404 on PyPI, or a different project sharing the name (`nunchaku` on PyPI is
+# a data-segmentation library, `drtk` a squatted junk package, `cumesh`
+# someone else's, `mmcv` the ops-less distribution). Now it comes only from an
+# explicit `pypi_project:` in package.yml -- null, the default, means no purl
+# -- which the recipe also records in about.extra.pypi_project, so the
+# artifact is the authority on itself where one exists (a hand-written recipe
+# such as recipes/pccm states it there directly).
+def package_cfg_for(name: str) -> dict | None:
+    """packages/<folder>/package.yml whose conda name is `name`, or None."""
     import yaml
-    # A hand-written recipe (recipes/pccm, noarch) has no package.yml; it
-    # states its PyPI identity in about.extra.pypi_name instead, and the
-    # artifact is the authority on itself here.
-    pypi = str(((about or {}).get("extra") or {}).get("pypi_name") or "").strip()
-    if pypi:
-        return f"pkg:pypi/{pypi}@{version}"
     pkgs = Path(__file__).resolve().parent.parent / "packages"
     for d in sorted(pkgs.iterdir()) if pkgs.is_dir() else []:
         y = d / "package.yml"
         if not y.is_file():
             continue
         cfg = yaml.safe_load(y.read_text()) or {}
-        if cfg.get("name") == name:
-            pypi = str(cfg.get("pypi_name") or "").strip()
-            return f"pkg:pypi/{pypi}@{version}" if pypi else None
+        conda = (cfg.get("conda_name") or cfg.get("pypi_name") or cfg.get("name") or "").replace("_", "-")
+        if cfg.get("name") == name or conda == name:
+            return cfg
     return None
+
+
+def pypi_project_for(name: str) -> str | None:
+    """package.yml `pypi_project` for a conda name, or None (no purl)."""
+    cfg = package_cfg_for(name)
+    proj = str((cfg or {}).get("pypi_project") or "").strip()
+    return proj or None
+
+
+def purl_for(name: str, version: str, about: dict | None = None) -> str | None:
+    extra = (about or {}).get("extra") or {}
+    # The artifact's own statement first (recipe about.extra.pypi_project, or
+    # the hand-written pccm's about.extra.pypi_name), then package.yml.
+    pypi = str(extra.get("pypi_project") or extra.get("pypi_name") or "").strip()
+    if not pypi:
+        pypi = pypi_project_for(name) or ""
+    return f"pkg:pypi/{pypi}@{version}" if pypi else None
 
 
 def hashes(path: Path) -> tuple[str, str, int]:
@@ -113,10 +132,13 @@ def main() -> None:
         entry["run_exports"] = run_exports
     # provenance records the from-source guarantee in the served metadata,
     # so a third party can audit it without unpacking the artifact
+    # distribution_restriction rides along so a consumer reading repodata sees
+    # a licence's territorial exclusion without unpacking the artifact.
     prov = {k: v for k, v in (about.get("extra") or {}).items()
             if k in ("run_id", "run_url", "source_commit", "source_repo",
                      "source_rev", "built_from_source", "prebuilt_wheel_used",
-                     "torch_build", "cuda_compiler_version", "arch_list")}
+                     "torch_build", "cuda_compiler_version", "arch_list",
+                     "distribution_restriction")}
     if prov:
         entry["provenance"] = prov
 

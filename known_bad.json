@@ -6,13 +6,13 @@
     "torchvision-0.23.0-cuda128_torch28_py312_h6651153_1.conda": {
       "reason": "Built without the jpeg, webp and nvjpeg codecs while its run deps claim them. Upstream's detection looks under TORCHVISION_INCLUDE / TORCHVISION_LIBRARY, which pointed at %PREFIX%\\include on win-64 -- a conda prefix keeps that tree under %PREFIX%\\Library. Detection failing is not a build failure upstream: it warns, ships an image extension without the codec, and leaves run_exports declaring it. Measured after the fact from the .pyd's PE import table, which lists libpng16.dll and nothing for jpeg, webp or nvjpeg. torchvision.io.decode_jpeg raises at runtime on this build.",
       "published_by": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34169055830",
-      "fixed_by": "torchvision-0.23.0-cuda128_torch28_py312_h6651153_2.conda"
+      "fixed_by": "torchvision-0.23.0-cuda128_torch28_py312_h6651153_3.conda"
     },
     "torchvision-0.23.0+cu128torch2.8-cp312-cp312-win_amd64.whl": {
-      "reason": "built without jpeg/webp/nvjpeg; superseded by build 2",
+      "reason": "built without jpeg/webp/nvjpeg; superseded by build 3",
       "detail": "The wheel from the same compile as torchvision-0.23.0-cuda128_torch28_py312_h6651153_1.conda, and defective for the same reason: TORCHVISION_INCLUDE/TORCHVISION_LIBRARY pointed at %PREFIX%\\include on win-64, where a conda prefix keeps that tree under %PREFIX%\\Library, so upstream's codec detection found nothing and built the image extension without it. torchvision.io.decode_jpeg raises at runtime.",
       "published_by": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34169055830",
-      "fixed_by": "torchvision-0.23.0+cu128torch2.8-2-cp312-cp312-win_amd64.whl"
+      "fixed_by": "torchvision-0.23.0+cu128torch2.8-3-cp312-cp312-win_amd64.whl"
     }
   },
   "noarch": {}

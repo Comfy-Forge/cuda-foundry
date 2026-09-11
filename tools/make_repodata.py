@@ -12,6 +12,11 @@ repodata keys per exact .conda filename. Fragments on disk stay untouched
 A patch naming a filename with no fragment is a hard error, so a typo
 cannot silently no-op.
 
+purls are re-derived at assembly from packages/<name>/package.yml
+`pypi_project` (see fragment.py), so a fragment written when the purl was
+still derived from pypi_name -- which produced ~20 false purls -- loses it the
+next time the site is built, without the fragment on disk being rewritten.
+
 Also emits, per subdir: repodata.json.zst, and run_exports.json(.zst) —
 the index a builder consults when resolving host dependencies (it reads
 the channel index, never the artifacts). Its data comes from each
@@ -26,6 +31,9 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fragment import package_cfg_for, pypi_project_for  # noqa: E402
 
 RELEASES = "https://github.com/Comfy-Forge/cuda-foundry/releases/download"
 CHANNEL = "https://comfy-forge.github.io/cuda-foundry"
@@ -140,6 +148,21 @@ def drop_known_bad(known_bad: dict, subdir: str, packages_conda: dict) -> list:
             f"matches no filename neutralises nothing. Fix the key to match "
             f"the .conda filename exactly, or remove it.")
 
+    # `fixed_by` must name an artifact that EXISTS: it is what check_lock.py
+    # tells someone holding a lockfile to re-pin onto, and a typo there sends
+    # them to a filename nothing serves (the win-64 torchvision entry named
+    # `_2` when the fix was `_3`). Wheels are checked against the wheel index
+    # by generate_index.py; here only .conda targets are checked.
+    for fn, entry in entries.items():
+        target = str(entry.get("fixed_by") or "")
+        if target.endswith(".conda") and target not in packages_conda:
+            sys.exit(
+                f"ERROR: known_bad.json {subdir!r}/{fn}: fixed_by names "
+                f"{target!r}, and no such artifact exists in meta/{subdir}/. "
+                f"A superseding build that does not exist supersedes nothing; "
+                f"name the published build exactly, or drop fixed_by until it "
+                f"is published.")
+
     dropped = []
     for fn in sorted(entries):
         entry = packages_conda[fn]
@@ -151,6 +174,27 @@ def drop_known_bad(known_bad: dict, subdir: str, packages_conda: dict) -> list:
         else:
             del packages_conda[fn]
             dropped.append(fn)
+    return dropped
+
+
+def apply_purl_policy(packages_conda: dict) -> int:
+    """Re-derive every entry's purl from package.yml `pypi_project`.
+
+    Fragments are immutable records of the artifact, but a purl is not a fact
+    about the artifact -- it is a claim about PyPI, and the claim was wrong
+    for ~20 packages when it was derived from pypi_name. So the served
+    repodata takes it from package.yml at assembly: set -> that purl, null ->
+    none. An entry with no package.yml (the hand-written pccm) keeps what its
+    fragment says, because the artifact's own about.extra was the source.
+    Returns how many entries lost a purl.
+    """
+    dropped = 0
+    for entry in packages_conda.values():
+        proj = pypi_project_for(entry.get("name", ""))
+        if proj:
+            entry["purls"] = [f"pkg:pypi/{proj}@{entry.get('version')}"]
+        elif package_cfg_for(entry.get("name", "")) is not None and entry.pop("purls", None):
+            dropped += 1
     return dropped
 
 
@@ -195,6 +239,10 @@ def main() -> None:
         dropped = drop_known_bad(known_bad, subdir, packages_conda)
         for fn in dropped:
             print(f"{subdir}: EXCLUDED known-bad {fn}")
+        purls_dropped = apply_purl_policy(packages_conda)
+        if purls_dropped:
+            print(f"{subdir}: purl removed from {purls_dropped} entr(ies) whose "
+                  f"package.yml sets no pypi_project")
         patched = load_patches(args.patches_dir, subdir, packages_conda)
 
         # run_exports lives in the fragments (and is patchable), but ships in
