@@ -1,0 +1,121 @@
+name: dpvo-cuda
+# The compiled half of princeton-vl/DPVO: three top-level extension modules
+# (cuda_corr, cuda_ba, lietorch_backends) plus the `dpvo` Python package that
+# wraps them. Upstream calls the distribution `dpvo`; the farm renamed it
+# dpvo_cuda (its patch) and the wheel farm's index serves it under that name,
+# so that is the PyPI identity carried here.
+pypi_name: dpvo_cuda
+# The subpackage that loads a compiled module and nothing heavier: dpvo/
+# __init__.py is empty, and dpvo.lietorch imports numpy, torch and
+# lietorch_backends only. See run_deps for why the top-level modules are not
+# the smoke test.
+import_name: dpvo.lietorch
+# Upstream's setup.py declares no version, so setuptools renders 0.0.0 and the
+# farm's wheel carries 0.0.0. The farm records that a pinned "1.0.0" was
+# invented once, blocked by its version gate, and would have sorted above any
+# real upstream release forever. make_wheel.py gates on agreement.
+version: "0.0.0"
+
+# MIT, read from the repo's own LICENSE at the pinned rev (Princeton Vision &
+# Learning Lab, 2022).
+license: MIT
+homepage: https://github.com/princeton-vl/DPVO
+summary: CUDA kernels of Deep Patch Visual Odometry (correlation, bundle adjustment, lietorch), compiled against the conda-torch channel
+
+source_repo: princeton-vl/DPVO
+source_rev: 859bbbfdac6c6185f345003b3c473901fcd13ace
+# Submodules are Pangolin and DBoW2 -- the viewer and loop-closure C++
+# programs, neither of which setup.py builds. Not walked. Eigen, which the
+# extensions DO need, is not a submodule at all: upstream's README says
+# "download it", so the patch vendors the 3.4.0 release tarball (sha256
+# pinned) at the path setup.py hardcodes.
+clone_recursive: false
+patch_script: packages/dpvo-cuda/patches/dpvo_cuda.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels, comments included:
+# jobs 1 / nvcc_threads 3 (owner call 2026-08-26). MEMORY-NEUTRAL reshape:
+# 3 jobs x 1 thread and 1 job x 3 threads both run three cicc processes. What
+# changes is WHERE the parallelism lives -- and here it could not live at the
+# process level at all.
+# Measured: 3 extensions, 40% avg CPU.
+# setuptools builds extensions SERIALLY
+# (_distutils/command/build_ext.py::_build_extensions_serial), so MAX_JOBS only
+# ever reaches the ninja run inside ONE extension -- and these hold too few
+# sources for it to matter. nvcc --threads parallelises across GENCODE TARGETS
+# inside a single TU, which is work that actually exists here.
+jobs: 1
+# 3 -> 2 (2026-08-26): 3 failed the swap gate on ARM.
+#   ARM  17:22  mem 15.4/15.6GB (0.2 avail) | swap 2.88/3.0 | cicc 4.71 4.67 4.65
+#   ARM  17:24                                              | cicc 5.50 4.98 4.15
+# Three concurrent cicc reached ~5GB each -- jobs x nvcc_threads x one cicc is
+# ~15GB on a 15.6GB runner, so it does not fit in RAM at all.
+#
+# The same cell PASSED on x86 and Windows, which is why this is 2 and not a
+# per-platform value: x86 got there with only two big cicc resident at the
+# sample (4.91 + 4.75 + 0.55) AND 11.0GB of swap to absorb the overflow,
+# against ARM's 3.0GB -- build-linux runs a `fallocate -l 8G ... swapon` step
+# that build-linux-aarch64 does not. So x86 passing was luck plus 3.7x the
+# swap, not evidence that 3 is safe. 2 x ~5GB = ~10GB fits in RAM outright,
+# which is what x86 was actually doing when it passed.
+nvcc_threads: 2
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# Upstream declares NOTHING (no install_requires, no pyproject), and the
+# farm's sidecar is empty apart from its curated `numpy`.
+#
+# What the shipped code needs, read from the imports at the pinned rev:
+#   cuda_corr, cuda_ba, lietorch_backends   torch only (the flavour-locked
+#                                           pytorch dep)
+#   dpvo.lietorch, dpvo.altcorr, dpvo.fastba  numpy + torch + the modules above
+#   dpvo.dpvo, dpvo.net, dpvo.ba, ...       the research pipeline: torch_scatter,
+#                                           einops, opencv, kornia, evo,
+#                                           pypose, numba, yacs, matplotlib,
+#                                           torchvision, plyfile ...
+# This package is the compiled half -- its consumers vendor or reimplement the
+# pipeline and need the kernels and the lietorch wrapper. The pipeline's
+# stack is not declared: half of it is not on conda-forge for win-64 and
+# none of it is needed to load a single compiled module. numpy is: it is
+# imported by dpvo/lietorch/groups.py, which is the thin wrapper over
+# lietorch_backends and the reason the Python package ships at all.
+run_deps:
+  - numpy
+
+# The kernels include torch headers, cuda_runtime and the vendored Eigen;
+# nothing from the CUDA math libraries (grep at the pinned rev: no cublas,
+# cusolver, cusparse, curand).
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: dpvo.lietorch
+  op: |
+    import torch, cuda_corr, cuda_ba, lietorch_backends
+    from dpvo.lietorch import SE3
+    # lietorch_backends: SE3 exp then log on the GPU must round-trip.
+    x = 0.1 * torch.randn(16, 6, device="cuda")
+    g = SE3.exp(x)
+    y = g.log()
+    assert torch.allclose(x, y, atol=1e-4), (x - y).abs().max()
+    # cuda_corr: patchify a feature map at integer coords, radius 1.
+    net = torch.arange(1 * 2 * 8 * 8, dtype=torch.float32, device="cuda").view(1, 2, 8, 8)
+    coords = torch.tensor([[[3.0, 4.0]]], device="cuda")   # [B=1, M=1, 2] (x, y)
+    (patches,) = cuda_corr.patchify_forward(net, coords, 1)
+    assert patches.shape == (1, 1, 2, 4, 4), patches.shape
+    assert patches[0, 0, 0, 1, 1].item() == net[0, 0, 4, 3].item(), patches[0, 0, 0]
+    # cuda_ba: reproject one patch between two identity poses; the kernel
+    # must hand back the patch's own pixel coordinates.
+    poses = torch.tensor([[0, 0, 0, 0, 0, 0, 1.0]] * 2, device="cuda")          # [F, 7] t + unit quaternion
+    patches = torch.zeros(1, 3, 3, 3, device="cuda")                               # [M, (x, y, inv depth), P, P]
+    patches[0, 0], patches[0, 1], patches[0, 2] = 10.0, 20.0, 0.5
+    intr = torch.tensor([[100.0, 100.0, 50.0, 50.0]], device="cuda")             # fx fy cx cy
+    idx = lambda v: torch.tensor([v], dtype=torch.long, device="cuda")
+    coords = cuda_ba.reproject(poses, patches, intr, idx(0), idx(1), idx(0))     # [1, N, 2, P, P]
+    assert coords.shape == (1, 1, 2, 3, 3), coords.shape
+    assert torch.allclose(coords[0, 0, 0], torch.full((3, 3), 10.0, device="cuda"), atol=1e-3), coords
+    assert torch.allclose(coords[0, 0, 1], torch.full((3, 3), 20.0, device="cuda"), atol=1e-3), coords

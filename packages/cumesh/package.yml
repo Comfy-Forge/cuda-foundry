@@ -1,0 +1,82 @@
+name: cumesh
+pypi_name: cumesh
+import_name: cumesh
+# pyproject.toml `version = "0.0.1"` at the pinned rev; the farm's wheel
+# carries 0.0.1. make_wheel.py gates on agreement.
+version: "0.0.1"
+
+# MIT, read from the repo's own LICENSE at the pinned rev (Jianfeng Xiang,
+# 2025). The vendored third_party/cubvh carries its own MIT plus the
+# instant-ngp NVIDIA source-code licence for the BVH core; xatlas is MIT.
+license: MIT AND LicenseRef-NVIDIA-Source-Code-License-instant-ngp
+homepage: https://github.com/JeffreyXiang/CuMesh
+summary: CUDA mesh processing (simplification, remeshing, UV atlas) for TRELLIS.2, compiled against the conda-torch channel
+
+source_repo: JeffreyXiang/CuMesh
+source_rev: cf1a2f07304b5fe388ed86a16e4a0474599df914
+# third_party/cubvh is a submodule (JeffreyXiang/cubvh @ ce92267, branch
+# trellis.2) which in turn pins third_party/eigen (gitlab, e63d9f6). The fetch
+# step walks both; nothing in the sandboxed build needs network.
+clone_recursive: true
+patch_script: packages/cumesh/patches/cumesh.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels, comments included:
+# jobs 1 / nvcc_threads 3 (owner call 2026-08-26). MEMORY-NEUTRAL reshape:
+# 3 jobs x 1 thread and 1 job x 3 threads both run three cicc processes. What
+# changes is WHERE the parallelism lives -- and here it could not live at the
+# process level at all.
+# Measured: 3 extensions, 62% avg CPU.
+# setuptools builds extensions SERIALLY
+# (_distutils/command/build_ext.py::_build_extensions_serial), so MAX_JOBS only
+# ever reaches the ninja run inside ONE extension -- and these hold too few
+# sources for it to matter. nvcc --threads parallelises across GENCODE TARGETS
+# inside a single TU, which is work that actually exists here.
+jobs: 1
+nvcc_threads: 3
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# pyproject.toml: dependencies = ["torch>=2.4.0", "tqdm"]. torch is the
+# flavour-locked pytorch dep; tqdm is imported by cumesh.py, remeshing.py
+# and xatlas.py at module load. The farm's sidecar carries exactly `tqdm`.
+run_deps:
+  - tqdm
+
+# The farm declared `extra_cuda_components: curand_dev cufft_dev nvtx`. None
+# of the three is included anywhere in this tree: at the pinned rev src/ and
+# third_party/ (cubvh, xatlas) include cuda.h, cuda_runtime.h, cuda_fp16.h
+# and cub/cub.cuh and nothing else from the toolkit (grep for curand, cufft,
+# nvToolsExt, nvtx3: no hits). That list was copied from a sibling, not
+# measured, and is not carried. The runtime headers are all this needs.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+# NOTE: cumesh._cubvh is a vendored copy of ashawkey/cubvh and registers the
+# same global pybind11 types (cuBVH, cuHashTable, HashTable) as the standalone
+# `cubvh` package. The two install side by side but cannot both be imported
+# into one interpreter. The cumesh-vb fork localises its registrations
+# (module_local) so IT coexists with this package; plain cumesh keeps
+# upstream's global types on purpose, as the farm does.
+
+verify:
+  import: cumesh
+  op: |
+    import torch, cumesh
+    # A unit cube as a CuMesh, then its own CUDA remeshing/cleanup path.
+    v = torch.tensor([[x, y, z] for x in (0, 1) for y in (0, 1) for z in (0, 1)], dtype=torch.float32, device="cuda")
+    f = torch.tensor([[0,1,3],[0,3,2],[4,6,7],[4,7,5],[0,4,5],[0,5,1],
+                      [2,3,7],[2,7,6],[0,2,6],[0,6,4],[1,5,7],[1,7,3]], dtype=torch.int32, device="cuda")
+    m = cumesh.CuMesh()
+    m.init(v, f)
+    m.remove_duplicate_faces()
+    v2, f2 = m.read()
+    assert v2.shape == (8, 3) and f2.shape == (12, 3), (v2.shape, f2.shape)
+    # And the vendored BVH extension, which is the second CUDA module.
+    bvh = cumesh.cuBVH(v, f)
+    d, _, _ = bvh.unsigned_distance(torch.tensor([[0.5, 0.5, 0.5]], device="cuda"), return_uvw=False)
+    assert abs(d.item() - 0.5) < 1e-4, d

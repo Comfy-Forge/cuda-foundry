@@ -1,0 +1,57 @@
+name: vox2seq
+pypi_name: vox2seq
+import_name: vox2seq
+# setup.py declares no version, so setuptools renders 0.0.0 and the farm's
+# wheel carries 0.0.0. make_wheel.py gates on agreement.
+version: "0.0.0"
+
+# MIT, read from the repository's LICENSE at the pinned rev (Microsoft).
+# The extensions/vox2seq/ subdirectory has no licence file of its own -- its
+# setup.py header is a boilerplate Inria notice copied from
+# diff-gaussian-rasterization and refers to a LICENSE.md that does not exist
+# anywhere in the repository; the repository's MIT is what governs, and the
+# patch carries it in.
+license: MIT
+homepage: https://github.com/microsoft/TRELLIS
+summary: vox2seq from TRELLIS (CUDA z-order and Hilbert voxel serialization), compiled against the conda-torch channel
+
+source_repo: microsoft/TRELLIS
+source_rev: f17fdf12d8f17a6a09225f01756d141285dc848f
+# The package lives in extensions/vox2seq/ inside the TRELLIS repository;
+# the patch hoists it to the source root (the farm's `build_subdir`).
+clone_recursive: false
+patch_script: packages/vox2seq/patches/vox2seq.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: one extension of four TUs.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py declares nothing and the farm's sidecar is empty. The package
+# imports torch and its own _C, nothing else (vox2seq/__init__.py and
+# vox2seq/pytorch/*.py at the pinned rev).
+run_deps: []
+
+# src/*.cu include cuda.h, cuda_runtime.h, cooperative_groups and torch
+# headers only.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: vox2seq
+  op: |
+    import torch, vox2seq
+    c = torch.randint(0, 1024, (4096, 3), device="cuda", dtype=torch.int32)
+    for mode in ("z_order", "hilbert"):
+        code = vox2seq.encode(c, mode=mode)
+        back = vox2seq.decode(code, mode=mode)
+        assert torch.equal(back.int(), c), mode
+    # The pure-torch reference (upstream's own test.py) agrees with the kernels.
+    for mode in ("z_order", "hilbert"):
+        assert torch.equal(vox2seq.encode(c, mode=mode), vox2seq.pytorch.encode(c, mode=mode)), mode

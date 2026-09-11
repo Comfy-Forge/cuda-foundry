@@ -1,0 +1,87 @@
+name: o-voxel-vb
+# visualbruno's fork of TRELLIS.2's o-voxel, renamed at the Python level to
+# o_voxel_vb by the patch so it installs and imports beside plain o_voxel
+# (disjoint file trees; no `constrains` needed). It is the o-voxel that
+# ComfyUI-TRELLIS2 tracks, and its postprocess prefers the matching forks
+# cumesh_vb / flex_gemm_vb, falling back to the plain packages.
+pypi_name: o_voxel_vb
+import_name: o_voxel_vb
+# pyproject.toml `version = "0.0.1"` at the pinned rev (the fork keeps
+# upstream's); the farm's wheel carries 0.0.1.
+version: "0.0.1"
+
+# MIT, read from the repository's LICENSE at the pinned rev (Microsoft's,
+# byte-identical to upstream's). The o-voxel/ subdirectory has no licence
+# file of its own; the patch carries the repository's in.
+license: MIT
+homepage: https://github.com/visualbruno/TRELLIS.2
+summary: visualbruno fork of TRELLIS.2's o-voxel, importable as o_voxel_vb beside plain o_voxel, compiled against the conda-torch channel
+
+source_repo: visualbruno/TRELLIS.2
+source_rev: 65d1e13b4a92296036044df0633242bb9e95abf6
+# See packages/o-voxel/package.yml: the package lives in o-voxel/ and is
+# hoisted to the root by the patch; Eigen 3.4.0 is vendored as a pinned
+# tarball rather than cloned from gitlab.
+clone_recursive: false
+patch_script: packages/o-voxel-vb/patches/ovoxel_vb.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: one extension of 11 TUs, 5 of them .cu.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# The fork's pyproject.toml declares torch, numpy, plyfile, trimesh, tqdm,
+# zstandard, easydict and has already dropped the cumesh/flex_gemm git URLs.
+# `import o_voxel_vb` needs, at the pinned rev (o_voxel/__init__.py imports
+# every submodule eagerly):
+#   numpy, plyfile, trimesh, tqdm, zstandard, easydict   as declared
+#   pillow, py-opencv                                    postprocess.py, io/
+#   cumesh-vb, flex-gemm-vb                              postprocess.py, via
+#                                                        the patched
+#                                                        try/except that
+#                                                        falls back to the
+#                                                        plain packages
+#   nvdiffrast                                           postprocess.py
+# The fork siblings are declared (they are what this fork family is for);
+# the fallback means an env holding only plain cumesh/flex_gemm still
+# imports, but the solver is told the intended pairing.
+run_deps:
+  - numpy
+  - plyfile
+  - trimesh
+  - tqdm
+  - zstandard
+  - easydict
+  - pillow
+  - py-opencv
+  - cumesh-vb
+  - flex-gemm-vb
+  - nvdiffrast
+
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: o_voxel_vb
+  op: |
+    import torch, o_voxel_vb as o_voxel
+    from o_voxel_vb.serialize import encode_seq, decode_seq
+    c = torch.randint(0, 1024, (4096, 3), device="cuda", dtype=torch.int32)
+    for mode in ("z_order", "hilbert"):
+        code = encode_seq(c, mode=mode)
+        back = decode_seq(code, mode=mode)
+        assert torch.equal(back.int(), c), mode
+    from o_voxel_vb.convert.flexible_dual_grid import _init_hashmap
+    n, grid = 512, torch.tensor([64, 64, 64])
+    coords = torch.stack(torch.meshgrid(*[torch.arange(8)] * 3, indexing="ij"), -1).reshape(-1, 3).int().cuda()
+    keys = torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1)
+    hm = _init_hashmap(grid, 2 * n, device="cuda")
+    o_voxel._C.hashmap_insert_3d_idx_as_val_cuda(*hm, keys, *grid.tolist())
+    got = o_voxel._C.hashmap_lookup_3d_cuda(*hm, keys, *grid.tolist())
+    assert torch.equal(got.int().cpu(), torch.arange(n, dtype=torch.int32)), got[:8]

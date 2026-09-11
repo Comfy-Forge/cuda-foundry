@@ -1,0 +1,76 @@
+name: o-voxel-vb-ap
+# PozzettiAndrea/Trellis.2.drtk's o-voxel: the visualbruno tree with the
+# nvdiffrast-dependent half (postprocess.py, rasterize.py, rasterize.cu)
+# removed, for a TRELLIS.2 pipeline that rasterises with DRTK instead.
+# Renamed at the Python level to o_voxel_vb_ap by the patch, so it installs
+# and imports beside o_voxel and o_voxel_vb (disjoint file trees; no
+# `constrains` needed).
+pypi_name: o_voxel_vb_ap
+import_name: o_voxel_vb_ap
+# pyproject.toml `version = "0.0.1"` at the pinned rev; the farm's wheel
+# carries 0.0.1.
+version: "0.0.1"
+
+# MIT, read from the repository's LICENSE at the pinned rev (Microsoft's).
+# The o-voxel/ subdirectory has no licence file; the patch carries it in.
+license: MIT
+homepage: https://github.com/PozzettiAndrea/Trellis.2.drtk
+summary: o-voxel from the Trellis.2.drtk fork (no nvdiffrast half), importable as o_voxel_vb_ap, compiled against the conda-torch channel
+
+source_repo: PozzettiAndrea/Trellis.2.drtk
+source_rev: 200ba8cb5a4039db8acde3c09edc43a0031b4098
+# See packages/o-voxel/package.yml: hoisted from o-voxel/ by the patch;
+# Eigen 3.4.0 vendored as a pinned tarball.
+clone_recursive: false
+patch_script: packages/o-voxel-vb-ap/patches/ovoxel_vb_ap.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: one extension, 10 TUs (rasterize.cu is
+# not built here), 4 of them .cu.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# pyproject.toml declares torch, numpy, plyfile, trimesh, tqdm, zstandard,
+# easydict. With postprocess.py and rasterize.py gone, `import o_voxel_vb_ap`
+# needs (read from the imports at the pinned rev):
+#   numpy, plyfile, trimesh, tqdm, zstandard   io/, serialize.py, convert/
+#   pillow                                     io/ (PIL.Image)
+# easydict was consumed only by rasterize.py, which this fork does not have;
+# it is not imported anywhere in the shipped package and is not declared.
+# No cumesh, flex_gemm, nvdiffrast or OpenCV -- that is the point of the
+# fork.
+run_deps:
+  - numpy
+  - plyfile
+  - trimesh
+  - tqdm
+  - zstandard
+  - pillow
+
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: o_voxel_vb_ap
+  op: |
+    import torch, o_voxel_vb_ap as o_voxel
+    from o_voxel_vb_ap.serialize import encode_seq, decode_seq
+    c = torch.randint(0, 1024, (4096, 3), device="cuda", dtype=torch.int32)
+    for mode in ("z_order", "hilbert"):
+        code = encode_seq(c, mode=mode)
+        back = decode_seq(code, mode=mode)
+        assert torch.equal(back.int(), c), mode
+    from o_voxel_vb_ap.convert.flexible_dual_grid import _init_hashmap
+    n, grid = 512, torch.tensor([64, 64, 64])
+    coords = torch.stack(torch.meshgrid(*[torch.arange(8)] * 3, indexing="ij"), -1).reshape(-1, 3).int().cuda()
+    keys = torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1)
+    hm = _init_hashmap(grid, 2 * n, device="cuda")
+    o_voxel._C.hashmap_insert_3d_idx_as_val_cuda(*hm, keys, *grid.tolist())
+    got = o_voxel._C.hashmap_lookup_3d_cuda(*hm, keys, *grid.tolist())
+    assert torch.equal(got.int().cpu(), torch.arange(n, dtype=torch.int32)), got[:8]

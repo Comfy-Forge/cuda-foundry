@@ -1,0 +1,101 @@
+name: o-voxel
+# TRELLIS.2's voxel library. PyPI/import name o_voxel; conda name is the
+# hyphenated form, as for every package here. Two forks of this same source
+# are also packaged -- o-voxel-vb (visualbruno/TRELLIS.2) and o-voxel-vb-ap
+# (PozzettiAndrea/Trellis.2.drtk) -- each renamed at the Python level by its
+# patch (o_voxel_vb, o_voxel_vb_ap), so the three install side by side with
+# disjoint files and need no `constrains` between them.
+pypi_name: o_voxel
+import_name: o_voxel
+# pyproject.toml `version = "0.0.1"` at the pinned rev; the farm's wheel
+# carries 0.0.1. make_wheel.py gates on agreement.
+version: "0.0.1"
+
+# MIT, read from the repository's LICENSE at the pinned rev (Microsoft). The
+# o-voxel/ subdirectory has no licence file of its own; the patch carries the
+# repository's in so the wheel's dist-info states it.
+license: MIT
+homepage: https://github.com/microsoft/TRELLIS.2
+summary: o-voxel from TRELLIS.2 (voxel hashing, serialization, flexible dual grid, rasterization), compiled against the conda-torch channel
+
+source_repo: microsoft/TRELLIS.2
+source_rev: 5565d240c4a494caaf9ece7a554542b76ffa36d3
+# The package lives in o-voxel/ inside the TRELLIS.2 repository; the patch
+# hoists that directory to the source root (patch_lib.hoist_subdir) because
+# the build runs `pip wheel .` at the root of the tarball. Its only submodule
+# is Eigen on gitlab, and the farm found gitlab returning 403 to GitHub
+# runners often enough to stop cloning it; the patch vendors the 3.4.0
+# release tarball (sha256 pinned) instead, at the path setup.py hardcodes.
+clone_recursive: false
+patch_script: packages/o-voxel/patches/ovoxel.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: one extension of 11 TUs, 5 of them .cu.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# pyproject.toml declares: torch, numpy, plyfile, trimesh, tqdm, zstandard,
+# easydict, and cumesh / flex_gemm as git URLs (unusable from any index; the
+# farm's patch made them bare names and its curated sidecar pinned them to
+# sibling wheels).
+#
+# What `import o_voxel` ACTUALLY needs, read from the imports at the pinned
+# rev -- o_voxel/__init__.py imports every submodule eagerly, so all of it is
+# import-time:
+#   numpy, plyfile, trimesh, tqdm, zstandard, easydict   as declared
+#   pillow (PIL), py-opencv (cv2)                        postprocess.py, io/;
+#                                                        undeclared upstream
+#   cumesh, flex-gemm                                    postprocess.py
+#   nvdiffrast                                           postprocess.py
+#                                                        (`import nvdiffrast.torch`)
+# The last three are packages this channel builds itself (cumesh in this
+# batch; flex-gemm and nvdiffrast are farm packages ported alongside). They
+# are declared because the package cannot be imported without them, and a
+# run: list that left them out would be a solve that succeeds and an import
+# that fails. The wheel's PEP 658 sidecar carries the same names (py-opencv
+# is translated to opencv-python by make_wheel.py).
+run_deps:
+  - numpy
+  - plyfile
+  - trimesh
+  - tqdm
+  - zstandard
+  - easydict
+  - pillow
+  - py-opencv
+  - cumesh
+  - flex-gemm
+  - nvdiffrast
+
+# src/ includes torch headers, cuda_runtime and the vendored Eigen; no CUDA
+# math library headers (grep at the pinned rev).
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: o_voxel
+  op: |
+    import torch, o_voxel
+    from o_voxel.serialize import encode_seq, decode_seq
+    # The CUDA z-order and Hilbert encoders, round-tripped on the GPU.
+    c = torch.randint(0, 1024, (4096, 3), device="cuda", dtype=torch.int32)
+    for mode in ("z_order", "hilbert"):
+        code = encode_seq(c, mode=mode)
+        back = decode_seq(code, mode=mode)
+        assert torch.equal(back.int(), c), mode
+    # And the CUDA hashmap behind the voxel lookups: insert N coords with
+    # their index as value, look the same coords up, get the indices back.
+    from o_voxel.convert.flexible_dual_grid import _init_hashmap
+    n, grid = 512, torch.tensor([64, 64, 64])
+    coords = torch.stack(torch.meshgrid(*[torch.arange(8)] * 3, indexing="ij"), -1).reshape(-1, 3).int().cuda()
+    keys = torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1)
+    hm = _init_hashmap(grid, 2 * n, device="cuda")
+    o_voxel._C.hashmap_insert_3d_idx_as_val_cuda(*hm, keys, *grid.tolist())
+    got = o_voxel._C.hashmap_lookup_3d_cuda(*hm, keys, *grid.tolist())
+    assert torch.equal(got.int().cpu(), torch.arange(n, dtype=torch.int32)), got[:8]

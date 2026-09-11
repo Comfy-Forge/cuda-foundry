@@ -1,0 +1,77 @@
+name: cumesh-vb
+# The visualbruno fork of CuMesh, renamed at the Python level so it installs
+# and imports beside plain `cumesh` (import name cumesh_vb; every file lives
+# under cumesh_vb/, so the two packages share no path and need no
+# `constrains`). The fork exists because ComfyUI-TRELLIS2's node pack tracks
+# visualbruno's TRELLIS.2 fork, whose o_voxel_vb prefers cumesh_vb.
+pypi_name: cumesh_vb
+import_name: cumesh_vb
+# pyproject.toml `version = "1.0"` at the pinned rev; the farm's wheel
+# carries 1.0 (cumesh_vb-1.0+cu128torch2.8-...). make_wheel.py gates on
+# agreement.
+version: "1.0"
+
+# MIT, read from the repo's own LICENSE at the pinned rev (Jianfeng Xiang;
+# the fork keeps upstream's file). third_party/cubvh carries MIT plus the
+# instant-ngp NVIDIA source-code licence for the BVH core; xatlas is MIT.
+license: MIT AND LicenseRef-NVIDIA-Source-Code-License-instant-ngp
+homepage: https://github.com/visualbruno/CuMesh
+summary: visualbruno fork of CuMesh (CUDA mesh processing for TRELLIS.2), importable as cumesh_vb beside plain cumesh, compiled against the conda-torch channel
+
+source_repo: visualbruno/CuMesh
+source_rev: d10e54c30ddd03d11472c1431693f985501c7966
+# No submodules at all: visualbruno committed third_party/cubvh directly into
+# the tree, and cubvh's own eigen submodule is therefore never walked. The
+# patch fetches Eigen at the exact commit JeffreyXiang/cubvh pins (e63d9f6),
+# as a sha256-pinned tarball, at fetch time.
+clone_recursive: false
+patch_script: packages/cumesh-vb/patches/cumesh_vb.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels, comments included:
+# jobs 1 / nvcc_threads 3 (owner call 2026-08-26). MEMORY-NEUTRAL reshape:
+# 3 jobs x 1 thread and 1 job x 3 threads both run three cicc processes. What
+# changes is WHERE the parallelism lives -- and here it could not live at the
+# process level at all.
+# Measured: 3 extensions (same shape as cumesh).
+# setuptools builds extensions SERIALLY
+# (_distutils/command/build_ext.py::_build_extensions_serial), so MAX_JOBS only
+# ever reaches the ninja run inside ONE extension -- and these hold too few
+# sources for it to matter. nvcc --threads parallelises across GENCODE TARGETS
+# inside a single TU, which is work that actually exists here.
+jobs: 1
+nvcc_threads: 3
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# pyproject.toml: dependencies = ["torch>=2.4.0", "tqdm"]. torch is the
+# flavour-locked pytorch dep; tqdm is imported by cumesh.py, remeshing.py
+# and xatlas.py at module load. The farm's sidecar carries exactly `tqdm`.
+run_deps:
+  - tqdm
+
+# Same tree shape as cumesh: cuda.h, cuda_runtime.h, cuda_fp16.h, cub. No
+# curand/cufft/nvtx header anywhere (grep at the pinned rev), whatever the
+# farm's copied `extra_cuda_components` said.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: cumesh_vb
+  op: |
+    import torch, cumesh_vb as cumesh
+    v = torch.tensor([[x, y, z] for x in (0, 1) for y in (0, 1) for z in (0, 1)], dtype=torch.float32, device="cuda")
+    f = torch.tensor([[0,1,3],[0,3,2],[4,6,7],[4,7,5],[0,4,5],[0,5,1],
+                      [2,3,7],[2,7,6],[0,2,6],[0,6,4],[1,5,7],[1,7,3]], dtype=torch.int32, device="cuda")
+    m = cumesh.CuMesh()
+    m.init(v, f)
+    m.remove_duplicate_faces()
+    v2, f2 = m.read()
+    assert v2.shape == (8, 3) and f2.shape == (12, 3), (v2.shape, f2.shape)
+    bvh = cumesh.cuBVH(v, f)
+    d, _, _ = bvh.unsigned_distance(torch.tensor([[0.5, 0.5, 0.5]], device="cuda"), return_uvw=False)
+    assert abs(d.item() - 0.5) < 1e-4, d

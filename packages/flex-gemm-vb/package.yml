@@ -1,0 +1,88 @@
+name: flex-gemm-vb
+# visualbruno's fork of JeffreyXiang/FlexGEMM, renamed at the Python level
+# to flex_gemm_vb by the patch so it installs and imports beside plain
+# flex_gemm (disjoint file trees; no `constrains` needed). It is the
+# FlexGEMM that ComfyUI-TRELLIS2's o_voxel_vb prefers.
+pypi_name: flex_gemm_vb
+import_name: flex_gemm_vb
+# pyproject.toml `version = "1.0.0"` at the pinned rev; the farm's wheel
+# carries 1.0.0. make_wheel.py gates on agreement.
+version: "1.0.0"
+
+# MIT, read from the repo's own LICENSE at the pinned rev (Jianfeng Xiang,
+# 2025; the fork keeps upstream's file).
+license: MIT
+homepage: https://github.com/visualbruno/FlexGEMM
+summary: visualbruno fork of FlexGEMM (sparse convolution and grid sampling for TRELLIS.2), importable as flex_gemm_vb beside plain flex_gemm, compiled against the conda-torch channel
+
+source_repo: visualbruno/FlexGEMM
+source_rev: db388bd17c34abc697792aa718dca780734c2783
+# No submodules at the pinned rev (the farm's clone_recursive: true walked
+# nothing); left false so a submodule appearing upstream is a visible change.
+clone_recursive: false
+patch_script: packages/flex-gemm-vb/patches/flexgemm_vb.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: one extension of five TUs.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# pyproject.toml declares: torch>=2.4.0, triton>=3.2.0 (non-Windows),
+# triton-windows>=3.2.0 (Windows), filelock. setup.py's install_requires is
+# just torch. The farm's extra_deps added numpy, which nothing under
+# flex_gemm/ imports (grep at the pinned rev) -- not carried.
+#
+#   filelock   imported by utils/autotuner.py at module load -> declared.
+#   triton     imported by every kernels/triton module at load; the CUDA
+#              extension is only half the package. Declared for linux only:
+#              there is NO conda build of triton for win-64 on conda-forge
+#              or conda-torch (measured 2026-09-11: `pixi search triton`
+#              on win-64 finds only tritonclient), and PyPI's triton-windows
+#              is not something a conda run: list can name. An
+#              unconditional `triton` would make the win-64 .conda UNSAT for
+#              every consumer; omitting it everywhere would make the linux
+#              metadata a lie. So the linux entry is explicit even though
+#              conda-torch's pytorch 2.8 cu128 already pins `triton ==3.4.0`
+#              there, and on win-64 the artifact's own metadata cannot say
+#              it: a win-64 user must `pip install triton-windows` (which is
+#              exactly what the farm's Windows wheel required too). The
+#              wheel's sidecar never carries triton on either platform --
+#              make_wheel.py treats it as torch's business (TORCH_NAMES).
+#   torch      the flavour-locked pytorch dep.
+run_deps:
+  - filelock
+  - { if: linux, then: triton }
+
+# The kernels include torch headers and cuda_runtime only; the farm's
+# `extra_cuda_components: cufft_dev nvtx` matched no include at the pinned
+# rev (grep: no cufft.h, no nvToolsExt.h / nvtx3) and is not carried.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+# ── build-time side effect worth knowing ──────────────────────────────────
+# setup.py copies autotune_cache.json into ~/.flex_gemm_vb/ AFTER setup()
+# returns -- a write into the build user's home, not into the wheel. The
+# shipped package looks for that file at import and, absent, autotunes on
+# first use and writes it back; the farm's wheels behave identically. The
+# recipe's build.script.env sets HOME to nothing special, so on CI the copy
+# lands in the runner's home and is discarded with the runner.
+
+verify:
+  import: flex_gemm_vb
+  op: |
+    import torch, flex_gemm_vb
+    from flex_gemm_vb.ops.serialize import encode_seq, decode_seq
+    # [N, 4] batch-prefixed coords, the CUDA z-order / Hilbert kernels.
+    c = torch.randint(0, 64, (4096, 3), device="cuda", dtype=torch.int32)
+    c = torch.cat([torch.zeros_like(c[:, :1]), c], dim=1)
+    shape = torch.Size([1, 8, 64, 64, 64])
+    for mode in ("z_order", "hilbert"):
+        code = encode_seq(c, shape, mode=mode)
+        back = decode_seq(code, shape, mode=mode)
+        assert torch.equal(back[:, 1:].int(), c[:, 1:]), mode
