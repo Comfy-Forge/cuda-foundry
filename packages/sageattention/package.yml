@@ -17,14 +17,16 @@ patch_script: packages/sageattention/patches/sageattention.py
 
 links_torch: true
 
-# Ported verbatim from cuda-wheels: "Constrain CI peak memory: sage's massive
+# Ported from cuda-wheels: "Constrain CI peak memory: sage's massive
 # template instantiations x N arches OOM 16GB github-hosted windows runners
-# under unlimited parallelism." Note what MAX_JOBS means HERE: setup.py reads
-# it into setuptools' `parallel` option (extensions built in a thread pool)
-# AND each extension's ninja takes it as -j, so 3 is up to 3x3 compiles at
-# the crossover between two extensions. The farm shipped every cell at this
-# value; it is kept, not re-derived. Upstream's own `--threads=8` is beaten
-# by the trailing --threads the recipe appends.
+# under unlimited parallelism." Upstream's setup.py reads MAX_JOBS twice --
+# into setuptools' `parallel` (extensions in a thread pool) AND each
+# extension's ninja -j -- so 3 meant up to nine nvcc processes, and the
+# win-64 runner (16 GB, no swap) died with "Catastrophic error: out of
+# memory" on the sm89 kernels (run 34586319303). The patch makes extensions
+# build serially, so this is what it says: three concurrent compiles.
+# Upstream's own `--threads=8` is beaten by the trailing --threads the
+# recipe appends.
 jobs: 3
 nvcc_threads: 1
 

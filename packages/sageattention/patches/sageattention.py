@@ -79,6 +79,32 @@ content = sub_once(
     "    for capability in sorted(compute_capabilities):",
     "gencode list emitted in a deterministic order (ccache replay)")
 
+# 1c. one meaning for MAX_JOBS ------------------------------------------------
+# setup.py reads MAX_JOBS TWICE: into setuptools' `parallel` (a thread pool
+# building the four extensions concurrently) AND, through torch's
+# BuildExtension, into each extension's `ninja -j`. So `jobs: 3` was up to
+# nine nvcc processes, which is not what package.yml's `jobs` means anywhere
+# else in this repo ("how many compiler processes run at once"). On the
+# 16 GB win-64 runner, which has no swap, nvcc died with "Catastrophic
+# error: out of memory" on the sm89 kernels (run 34586319303). Extensions
+# now build one after another and ninja -j carries the whole budget; the
+# explicit EXT_PARALLEL override is left alone for anyone who sets it.
+content = sub_once(
+    content,
+    """    if parallel is None and 'MAX_JOBS' in os.environ:
+        try:
+            parallel = int(os.getenv('MAX_JOBS'))
+        finally:
+            pass
+    # Defaults if not provided
+    if parallel is None:
+        parallel = 4""",
+    """    # cuda-foundry: MAX_JOBS is ninja's -j inside each extension; it does
+    # not also multiply across extensions.
+    if parallel is None:
+        parallel = 1""",
+    "extensions build serially; MAX_JOBS means concurrent compiles, once")
+
 # 2. platform-aware host flags ---------------------------------------------
 content = sub_once(
     content,
