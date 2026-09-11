@@ -1,0 +1,104 @@
+name: sageattention
+pypi_name: sageattention
+import_name: sageattention
+# setup.py: version='2.2.0', literal.
+version: "2.2.0"
+
+# Apache-2.0, read from the repo's own LICENSE at the pinned rev.
+license: Apache-2.0
+homepage: https://github.com/thu-ml/SageAttention
+summary: SageAttention 2.2, quantized attention kernels, compiled against the conda-torch channel
+
+source_repo: thu-ml/SageAttention
+# v2.2.0, dereferenced to the commit (git ls-remote --tags, 2026-09-11).
+source_rev: eb615cf6cf4d221338033340ee2de1c37fbdba4a
+clone_recursive: false            # no .gitmodules at v2.2.0
+patch_script: packages/sageattention/patches/sageattention.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: "Constrain CI peak memory: sage's massive
+# template instantiations x N arches OOM 16GB github-hosted windows runners
+# under unlimited parallelism." Note what MAX_JOBS means HERE: setup.py reads
+# it into setuptools' `parallel` option (extensions built in a thread pool)
+# AND each extension's ninja takes it as -j, so 3 is up to 3x3 compiles at
+# the crossover between two extensions. The farm shipped every cell at this
+# value; it is kept, not re-derived. Upstream's own `--threads=8` is beaten
+# by the trailing --threads the recipe appends.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py declares NO install_requires, and the farm's sidecar agrees
+# (Requires-Dist: none). Read against the imports, that is honest but
+# incomplete in one place: sageattention/core.py imports its own Triton
+# kernels (.triton.quant_per_block, .triton.attn_qk_int8_*) at module
+# scope, so `import sageattention` needs triton. triton is part of the torch
+# family here (tools/make_wheel.py TORCH_NAMES): the torch a consumer installs
+# pins the triton that goes with it, and conda-torch's pytorch 2.8 cuda128
+# carries `triton ==3.4.0` on linux-64, so the conda package inherits it
+# transitively. On win-64 no conda triton exists at all (see flex-gemm's
+# package.yml for the same situation), so a win-64 conda environment needs
+# PyPI's triton-windows beside it -- the contract the farm's wheel has too.
+run_deps: []
+
+# csrc/qattn and csrc/fused include only the CUDA runtime and torch headers,
+# plus <cuda.h> for the Hopper path.
+host_deps:
+  - cuda-cudart-dev
+
+# _qattn_sm90 (Hopper, qk_int_sv_f8_cuda_sm90.cu) uses TMA and calls
+# cuTensorMapEncodeTiled, a DRIVER API entry point, so upstream links it with
+# -lcuda. torch's own CUDA libraries do not carry libcuda.so.1 in their
+# DT_NEEDED (measured: libtorch_cuda.so needs cudart/cublas/cudnn/..., never
+# libcuda), so the extension must, and the link needs the driver's STUB:
+#   linux-64  cuda-driver-dev ships lib/stubs/libcuda.so, and nothing puts
+#             lib/stubs on the link line -- torch's cpp_extension adds only
+#             $CUDA_HOME/lib -- hence the LDFLAGS below. At runtime the real
+#             libcuda.so.1 comes from the driver; the wheel never vendors it
+#             (make_wheel.py ALWAYS_EXCLUDE) and the conda package declares
+#             __cuda.
+#   win-64    there is no cuda-driver-dev package; cuda.lib ships inside
+#             cuda-cudart-dev_win-64 (measured from its paths.json:
+#             Library/lib/cuda.lib), which the recipe already has. Nothing to
+#             add, and adding the linux name would make the platform UNSAT.
+host_deps_linux:
+  - cuda-driver-dev
+
+build_deps: []
+
+# Linux: put the driver stub directory on the link line. conda's compiler
+# activation already exports LDFLAGS (-L$PREFIX/lib among others) and
+# setuptools appends the variable to the link command, so this extends rather
+# than replaces it. win-64 overrides the variable to nothing: MSVC's linker
+# does not read LDFLAGS, and cuda.lib is found through LIB, which the CUDA
+# activation sets.
+build_env:
+  LDFLAGS: $LDFLAGS -L$PREFIX/lib/stubs
+build_env_win:
+  LDFLAGS: ""
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: sageattention
+  # The explicit CUDA entry point, not sageattn(): the auto-dispatcher routes
+  # sm_86 (RTX 3090, the verifying GPU) to the Triton path and would exercise
+  # no cubin this package ships. sageattn_qk_int8_pv_fp16_cuda runs the
+  # _fused quantisation kernels and _qattn_sm80's attention kernel, checked
+  # against torch's own SDPA -- so a mis-arch'd build fails with
+  # cudaErrorNoKernelImageForDevice, and a wrong kernel fails the tolerance.
+  op: |
+    import torch
+    import torch.nn.functional as F
+    from sageattention import sageattn_qk_int8_pv_fp16_cuda
+    torch.manual_seed(0)
+    q = torch.randn(1, 4, 256, 64, dtype=torch.float16, device="cuda")
+    k = torch.randn(1, 4, 256, 64, dtype=torch.float16, device="cuda")
+    v = torch.randn(1, 4, 256, 64, dtype=torch.float16, device="cuda")
+    out = sageattn_qk_int8_pv_fp16_cuda(q, k, v, tensor_layout="HND", is_causal=False,
+                                        pv_accum_dtype="fp32")
+    ref = F.scaled_dot_product_attention(q, k, v)
+    assert out.shape == ref.shape, out.shape
+    err = (out.float() - ref.float()).abs().max().item()
+    assert err < 0.1, f"sageattention deviates from SDPA by {err}"

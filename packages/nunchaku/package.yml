@@ -1,0 +1,107 @@
+name: nunchaku
+pypi_name: nunchaku
+import_name: nunchaku
+# nunchaku/__version__.py: __version__ = "1.2.1". setup.py appends its own
+# +cu<dotted cuda>torch<major.minor> local tag, which the patch removes: the
+# publishing side owns the +cu128torch2.8 tag and a double local version is
+# not PEP 440.
+version: "1.2.1"
+
+# Apache-2.0, read from the repo's LICENCE.txt at the pinned rev.
+license: Apache-2.0
+homepage: https://github.com/nunchaku-ai/nunchaku
+summary: Nunchaku, SVDQuant 4-bit diffusion inference engine, compiled against the conda-torch channel
+
+# The repo moved twice (mit-han-lab -> nunchaku-tech -> nunchaku-ai; the old
+# names 301). PyPI's `nunchaku` is an UNRELATED changepoint library; nothing
+# here may ever resolve this name from PyPI.
+source_repo: nunchaku-ai/nunchaku
+# v1.2.1, dereferenced to the commit (git ls-remote --tags, 2026-09-11).
+source_rev: af49f24911b49147c074ed96c324fb66884d1f87
+# cutlass, json, mio, spdlog and Block-Sparse-Attention are submodules, all
+# header-only or compiled in-tree.
+clone_recursive: true
+patch_script: packages/nunchaku/patches/nunchaku.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: "Upstream hardcodes --threads=len(
+# sm_targets) (~5); the farm's trailing --threads=1 wins. Cap jobs for the
+# CUTLASS-heavy kernels." ~25 CUDA TUs, eight of them Block-Sparse-Attention
+# flash kernels; the farm measured the whole build at ~99 minutes on a
+# hosted runner at these knobs.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies: pyproject.toml [project] dependencies, read against use ──
+#   accelerate>=1.9, diffusers>=0.36, einops, huggingface-hub>=0.34,
+#   peft>=0.17, protobuf, sentencepiece, torchvision>=0.20, transformers>=4.54
+# All genuine: nunchaku/__init__.py imports .models, which are diffusers
+# transformer subclasses; the text encoders are transformers models;
+# torchvision is used by the PuLID pipeline. torchvision is part of the torch
+# family for the wheel (make_wheel.py strips it from the sidecar); the conda
+# package can declare it because the channel has a flavour-locked build.
+# Extras (ci/demo/dev/docs/full) are dropped. huggingface_hub is
+# conda-forge's spelling; pip normalises the underscore, so the sidecar
+# needs no mapping.
+run_deps:
+  - accelerate >=1.9
+  - diffusers >=0.36
+  - einops
+  - huggingface_hub >=0.34
+  - peft >=0.17
+  - protobuf
+  - sentencepiece
+  - transformers >=4.54
+  - torchvision >=0.20
+
+# src/Linear.cpp and src/FluxModel.cpp include <nvtx3/nvToolsExt.h> for
+# nvtxRangePush/Pop. NVTX v3 is header-only and lives in cuda-nvtx-dev, which
+# conda-forge ships for both linux-64 and win-64 (the RUNTIME package
+# cuda-nvtx is linux-only, which is why the recipe's torch floor names it
+# only there). Everything else is the CUDA runtime and torch.
+host_deps:
+  - cuda-cudart-dev
+  - cuda-nvtx-dev
+
+build_deps: []
+
+# Upstream's own switches, both read by setup.py:
+#   NUNCHAKU_INSTALL_MODE  FAST (the default) enumerates the LOCAL GPUs and
+#                          asserts on zero of them -- a hosted runner has
+#                          none. ALL builds every arch upstream supports.
+#   NUNCHAKU_BUILD_WHEELS  setup.py:136 appends --generate-line-info unless
+#                          this is "1": the default is the developer build,
+#                          and this is upstream's own release switch.
+# Plain strings, but build_env is the one per-package channel into the
+# build script's environment on both platforms.
+build_env:
+  NUNCHAKU_INSTALL_MODE: ALL
+  NUNCHAKU_BUILD_WHEELS: "1"
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: nunchaku
+  # The AWQ W4A16 GEMV kernel (src/kernels/awq/gemv_awq.cu) through the public
+  # AWQW4A16Linear layer, checked against a dense reference. The kernel
+  # dequantises as w = q * scale + scaled_zero (hfma2 at gemv_awq.cu:187), so
+  # with every packed nibble zero the effective weight is exactly the
+  # scaled_zeros table expanded over each group -- a reference that does not
+  # depend on the interleaved packing layout. A mis-arch'd build fails with
+  # cudaErrorNoKernelImageForDevice; a wrong kernel fails the tolerance.
+  op: |
+    import torch
+    from nunchaku.models.linear import AWQW4A16Linear
+    k, n, g = 128, 64, 64
+    torch.manual_seed(0)
+    lin = AWQW4A16Linear(k, n, bias=False, group_size=g, torch_dtype=torch.float16, device="cuda")
+    lin.qweight.data.zero_()
+    lin.wscales.data.fill_(1.0)
+    lin.wzeros.data.copy_(torch.randn(k // g, n, device="cuda", dtype=torch.float16))
+    x = torch.randn(1, k, device="cuda", dtype=torch.float16)
+    out = lin(x)
+    ref = x @ lin.wzeros.data.repeat_interleave(g, dim=0)
+    assert out.shape == (1, n), out.shape
+    err = (out.float() - ref.float()).abs().max().item()
+    assert err < 0.25, f"AWQ gemv deviates from the dense reference by {err}"

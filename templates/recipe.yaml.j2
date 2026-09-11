@@ -289,6 +289,20 @@ requirements:
 <%- for dep in host_deps %>
     - << dep >>
 <%- endfor %>
+<%- if host_deps_linux or host_deps_win %>
+    # package.yml `host_deps_linux` / `host_deps_win`: the same need met by a
+    # differently-packaged thing per platform (the libcuda link stub is
+    # cuda-driver-dev on linux-64 and part of cuda-cudart-dev_win-64 on
+    # win-64). See scripts/package_loader.py.
+<%- endif %>
+<%- for dep in host_deps_linux %>
+    - if: linux
+      then: << dep >>
+<%- endfor %>
+<%- for dep in host_deps_win %>
+    - if: win
+      then: << dep >>
+<%- endfor %>
   run:
     - python
     # Every package here ships compiled CUDA kernels, so it states that about

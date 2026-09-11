@@ -193,6 +193,8 @@ def render(folder: str, cfg: dict, env) -> str:
         links_torch=cfg.get("links_torch", True),
         force_source_build=cfg.get("force_source_build") or {},
         host_deps=cfg.get("host_deps") or [],
+        host_deps_linux=cfg.get("host_deps_linux") or [],
+        host_deps_win=cfg.get("host_deps_win") or [],
         run_deps=cfg.get("run_deps") or [],
         build_deps=cfg.get("build_deps") or [],
         shard_sources=cfg.get("shard_sources") or [],

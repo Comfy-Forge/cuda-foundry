@@ -1,0 +1,20 @@
+# Overrides of the shared arch policy (defaults/arch_policy.yml) for this
+# package only. See README.md.
+#
+# Ported from cuda-wheels. Upstream's own wheels are built for "8.0;8.6"
+# (packaging/env_var_script_linux.sh), i.e. Ampere and up only; the CUDA
+# sources back that up -- marlin_qqq and tensor_core_tiled_layout are under
+# `__CUDA_ARCH__ >= 800`, cutlass_extensions/common.h has its own >= 800 and
+# >= 900 guards, and the rowwise_scaled_linear_cutlass kernels instantiate
+# Sm80 CUTLASS templates. The shared row's 7.0/7.5 have nothing to run.
+#
+# The two arch-specific modules pick their own single gencode regardless of
+# this list: _C_cutlass_90a (sm_90a) and _C_cutlass_100a (sm_100a), gated on
+# the toolkit version (>= 12.6 / >= 12.8). The general _C carries this row.
+arch_list_by_cuda:
+  '12.4': 8.0 8.6 8.9 9.0+PTX
+  '12.6': 8.0 8.6 8.9 9.0+PTX
+  '12.8': 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+  '12.9': 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+  '13.0': 8.0 8.6 8.9 9.0 10.0 12.0+PTX
+  '13.2': 8.0 8.6 8.9 9.0 10.0 12.0+PTX

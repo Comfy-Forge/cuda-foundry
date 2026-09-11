@@ -1,0 +1,97 @@
+name: sageattn3
+pypi_name: sageattn3
+import_name: sageattn3
+# sageattention3_blackwell/setup.py: version="1.0.0", literal, and not the
+# 2.2.0 of the repo tag it lives under -- this is a separate distribution
+# in the SageAttention repo, with its own setup.py.
+version: "1.0.0"
+
+# Apache-2.0: the repo's LICENSE at the pinned rev, and setup.py's own
+# "License :: OSI Approved :: Apache Software License" classifier.
+license: Apache-2.0
+homepage: https://github.com/thu-ml/SageAttention
+summary: SageAttention3, microscaling FP4 attention for Blackwell, compiled against the conda-torch channel
+
+# The SAME repo and rev as packages/sageattention. The buildable project is
+# the subdirectory sageattention3_blackwell/ (its own setup.py, its own
+# version), which build_subdir points the build at; the provenance stays
+# the repo commit.
+source_repo: thu-ml/SageAttention
+# v2.2.0, dereferenced to the commit (git ls-remote --tags, 2026-09-11).
+source_rev: eb615cf6cf4d221338033340ee2de1c37fbdba4a
+build_subdir: sageattention3_blackwell
+clone_recursive: false            # no .gitmodules; CUTLASS is vendored by the patch
+patch_script: packages/sageattn3/patches/sageattn3.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels (2026-08-27 measurement). Two extensions
+# with ONE source each, which setuptools builds serially, so `jobs` has
+# nothing to parallelise and is inert. nvcc_threads is the knob that
+# matters: --threads forks one cicc per gencode inside the single TU, and one
+# cicc on this CUTLASS FP4 kernel was measured at ~7.0-7.2 GB RSS on cu12.8.
+# At --threads 3 the cu13.0 cells (three gencodes) pinned 11 GB of swap at
+# 9% CPU and were OOM-killed (exit 137, nine of nine jobs); at 2 the wheel
+# built and then failed the swap gate at 6 GB. One cicc at a time leaves ~8 GB
+# headroom on a 16 GB runner. Cost: the gencodes serialise, and that is not
+# a loss -- at 9% CPU the box was paging, not compiling.
+jobs: 1
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py install_requires = ["torch", "einops", "packaging", "ninja"].
+#   einops     sageattn3/api.py uses it in the attention wrapper   -> runtime
+#   packaging  used by setup.py (and imported at runtime by api.py's version
+#              checks)                                             -> runtime
+#   ninja      a BUILD tool that leaked into install_requires (the same class
+#              as gsplat's); the recipe already puts ninja in build:.
+#   triton     sageattn3/api.py imports triton at module scope for the group
+#              mean kernel. Part of the torch family here (see
+#              packages/sageattention/package.yml): supplied by conda-torch's
+#              pytorch on linux-64, absent from conda on win-64.
+run_deps:
+  - einops
+  - packaging
+
+host_deps:
+  - cuda-cudart-dev
+# Both extensions call cuTensorMapEncodeTiled (TMA) and link -lcuda; the
+# stub lives in cuda-driver-dev on linux-64 and inside cuda-cudart-dev_win-64
+# on win-64. Same arrangement, same reasoning, as packages/sageattention.
+host_deps_linux:
+  - cuda-driver-dev
+
+build_deps: []
+
+build_env:
+  LDFLAGS: $LDFLAGS -L$PREFIX/lib/stubs
+build_env_win:
+  LDFLAGS: ""
+
+carry: complete   # not on conda-forge; nothing to shadow
+
+verify:
+  import: sageattn3
+  # Blackwell only, by construction: the two modules carry sm_100a and
+  # sm_120a cubins and no PTX (arch-conditional images have no
+  # forward-compat tail to emit). The op therefore CANNOT run on the
+  # RTX 3090 this repo verifies on, and it says so rather than passing
+  # vacuously: on anything but sm_100/sm_120 it stops with a message naming
+  # the gap, and on Blackwell it runs the FP4 attention against SDPA.
+  op: |
+    import torch
+    import torch.nn.functional as F
+    cc = torch.cuda.get_device_capability()
+    assert cc[0] in (10, 12), (
+        f"sageattn3 ships sm_100a/sm_120a only and this GPU is sm_{cc[0]}{cc[1]}: "
+        f"the kernels cannot be exercised here -- verify on a Blackwell part")
+    from sageattn3 import sageattn3_blackwell
+    torch.manual_seed(0)
+    q = torch.randn(1, 4, 256, 128, dtype=torch.float16, device="cuda")
+    k = torch.randn(1, 4, 256, 128, dtype=torch.float16, device="cuda")
+    v = torch.randn(1, 4, 256, 128, dtype=torch.float16, device="cuda")
+    out = sageattn3_blackwell(q, k, v)
+    ref = F.scaled_dot_product_attention(q, k, v)
+    assert out.shape == ref.shape, out.shape
+    err = (out.float() - ref.float()).abs().max().item()
+    assert err < 0.2, f"sageattn3 deviates from SDPA by {err}"

@@ -1,0 +1,19 @@
+# Overrides of the shared arch policy (defaults/arch_policy.yml) for this
+# package only. See README.md.
+#
+# The kernels are Blackwell-only and ARCH-CONDITIONAL: the patched setup.py
+# maps 10.0 -> compute_100a/sm_100a and 12.0 -> compute_120a/sm_120a and
+# refuses any other token ("Unsupported GPU" upstream; a named RuntimeError
+# after the patch). No PTX is emitted for either, and none could be: an `a`
+# target's PTX loads only on that exact arch, and the base compute_120 cannot
+# be lowered from `a`-only instructions. So the rows carry no +PTX and the
+# artifact runs on sm_100 and sm_120 and nothing else -- upstream's design.
+#
+# 12.1 (GB10 / DGX Spark) needs nvcc >= 12.9 (`nvcc --list-gpu-code` on 12.8
+# has no sm_121); the cu12.8 row therefore omits it and the later rows carry
+# it, as the farm measured.
+arch_list_by_cuda:
+  '12.8': 10.0 12.0
+  '12.9': 10.0 12.0 12.1
+  '13.0': 10.0 12.0 12.1
+  '13.2': 10.0 12.0 12.1

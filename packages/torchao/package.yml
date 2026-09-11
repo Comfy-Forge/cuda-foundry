@@ -1,0 +1,108 @@
+name: torchao
+pypi_name: torchao
+import_name: torchao
+# version.txt at v0.13.0, plus VERSION_SUFFIX="" (build_env) so setup.py does
+# not append +git<sha> -- which it does whenever the variable is UNSET, and
+# which would make the wheel 0.13.0+git...+cu128torch2.8, a double local tag.
+version: "0.13.0"
+
+# BSD-3-Clause, read from the repo's own LICENSE at the pinned rev.
+license: BSD-3-Clause
+homepage: https://github.com/pytorch/ao
+summary: torchao, PyTorch-native quantization and sparsity kernels, compiled against the conda-torch channel
+
+source_repo: pytorch/ao
+# ── why 0.13.0 and not the farm's 0.18.0 ─────────────────────────────────
+# torchao versions PAIR with torch, and 0.13.0 is the release upstream built
+# against torch 2.8.0 -- which is this repo's first cell. The farm's 0.18.0
+# carries `min_pytorch: "2.10.0"` and cannot be used here at all: measured
+# on 2.8.0+cu128, `import torchao` 0.18.0 dies in
+# quantization/quantize_/workflows/float8/float8_tensor.py on
+# `from torch.nn.functional import ScalingType` (a 2.10 symbol).
+#
+# The intermediate releases were measured too, and the deciding fact is not
+# the import but torchao/__init__.py's own LOAD GATE: unless the version
+# carries "+git", it consults a hardcoded (torchao, torch) table and SKIPS
+# loading every _C*.so on any pairing not in it (pytorch/ao#2919 -- the
+# 2.8-built binaries abort on 2.9). Their prebuilt cu128 wheels on
+# 2.8.0+cu128, on this box:
+#   0.17.0 / 0.16.0   import fine, but upstream removed the general CUDA
+#                     kernels; only sm_90a/sm_100a-specific modules remain
+#   0.15.0            table admits torch 2.9.1 / 2.10.dev only -> extensions
+#                     silently NOT loaded, ops raise NotImplementedError
+#   0.14.0            table admits (0.13.0, 2.8.0) and (0.14.0.dev, 2.9.0.dev)
+#                     only -- its own release number is not in it -> same
+#   0.13.0            table admits (0.13.0, 2.8.0) -> extensions load,
+#                     unpack_tensor_core_tiled_layout round-trips on CUDA
+# So 0.13.0 is the only release whose gate lets a torch-2.8 build use the
+# kernels it compiled, and it is also upstream's declared pairing. A build
+# that ships _C.so beside a gate that refuses to load it is exactly the
+# silent-defect class this repo exists to prevent. When a torch >= 2.10 cell
+# is added, this becomes a family_versions map rather than a single version.
+#
+# v0.13.0, dereferenced to the commit (git ls-remote --tags, 2026-09-11).
+source_rev: e318546f9be8c6dd1340157cd14e5cbc6ffa1f65
+clone_recursive: true             # third_party/cutlass (pinned submodule commit)
+patch_script: packages/torchao/patches/torchao.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: "jobs 1, NOT the farm-wide 3. Restored
+# 2026-08-26 after the uniform policy raised it and cu13.0/torch2.11 linux
+# immediately reproduced the failure this value exists to prevent: peak swap
+# 7.84GB, MemAvailable low-water 0.18GB. CUTLASS TU peaks exceed the 16GB
+# box. Upstream passes -t=0 (one thread per gencode, ~6 on cu128) to nvcc;
+# the trailing --threads=1 neutralises it, so the whole memory budget goes to
+# one CUTLASS translation unit."
+jobs: 1
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py declares NO install_requires (torch is assumed), and the farm's
+# sidecar agrees: nothing outside the `dev` extra. Read against the imports:
+# torchao's core uses torch and the standard library only; numpy is not
+# imported at module scope anywhere on the `import torchao` path.
+run_deps: []
+
+# torchao/csrc/cuda includes the CUDA runtime, cuBLAS (fp6_llm, marlin) and
+# torch's headers; cuBLAS-dev is already in the recipe's torch floor. CUTLASS
+# is the vendored submodule.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+# Upstream's own release switch. Unset -> "+git<sha>" is appended (and there
+# is no git in the build, so it would be "+git"). Empty -> exactly
+# version.txt, which is what the cell says this is and what make_wheel.py
+# gates on. USE_CPU_KERNELS is deliberately left at its default "0": the
+# alternative compiles csrc/cpu with -march=native and bakes the runner's
+# CPU into a portable artifact.
+build_env:
+  VERSION_SUFFIX: ""
+
+carry: complete   # conda-forge has no torchao; nothing to shadow
+
+verify:
+  import: torchao
+  # unpack_tensor_core_tiled_layout is a torchao CUDA kernel in _C
+  # (csrc/cuda/tensor_core_tiled_layout/) and has an exact inverse in torch's
+  # own _convert_weight_to_int4pack, so the check is a bit-exact round trip.
+  # It also proves the load gate in torchao/__init__.py let the extensions
+  # in: when it does not, the op raises NotImplementedError for the CUDA
+  # backend (measured on the 0.14.0 and 0.15.0 wheels), which is the quiet
+  # failure this package.yml's version comment is about.
+  op: |
+    import torch, torchao, torchao.ops
+    N, K, inner_k_tiles = 256, 256, 2
+    t = torch.randint(0, 16, dtype=torch.int, size=(N, K), device="cuda")
+    packed = torch.ops.aten._convert_weight_to_int4pack(
+        (t[:, ::2] << 4 | t[:, 1::2]).to(torch.uint8), inner_k_tiles)
+    unpacked = torchao.ops.unpack_tensor_core_tiled_layout(packed, inner_k_tiles)
+    assert unpacked.shape == (N, K) and torch.equal(unpacked, t)
+    # and the high-level API on top of it
+    from torchao.quantization import quantize_, Int8WeightOnlyConfig
+    m = torch.nn.Linear(64, 64).cuda().bfloat16()
+    quantize_(m, Int8WeightOnlyConfig())
+    y = m(torch.randn(2, 64, device="cuda", dtype=torch.bfloat16))
+    assert y.shape == (2, 64) and torch.isfinite(y).all()

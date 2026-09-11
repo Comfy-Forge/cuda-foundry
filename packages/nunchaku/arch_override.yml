@@ -1,0 +1,25 @@
+# Overrides of the shared arch policy (defaults/arch_policy.yml) for this
+# package only. See README.md.
+#
+# This DOCUMENTS what the build produces rather than steering it. nunchaku's
+# setup.py never reads TORCH_CUDA_ARCH_LIST: get_sm_targets() derives the
+# targets from NUNCHAKU_INSTALL_MODE=ALL, which at v1.2.1 is
+#     ["75", "80", "86", "89"] + ["120a"] (nvcc >= 12.8) + ["121a"] (nvcc >= 13.0)
+# No sm_90 and no sm_100: the INT4/FP4 kernels target consumer parts and
+# Hopper/B200 are not in upstream's list. The shared policy row for cu12.8
+# (7.0 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX) would therefore fail the SASS
+# census on sm_70, sm_90 and sm_100 for every artifact.
+#
+# 12.0 is built as sm_120a (upstream appends the `a` on purpose, for the FP4
+# MMA path), and an arch-conditional image cannot carry a portable PTX tail.
+# The +PTX sits on 8.9 instead: patches/nunchaku.py adds `code=compute_89`
+# for the highest PLAIN target, which is a real JIT path onto sm_90 and
+# later parts that ship no cubin of their own. The rows below carry it in
+# the same place, so the list says where the tail is.
+arch_list_by_cuda:
+  '12.4': 7.5 8.0 8.6 8.9+PTX
+  '12.6': 7.5 8.0 8.6 8.9+PTX
+  '12.8': 7.5 8.0 8.6 8.9+PTX 12.0
+  '12.9': 7.5 8.0 8.6 8.9+PTX 12.0
+  '13.0': 7.5 8.0 8.6 8.9+PTX 12.0 12.1
+  '13.2': 7.5 8.0 8.6 8.9+PTX 12.0 12.1

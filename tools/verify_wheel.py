@@ -320,12 +320,20 @@ def _finish(rep, z, names, meta, args, tmp: Path, is_win: bool) -> bool:
     if args.expect_arch:
         want = {a.replace(".", "").replace("+PTX", "")
                 for a in args.expect_arch.split()}
+        # Union over every module, for the reason verify_conda.py gives at its
+        # census: a package that splits kernels by architecture keeps the
+        # cell's promise as an artifact and breaks it in any single module.
         if exts:
-            biggest = max(exts, key=lambda n: z.getinfo(n).file_size)
-            got = sass_archs(z.read(biggest), tmp, is_win)
+            got, per_module = set(), {}
+            for n in exts:
+                archs = sass_archs(z.read(n), tmp, is_win)
+                if archs:
+                    per_module[Path(n).name] = sorted(archs)
+                got |= archs
             rep.check(want <= got or not got,
                       f"SASS covers the cell's arch list "
-                      f"(want {sorted(want)}, got {sorted(got)})")
+                      f"(want {sorted(want)}, got {sorted(got)} over "
+                      f"{len(exts)} module(s): {per_module})")
 
     print(f"--- {rep.artifact}: {'FAIL' if rep.failed else 'PASS'}")
     return not rep.failed

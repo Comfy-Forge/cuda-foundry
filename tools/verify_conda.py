@@ -452,16 +452,32 @@ def verify(path: Path, ledger: set, expect_arch: str, tmp: Path) -> bool:
                   f"({len(ledger)} TUs; foreign: {foreign[:2]})")
 
     # ---- SASS arch census ---------------------------------------------------
+    # The census is taken over the UNION of every shipped extension module,
+    # not over the largest one. This used to inspect only the biggest .so,
+    # which asks the wrong question of any package that splits its kernels
+    # by architecture: sageattention builds _qattn_sm89 for sm_89/90/120 only
+    # (its FP8 QMMA path is nothing but __brkpt() traps below Ada, so the
+    # patch filters those gencodes out on purpose) beside _qattn_sm80 and
+    # _fused carrying the whole list -- and the sm89 module is the largest
+    # of the four. The cell's promise is "this ARTIFACT carries SASS for
+    # every arch in the list"; a per-module reading of it fails an artifact
+    # that keeps the promise. For a single-module package the two readings
+    # are identical, so nothing is loosened there.
     if expect_arch and exts:
         want = {a.replace(".", "").replace("+PTX", "") for a in expect_arch.split()}
-        biggest = max(exts, key=lambda n: ptf.getmember(n).size)
-        p = tmp / "sass.so"
-        p.write_bytes(ptf.extractfile(biggest).read())
-        out = subprocess.run(["cuobjdump", "--list-elf", str(p)],
-                             capture_output=True, text=True).stdout
-        got = set(re.findall(r"sm_(\d+)", out))
+        got, per_module = set(), {}
+        for n in exts:
+            p = tmp / "sass.so"
+            p.write_bytes(ptf.extractfile(n).read())
+            out = subprocess.run(["cuobjdump", "--list-elf", str(p)],
+                                 capture_output=True, text=True).stdout
+            archs = set(re.findall(r"sm_(\d+)", out))
+            if archs:
+                per_module[n.rsplit("/", 1)[-1]] = sorted(archs)
+            got |= archs
         rep.check(want <= got or not got,
-                  f"SASS archs cover the cell's arch list (want {sorted(want)}, got {sorted(got)})")
+                  f"SASS archs cover the cell's arch list (want {sorted(want)}, "
+                  f"got {sorted(got)} over {len(exts)} module(s): {per_module})")
 
     print(f"--- {path.name}: {'FAIL' if rep.failed else 'PASS'}")
     return not rep.failed

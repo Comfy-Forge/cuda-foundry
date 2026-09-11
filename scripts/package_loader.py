@@ -189,7 +189,16 @@ def _check_dependencies_declared(cfg: dict, pkg_dir: Path) -> None:
             f"names; write `run_deps: []` if it genuinely has none. Do not "
             f"list build tools (ninja, packaging, psutil, setuptools) -- "
             f"those go in build_deps.")
-    for key in ("run_deps", "host_deps", "build_deps"):
+    # host_deps_linux / host_deps_win exist for the one kind of dependency
+    # that genuinely differs by platform rather than by package: where a
+    # toolkit component lives. The libcuda link stub is `cuda-driver-dev` on
+    # linux-64 (lib/stubs/libcuda.so) and does not exist as a package on
+    # win-64 at all -- cuda.lib ships inside cuda-cudart-dev_win-64 -- so a
+    # package linking -lcuda (sageattention's Hopper TMA path) cannot state
+    # that dependency in one unconditional list without making one platform
+    # UNSAT. They are additive to host_deps, never a replacement for it.
+    for key in ("run_deps", "host_deps", "build_deps",
+                "host_deps_linux", "host_deps_win"):
         v = cfg.get(key)
         if v is not None and not isinstance(v, list):
             raise SystemExit(
