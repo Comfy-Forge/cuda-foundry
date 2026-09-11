@@ -21,7 +21,9 @@ source:
   path: ${{ env.get("CUW_SRC_TARBALL", default="../../source.tar.gz") }}
 
 build:
-  number: ${{ env.get("CUW_BUILD_NUMBER", default="0") }}
+  # The workflow passes the cell's number as `rattler-build --build-num`,
+  # which overrides this; 0 is what a hand render gets.
+  number: 0
   string: cuda${{ cuda_short }}_torch${{ torch_nodot }}_py${{ py_nodot }}_h${{ hash }}_${{ build_number }}
   # Declarative, applied by rattler-build at packaging time, so it holds on
   # every path out of the build -- including one that exits before the script
@@ -124,8 +126,6 @@ build:
       # matters most on Windows, where that flag would put $out.d -- a path --
       # into every nvcc command line ccache hashes.
       TORCH_EXTENSION_SKIP_NVCC_GEN_DEPENDENCIES: "1"
-      CUW_RUN_ID: ${{ env.get("GITHUB_RUN_ID", default="local") }}
-      CUW_RUN_URL: ${{ env.get("CUW_RUN_URL", default="local") }}
 
 requirements:
   build:
@@ -414,6 +414,8 @@ extra:
   source:
     repo: "Tencent-Hunyuan/Hunyuan3D-2.1"
     commit: "82920d643c0dc2f7bfd7255f45f62d386edfe60c"
+  # The exact torch build compiled against, from the matrix; verify_conda
+  # rejects the default, so a hand render is visibly not a publishable one.
   torch_build: ${{ env.get("CUW_TORCH_BUILD", default="unrecorded") }}
   # package.yml `distribution_restriction`: the licence forbids distribution
   # somewhere. Recorded in the artifact and in the README's package table;
@@ -421,6 +423,6 @@ extra:
   distribution_restriction: "Licence excludes the EU, UK and South Korea (LICENSE lines 3, 18, 24, 40)"
   cuda_compiler_version: ${{ cuda_compiler_version }}
   arch_list: ${{ env.get("CUW_ARCH_LIST", default="") }}
-  run_id: ${{ env.get("GITHUB_RUN_ID", default="local") }}
-  run_url: ${{ env.get("CUW_RUN_URL", default="local") }}
+  # run_id / run_url arrive from the workflow as `rattler-build --extra-meta`
+  # and are merged into this block at packaging time.
 

@@ -21,7 +21,9 @@ source:
   path: ${{ env.get("CUW_SRC_TARBALL", default="../../source.tar.gz") }}
 
 build:
-  number: ${{ env.get("CUW_BUILD_NUMBER", default="0") }}
+  # The workflow passes the cell's number as `rattler-build --build-num`,
+  # which overrides this; 0 is what a hand render gets.
+  number: 0
   # No torch axis: a links_torch: false package (cumm, spconv) is one build
   # per (cuda, python), and its build string says so. This is the string
   # generate_matrix.build_string() computes and --skip-published globs for;
@@ -130,8 +132,6 @@ build:
       # matters most on Windows, where that flag would put $out.d -- a path --
       # into every nvcc command line ccache hashes.
       TORCH_EXTENSION_SKIP_NVCC_GEN_DEPENDENCIES: "1"
-      CUW_RUN_ID: ${{ env.get("GITHUB_RUN_ID", default="local") }}
-      CUW_RUN_URL: ${{ env.get("CUW_RUN_URL", default="local") }}
 
 requirements:
   build:
@@ -356,13 +356,14 @@ extra:
   source:
     repo: "traveller59/spconv"
     commit: "263d6b47425ef843c82f997b12d8b714013d216c"
-  torch_build: ${{ env.get("CUW_TORCH_BUILD", default="unrecorded") }}
+  # A torch-free package compiled against no torch, and says so.
+  torch_build: none
   # The PyPI project this artifact genuinely provides (package.yml
   # pypi_project); tools/fragment.py turns it into the purl. Absent means
   # "no purl" -- either the name is not on PyPI or it is someone else's.
   pypi_project: "spconv"
   cuda_compiler_version: ${{ cuda_compiler_version }}
   arch_list: ${{ env.get("CUW_ARCH_LIST", default="") }}
-  run_id: ${{ env.get("GITHUB_RUN_ID", default="local") }}
-  run_url: ${{ env.get("CUW_RUN_URL", default="local") }}
+  # run_id / run_url arrive from the workflow as `rattler-build --extra-meta`
+  # and are merged into this block at packaging time.
 

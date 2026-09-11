@@ -63,7 +63,9 @@ source:
   path: ${{ env.get("CUW_SRC_TARBALL", default="../../source.tar.gz") }}
 
 build:
-  number: ${{ env.get("CUW_BUILD_NUMBER", default="0") }}
+  # The workflow passes the cell's number as `rattler-build --build-num`,
+  # which overrides this; 0 is what a hand render gets.
+  number: 0
 <%- if links_torch %>
   string: cuda${{ cuda_short }}_torch${{ torch_nodot }}_py${{ py_nodot }}_h${{ hash }}_${{ build_number }}
 <%- else %>
@@ -223,8 +225,6 @@ build:
       # matters most on Windows, where that flag would put $out.d -- a path --
       # into every nvcc command line ccache hashes.
       TORCH_EXTENSION_SKIP_NVCC_GEN_DEPENDENCIES: "1"
-      CUW_RUN_ID: ${{ env.get("GITHUB_RUN_ID", default="local") }}
-      CUW_RUN_URL: ${{ env.get("CUW_RUN_URL", default="local") }}
 
 requirements:
   build:
@@ -604,7 +604,14 @@ extra:
     repo: << source_repo | tojson >>
     commit: << source_rev | tojson >>
 <%- endif %>
+<%- if links_torch %>
+  # The exact torch build compiled against, from the matrix; verify_conda
+  # rejects the default, so a hand render is visibly not a publishable one.
   torch_build: ${{ env.get("CUW_TORCH_BUILD", default="unrecorded") }}
+<%- else %>
+  # A torch-free package compiled against no torch, and says so.
+  torch_build: none
+<%- endif %>
 <%- if pypi_project %>
   # The PyPI project this artifact genuinely provides (package.yml
   # pypi_project); tools/fragment.py turns it into the purl. Absent means
@@ -619,5 +626,5 @@ extra:
 <%- endif %>
   cuda_compiler_version: ${{ cuda_compiler_version }}
   arch_list: ${{ env.get("CUW_ARCH_LIST", default="<< arch_list >>") }}
-  run_id: ${{ env.get("GITHUB_RUN_ID", default="local") }}
-  run_url: ${{ env.get("CUW_RUN_URL", default="local") }}
+  # run_id / run_url arrive from the workflow as `rattler-build --extra-meta`
+  # and are merged into this block at packaging time.

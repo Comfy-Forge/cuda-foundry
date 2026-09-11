@@ -27,7 +27,8 @@ source:
     target_directory: _snippets
 
 build:
-  number: ${{ env.get("CUW_BUILD_NUMBER", default="0") }}
+  # The workflow passes the number as `rattler-build --build-num`.
+  number: 0
   noarch: python
   # The same packaging-time gate every generated recipe carries.
   files:
@@ -114,5 +115,4 @@ extra:
   source:
     repo: FindDefinition/PCCM
     commit: 66b17a365f3b1ea9c0142020baafe93b5dabb509
-  run_id: ${{ env.get("GITHUB_RUN_ID", default="local") }}
-  run_url: ${{ env.get("CUW_RUN_URL", default="local") }}
+  # run_id / run_url arrive from the workflow as `rattler-build --extra-meta`.
