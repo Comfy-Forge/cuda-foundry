@@ -1,0 +1,106 @@
+name: gsplat
+pypi_name: gsplat
+import_name: gsplat
+# gsplat/version.py at the pinned rev: __version__ = "1.5.3", and the farm's
+# published wheel is gsplat-1.5.3+cu128torch2.8. make_wheel.py gates on the
+# two agreeing.
+version: "1.5.3"
+
+# Apache-2.0, read from the repo's own LICENSE at the pinned rev.
+license: Apache-2.0
+homepage: https://github.com/nerfstudio-project/gsplat
+summary: Differentiable Gaussian splatting rasterization, compiled against the conda-torch channel
+
+source_repo: nerfstudio-project/gsplat
+# Tag v1.5.3, resolved to the commit it points at rather than carried as a
+# tag: a tag can be moved, a commit cannot, and the provenance stamped into
+# every artifact claims a specific commit.
+source_rev: 937e29912570c372bed6747a5c9bf85fed877bae
+# gsplat/cuda/csrc/third_party/glm is a git submodule (g-truc/glm at
+# 33b4a621a697a305bc3a7610d290677b96beb181) and setup.py points include_dirs at
+# it; without the recursive clone every TU dies on glm/glm.hpp.
+clone_recursive: true
+patch_script: packages/gsplat/patches/gsplat.py
+
+links_torch: true
+
+# Ported from cuda-wheels, comments included:
+# Upstream setup.py self-sets MAX_JOBS=10 when the env is unset -- on a
+# 4-vCPU runner that is -j10. An explicit value preempts the hijack.
+# jobs 4 (restored 2026-08-26). It ran at 4 before the farm-wide 3 and had no
+# recorded memory trouble -- many medium TUs, no heavy tail.
+jobs: 4
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py install_requires at v1.5.3:
+#   ["ninja", "numpy", "jaxtyping", "rich>=12", "torch",
+#    "typing_extensions; python_version<'3.8'"]
+#
+# ninja is NOT carried over. It is the build tool torch's BuildExtension
+# drives, and the only runtime path that could want it is _backend.py's JIT
+# fallback, which runs only when `from gsplat import csrc` fails -- i.e. only
+# when this package's own extension is missing. Shipping the extension is the
+# point; ninja is in build_deps where the recipe template already puts it.
+# The farm's PEP 658 sidecar declares `Requires-Dist: ninja` because its
+# single extra_deps field had nowhere else to put it (ARCHITECTURE.md,
+# "Dependencies: derive, then curate").
+#
+# torch is supplied by the recipe's flavour-locked pytorch dep.
+#
+# Two additions over upstream's list, both read from the package's own
+# import-time code at this rev rather than assumed:
+#   * packaging       gsplat/cuda/_backend.py: `from packaging import version`,
+#                     unconditional, executed on `import gsplat`
+#   * typing_extensions  rendering.py, cuda/_wrapper.py, strategy/default.py
+#                     all `from typing_extensions import Literal` at module
+#                     level; upstream's `python_version<'3.8'` marker is wrong
+#                     for that import and typing_extensions is not stdlib.
+# rich is a real import-time dependency too (_backend.py, rich.console).
+# jaxtyping is declared upstream and kept, though nothing in gsplat/ imports
+# it at this rev.
+run_deps:
+  - numpy
+  - jaxtyping
+  - rich >=12
+  - packaging
+  - typing_extensions
+
+# The .cu sources include cuda_runtime.h, cooperative_groups.h and
+# cub/cub.cuh; glm is the vendored submodule. cooperative_groups ships in
+# cuda-cudart-dev, cub in cuda-cccl (already in build:).
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+# conda-forge does not ship gsplat; nothing to shadow.
+carry: complete
+
+verify:
+  import: gsplat
+  # A real rasterization through the compiled kernels (projection, tile
+  # intersection, rasterize_to_pixels), not an import: a mis-arch'd build
+  # surfaces only as cudaErrorNoKernelImageForDevice at op time. One
+  # gaussian in front of the camera must land on the image, so the render
+  # is asserted finite AND non-zero -- a kernel that silently returns zeros
+  # would otherwise pass.
+  op: |
+    import math, torch, gsplat
+    dev = "cuda"
+    means = torch.tensor([[0.0, 0.0, 3.0]], device=dev)
+    quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=dev)
+    scales = torch.full((1, 3), 0.5, device=dev)
+    opacities = torch.tensor([1.0], device=dev)
+    colors = torch.tensor([[1.0, 0.5, 0.25]], device=dev)
+    viewmats = torch.eye(4, device=dev)[None]
+    W = H = 32
+    f = W / (2 * math.tan(math.radians(30)))
+    Ks = torch.tensor([[[f, 0, W / 2], [0, f, H / 2], [0, 0, 1]]], device=dev)
+    img, alpha, meta = gsplat.rasterization(means, quats, scales, opacities,
+                                            colors, viewmats, Ks, W, H)
+    torch.cuda.synchronize()
+    assert img.shape == (1, H, W, 3), img.shape
+    assert torch.isfinite(img).all() and torch.isfinite(alpha).all()
+    assert alpha.max() > 0.5, alpha.max()
+    assert img[..., 0].max() > 0.5, img[..., 0].max()

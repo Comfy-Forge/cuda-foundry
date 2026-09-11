@@ -1,0 +1,73 @@
+name: custom-rasterizer-hy3d2
+pypi_name: custom_rasterizer_hy3d2
+# The distribution is renamed by the patch (upstream calls it
+# `custom_rasterizer`, a name both Hunyuan3D families claim); the EXTENSION
+# keeps upstream's name because that is what Hunyuan3D's render.py imports:
+#     import custom_rasterizer_kernel
+# The pure-Python `custom_rasterizer` wrapper is deliberately not shipped --
+# consumers vendor their own copy -- so the extension module is the whole
+# artifact and the thing to import.
+import_name: custom_rasterizer_kernel
+# setup.py: version="0.1"; the farm publishes custom_rasterizer_hy3d2-0.1+cu128torch2.8.
+version: "0.1"
+
+# LICENSE at the repo root: "TENCENT HUNYUAN 3D 2.1 COMMUNITY LICENSE
+# AGREEMENT". Not on the SPDX list; the patch copies it into the relocated
+# tree.
+license: LicenseRef-Tencent-Hunyuan-3D-2.1-Community-License
+homepage: https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1
+summary: Hunyuan3D 2.1's custom_rasterizer_kernel (texture-baking rasterizer), compiled against the conda-torch channel
+
+source_repo: Tencent-Hunyuan/Hunyuan3D-2.1
+source_rev: 82920d643c0dc2f7bfd7255f45f62d386edfe60c   # main @ 2025-10-17
+# The package lives at hy3dpaint/custom_rasterizer inside the Hunyuan3D-2.1
+# repo (the farm's `build_subdir`); the patch relocates it to the tarball
+# root, where this repo's build runs `pip wheel .`, and applies the int64
+# portability port that makes it compile on MSVC. See the patch.
+patch_script: packages/custom-rasterizer-hy3d2/patches/custom_rasterizer_hy3d2.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: one .cu and two .cpp.
+jobs: 3
+nvcc_threads: 1
+
+# setup.py passes no compile flags at all and never probes the GPU, so
+# torch's TORCH_CUDA_ARCH_LIST handling is in force unpatched.
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# No install_requires and, after the patch, no Python: one extension module
+# linking torch and the CUDA runtime. The farm's sidecar agrees (empty).
+run_deps: []
+
+# rasterizer_gpu.cu uses the runtime and ATen's CUDA stream; nothing else.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge
+
+verify:
+  import: custom_rasterizer_kernel
+  # rasterize_image on one clip-space triangle covering part of a 32x32
+  # image: face indices are 1-based with 0 for "no face", so coverage is a
+  # real fraction, and the barycentrics of covered pixels must sum to 1.
+  # Exercises both kernels (the z-buffer scatter and the barycentric
+  # resolve); a mis-arch'd build fails at the first launch.
+  op: |
+    import torch
+    import custom_rasterizer_kernel as crk
+    dev = "cuda"; H = W = 32
+    V = torch.tensor([[-0.8, -0.8, 0.5, 1.0], [0.8, -0.8, 0.5, 1.0],
+                      [0.0, 0.8, 0.5, 1.0]], device=dev)
+    F = torch.tensor([[0, 1, 2]], dtype=torch.int32, device=dev)
+    findices, bary = crk.rasterize_image(V, F, torch.zeros(0, device=dev), W, H, 1e-6, 0)
+    torch.cuda.synchronize()
+    assert findices.shape == (H, W) and bary.shape == (H, W, 3), (findices.shape, bary.shape)
+    hit = findices > 0
+    cov = hit.float().mean().item()
+    assert 0.1 < cov < 0.9, cov
+    assert int(findices.max()) == 1, findices.max()
+    assert torch.isfinite(bary).all()
+    assert torch.allclose(bary[hit].sum(-1), torch.ones(int(hit.sum()), device=dev), atol=1e-4)

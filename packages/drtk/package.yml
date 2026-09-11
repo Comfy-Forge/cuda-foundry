@@ -1,0 +1,90 @@
+name: drtk
+pypi_name: drtk
+import_name: drtk
+# drtk/__init__.py: __version__ = "0.1.0"; setup.py reads it from there.
+version: "0.1.0"
+
+# MIT, read from the repo's own LICENSE at the pinned rev.
+license: MIT
+homepage: https://github.com/facebookresearch/DRTK
+summary: Meta's Differentiable Rendering Toolkit (rasterize, render, edge_grad, msi, mipmap), compiled against the conda-torch channel
+
+source_repo: facebookresearch/DRTK
+source_rev: c5a3e523435b4daa37572c0653d6686531c787b2
+patch_script: packages/drtk/patches/drtk.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels, comments included:
+# jobs 1, nvcc_threads 4 (owner call 2026-08-26). `jobs` cannot help this
+# package and was measured doing nothing: drtk builds SEVEN separate
+# CUDAExtensions, and setuptools builds extensions serially
+# (_distutils/command/build_ext.py::_build_extensions_serial). MAX_JOBS only
+# parallelises WITHIN one extension's ninja invocation, and each of drtk's has
+# 1-2 translation units -- so ninja gets -j3 and two files, seven times over.
+# Live evidence from run 32975448792 (Linux, cu13.0):
+#   MAX_JOBS=3  CMAKE_BUILD_PARALLEL_LEVEL=3
+#   cpu: 25-37% (runq 2-3)      <- ~1 core of 4 busy
+#   mem: 2.4/15.6GB used        <- 13GB idle
+#   ninja: [1/2] [2/2]          <- two edges per invocation
+# nvcc --threads is the knob that fits: it parallelises across GENCODE TARGETS
+# inside a single TU, and drtk's cu13.0 row is six archs
+# (7.5 8.0 8.6 9.0 10.0 12.0), which is exactly where the wall time goes.
+# Memory headroom is ample -- 4 concurrent cicc against 13GB free.
+# jobs dropped to 1 rather than left at 3: with the extensions built serially
+# anyway, a job count above 1 only matters for the two extensions that hold
+# more than one TU, and keeping it at 1 means the whole 16GB budget belongs to
+# the four cicc processes rather than being nominally split four more ways.
+jobs: 1
+nvcc_threads: 4
+
+# setup.py honours TORCH_CUDA_ARCH_LIST: its hardcoded -gencode list (sm_72
+# through sm_90) is added only `if not os.getenv("TORCH_CUDA_ARCH_LIST")`,
+# and the recipe always sets it. No arch patch needed; the patch asserts the
+# guard is still there.
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py install_requires = ["numpy", "torch", "torchvision", pillow]
+# (pillow-simd if that is what is installed). Curated against what drtk/
+# actually imports at this rev: torch and numpy, nothing else -- there is no
+# `import torchvision` and no `import PIL` anywhere under drtk/ (checked with
+# a grep over every module). torchvision and pillow are declared upstream
+# and unused, so they are not carried; the farm's sidecar carries pillow
+# because it copied the declaration. torch is the flavour-locked pytorch dep.
+run_deps:
+  - numpy
+
+# src/ includes cuda_runtime.h and cub/cub.cuh (cuda-cccl, in build:); the
+# rest is torch and its own headers under src/include.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge
+
+verify:
+  import: drtk
+  # rasterize + render through two of the seven extensions: a triangle
+  # covering part of a 32x32 image must produce a plausible coverage fraction
+  # (not 0, not 1) and finite barycentrics that sum to 1 where covered. A
+  # mis-arch'd build fails at the first launch with
+  # cudaErrorNoKernelImageForDevice; a kernel writing nothing leaves the
+  # index image at its -1 fill and fails the coverage assert.
+  op: |
+    import torch, drtk
+    dev = "cuda"; H = W = 32
+    v = torch.tensor([[[2.0, 2.0, 1.0], [29.0, 2.0, 1.0], [15.0, 29.0, 1.0]]], device=dev)
+    vi = torch.tensor([[0, 1, 2]], dtype=torch.int32, device=dev)
+    idx = drtk.rasterize(v, vi, H, W)
+    torch.cuda.synchronize()
+    assert idx.shape == (1, H, W) and idx.dtype == torch.int32, (idx.shape, idx.dtype)
+    cov = (idx >= 0).float().mean().item()
+    assert 0.2 < cov < 0.8, cov
+    depth, bary = drtk.render(v, vi, idx)
+    torch.cuda.synchronize()
+    assert bary.shape == (1, H, W, 3), bary.shape
+    hit = idx >= 0
+    assert torch.isfinite(bary[hit]).all()
+    assert torch.allclose(bary[hit].sum(-1), torch.ones(int(hit.sum()), device=dev), atol=1e-4)
+    assert torch.allclose(depth[hit], torch.ones(int(hit.sum()), device=dev), atol=1e-4)

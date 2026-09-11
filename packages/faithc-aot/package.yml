@@ -1,0 +1,91 @@
+name: faithc-aot
+# setup.py: name="faithc-aot"; the wheel is faithc_aot-1.5.0+cu128torch2.8.
+pypi_name: faithc-aot
+# Two top-level packages, faithcontour and atom3d. atom3d is the one that
+# holds the three compiled extensions and imports cleanly with torch alone;
+# faithcontour/__init__.py asserts torch.cuda.is_available() at import, so
+# it is exercised by the GPU op below rather than by the import test.
+import_name: atom3d
+version: "1.5.0"
+
+# setup.py: license="Apache-2.0 AND MIT" -- FaithContour (Luo-Yihao/FaithC)
+# is Apache-2.0 (LICENSE.faithcontour), Atom3d (Luo-Yihao/Atom3d) is MIT
+# (LICENSE.atom3d). Both files are in the repo at the pinned rev.
+license: Apache-2.0 AND MIT
+homepage: https://github.com/PozzettiAndrea/faithc-aot
+summary: FaithContour + Atom3d mesh codec with its CUDA kernels compiled ahead of time, against the conda-torch channel
+
+source_repo: PozzettiAndrea/faithc-aot
+# Tag v1.5.0-aot on the packaging fork, resolved to the commit it points at
+# (master @ 193bb9f).
+source_rev: 193bb9f423048965e0411616038064b576d932cf
+clone_recursive: false
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: three single-TU CUDAExtensions
+# (cumtv, bvh, floodfill), built serially by setuptools.
+jobs: 3
+nvcc_threads: 1
+
+# No patch: the fork already committed the AOT conversion. setup.py's nvcc
+# flags are ["-O3", "--use_fast_math"] (no arch flag, no GPU probe), the cxx
+# flag is already chosen by sys.platform inside setup.py, and the runtime
+# loaders (atom3d/kernels/{__init__,bvh,flood_fill}.py) try the shipped
+# extension before their JIT fallback.
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# setup.py install_requires = ["trimesh", "numpy", "scipy", "einops",
+# "torch>=2.0.0"]; the farm's sidecar carries the first four. Checked against
+# the imports: trimesh and einops in faithcontour/utils/mesh.py (module
+# level, reached from faithcontour/__init__), numpy throughout,
+# scipy.sparse in faithcontour's segment ops. torch is the flavour-locked
+# pytorch dep. NOT declared: torch_scatter (faithcontour falls back to
+# torch_scatter_compat when it is absent) and cubvh (imported only by
+# faithcontour/api.py, which nothing on the remesh path imports and which
+# upstream itself calls unsupported in this wheel).
+run_deps:
+  - trimesh
+  - numpy
+  - scipy
+  - einops
+
+# The three .cu include cuda_runtime.h and torch headers only.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge
+
+verify:
+  import: atom3d
+  # All three shipped extensions, each through its Python loader, and each
+  # loader must have resolved the ahead-of-time module rather than JIT
+  # compiling: an artifact whose kernels were compiled on the user's machine
+  # would pass every other check and defeat the point of the package.
+  # Two of the three are then exercised on known geometry with closed-form
+  # answers, so a kernel that launches but computes nothing fails too.
+  op: |
+    import torch
+    from atom3d.kernels import get_cuda_kernels, ray_mesh_intersect, point_mesh_udf
+    from atom3d.kernels.bvh import get_bvh_kernels, BVHAccelerator
+    from atom3d.kernels.flood_fill import get_floodfill_kernels
+    for mod, name in ((get_cuda_kernels(), "cumtv_cuda"), (get_bvh_kernels(), "bvh_cuda"),
+                      (get_floodfill_kernels(), "floodfill_cuda")):
+        assert mod.__name__ == f"atom3d.kernels.{name}", (mod.__name__, mod.__file__)
+    dev = "cuda"
+    verts = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], device=dev)
+    faces = torch.tensor([[0, 1, 2]], dtype=torch.int32, device=dev)
+    rays_o = torch.tensor([[0.2, 0.2, 1.0], [2.0, 2.0, 1.0]], device=dev)
+    rays_d = torch.tensor([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]], device=dev)
+    hit, t, fid, pts, uv = ray_mesh_intersect(verts, faces, rays_o, rays_d)
+    torch.cuda.synchronize()
+    assert hit.tolist() == [True, False], hit
+    assert abs(t[0].item() - 1.0) < 1e-5, t
+    d, cf, cp, uvw = point_mesh_udf(verts, faces, torch.tensor([[0.2, 0.2, 0.5]], device=dev))
+    assert abs(d[0].item() - 0.5) < 1e-5, d
+    bvh = BVHAccelerator(verts, faces)
+    hit2, t2, fid2, pts2 = bvh.ray_intersect(rays_o, rays_d)
+    torch.cuda.synchronize()
+    assert hit2.tolist() == [True, False] and abs(t2[0].item() - 1.0) < 1e-5, (hit2, t2)

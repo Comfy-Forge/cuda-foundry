@@ -1,0 +1,87 @@
+name: gsplat-maskgaussian
+pypi_name: gsplat_maskgaussian
+# The import name is still `gsplat`: the fork keeps upstream's package
+# directory, and HY-World's own code does `import gsplat`. Only the
+# distribution is renamed (by the patch), so this and the vanilla `gsplat`
+# package install the same files -- one of the two per environment, never
+# both. That is upstream's own instruction ("install the custom gsplat
+# variant once for both worldrecon and worldgen").
+import_name: gsplat
+# gsplat/version.py in the vendored fork still says 1.5.3, and the farm's
+# published wheel is gsplat_maskgaussian-1.5.3+cu128torch2.8.
+version: "1.5.3"
+
+# The fork is nerfstudio's Apache-2.0 gsplat, vendored inside a repo whose
+# License.txt is the Tencent HY-World 2.0 Community License; the subdirectory
+# carries no licence file of its own. Both are stated, and the patch copies
+# License.txt into the relocated tree so the artifact carries it.
+license: Apache-2.0 AND LicenseRef-Tencent-HY-World-2.0-Community-License
+homepage: https://github.com/Tencent-Hunyuan/HY-World-2.0
+summary: HY-World 2.0's gsplat fork with MaskGaussian densification and distloss, compiled against the conda-torch channel
+
+source_repo: Tencent-Hunyuan/HY-World-2.0
+source_rev: ee5d5bc02c92671486ab6dd81f0cba577d0478c8
+# The package lives at hyworld2/worldgen/third_party/gsplat_maskgaussian
+# inside the HY-World repo (the farm's `build_subdir`). This repo's build
+# runs `pip wheel .` at the tarball root, so the patch RELOCATES that
+# subdirectory to the root and drops the rest of the checkout: the tarball
+# then contains exactly the package. It also clones glm, which HY-World
+# stripped out of the fork (see the patch).
+patch_script: packages/gsplat-maskgaussian/patches/gsplat_maskgaussian.py
+
+links_torch: true
+
+# Ported from cuda-wheels: jobs 4 (owner call 2026-08-26). Same source as
+# vanilla gsplat, vendored inside a larger repo, so it carries the same
+# memory profile. Upstream setup.py self-sets MAX_JOBS=10 when unset.
+jobs: 4
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# Identical import surface to vanilla gsplat at this rev (checked: the
+# fork's gsplat/ imports the same set), so the same curated list -- see
+# packages/gsplat/package.yml for the reasoning on each entry, including why
+# the farm's `ninja` is a build tool and stays out.
+run_deps:
+  - numpy
+  - jaxtyping
+  - rich >=12
+  - packaging
+  - typing_extensions
+
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge
+
+verify:
+  import: gsplat
+  # Same render as vanilla gsplat, plus the fork's own kwargs (`distloss`,
+  # `masks`) that HY-World's world_gs_trainer.py passes and that vanilla
+  # gsplat 1.5.3 does not accept -- proving this is the fork, not upstream.
+  op: |
+    import math, torch, gsplat
+    dev = "cuda"
+    means = torch.tensor([[0.0, 0.0, 3.0]], device=dev)
+    quats = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=dev)
+    scales = torch.full((1, 3), 0.5, device=dev)
+    opacities = torch.tensor([1.0], device=dev)
+    colors = torch.tensor([[1.0, 0.5, 0.25]], device=dev)
+    viewmats = torch.eye(4, device=dev)[None]
+    W = H = 32
+    f = W / (2 * math.tan(math.radians(30)))
+    Ks = torch.tensor([[[f, 0, W / 2], [0, f, H / 2], [0, 0, 1]]], device=dev)
+    img, alpha, meta = gsplat.rasterization(means, quats, scales, opacities,
+                                            colors, viewmats, Ks, W, H,
+                                            render_mode="RGB+D", distloss=True)
+    torch.cuda.synchronize()
+    # RGB + depth; the fork's two distortion channels are consumed into
+    # meta["render_distort"], which vanilla gsplat never produces.
+    assert img.shape == (1, H, W, 4), img.shape
+    assert "render_distort" in meta, sorted(meta)
+    assert torch.isfinite(img).all() and torch.isfinite(alpha).all()
+    assert alpha.max() > 0.5, alpha.max()
+    assert img[..., 0].max() > 0.5, img[..., 0].max()
+    assert img[..., 3].max() > 1.0, img[..., 3].max()   # depth of a splat at z=3

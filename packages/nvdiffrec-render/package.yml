@@ -1,0 +1,86 @@
+name: nvdiffrec-render
+pypi_name: nvdiffrec_render
+import_name: nvdiffrec_render.renderutils
+# NVlabs/nvdiffrec is a research repo with no setup.py and no version; the
+# package, its setup.py and this number are all synthesised by the patch, and
+# 0.0.1 is what the farm has published under this name
+# (nvdiffrec_render-0.0.1+cu128torch2.8). Bumping it is a decision, not a
+# derivation.
+version: "0.0.1"
+
+# LICENSE.txt at the pinned rev: "NVIDIA Source Code License for nvdiffrec"
+# (non-commercial). Not on the SPDX list.
+license: LicenseRef-NVIDIA-Source-Code-License-nvdiffrec
+homepage: https://github.com/NVlabs/nvdiffrec
+summary: nvdiffrec's render/ package (renderutils CUDA kernels, lights, materials), compiled against the conda-torch channel
+
+source_repo: NVlabs/nvdiffrec
+source_rev: a3e73909a01887c8a135235ff860dd23a045cc1b
+# Upstream JIT-compiles render/renderutils/c_src at first use through
+# torch.utils.cpp_extension.load. The patch turns render/ into an installable
+# package `nvdiffrec_render` with an ahead-of-time CUDAExtension at
+# nvdiffrec_render.renderutils._C, and points ops.py at it (JIT stays as the
+# fallback for source checkouts). See the patch for the one deliberate
+# departure from cuda-wheels' version of this package.
+patch_script: packages/nvdiffrec-render/patches/nvdiffrec_render.py
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: five small .cu plus two .cpp.
+jobs: 3
+nvcc_threads: 1
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# What the shipped Python imports at module level, read from render/*.py at
+# this rev (all relative imports, so the rename is safe):
+#   numpy      light.py, util.py, texture.py, material.py, mesh.py, ops.py
+#   nvdiffrast light.py, util.py, texture.py, render.py, regularizer.py --
+#              `import nvdiffrast.torch as dr` at module level, so
+#              `from nvdiffrec_render.light import EnvironmentLight` (what
+#              TRELLIS.2's pbr_mesh_renderer.py does) needs it installed.
+#              Built by this repo too; the wheel sidecar resolves it from the
+#              /deps/ index.
+#   imageio    util.py, module level
+# NOT declared: tinycudann (mlptexture.py only, never reached unless that
+# module is imported), glfw and PyOpenGL (imported inside util.py's display
+# helpers, function scope). torch comes from the flavour-locked pytorch dep.
+run_deps:
+  - numpy
+  - nvdiffrast
+  - imageio
+
+# c_src/common.h includes <cuda.h>; the kernels use the runtime only (no
+# driver-API calls, no nvrtc -- those -l flags in upstream's JIT ldflags are
+# not needed by the AOT extension and setup.py does not pass them).
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge
+
+verify:
+  import: nvdiffrec_render.renderutils
+  # Two kernels with closed-form answers, so the VALUES are checked and not
+  # just the shapes: xfm_points against torch.matmul, and lambert against
+  # max(dot(n, wi), 0) / pi. A mis-arch'd build dies at the first launch with
+  # cudaErrorNoKernelImageForDevice; a kernel returning zeros fails the
+  # comparison.
+  op: |
+    import math, torch
+    import nvdiffrec_render.renderutils as ru
+    dev = "cuda"
+    pts = torch.rand(1, 64, 3, device=dev)
+    m = torch.eye(4, device=dev)[None].clone()
+    m[0, :3, 3] = torch.tensor([1.0, 2.0, 3.0], device=dev)
+    out = ru.xfm_points(pts, m)
+    torch.cuda.synchronize()
+    ref = ru.xfm_points(pts, m, use_python=True)
+    assert out.shape == (1, 64, 4), out.shape
+    assert torch.isfinite(out).all() and torch.allclose(out, ref, atol=1e-5), (out - ref).abs().max()
+    nrm = torch.tensor([0.0, 0.0, 1.0], device=dev).view(1, 1, 1, 3).expand(1, 4, 4, 3)
+    wi = torch.nn.functional.normalize(torch.tensor([0.0, 1.0, 1.0], device=dev)).view(1, 1, 1, 3).expand(1, 4, 4, 3)
+    lam = ru.lambert(nrm.contiguous(), wi.contiguous())
+    torch.cuda.synchronize()
+    assert lam.shape == (1, 4, 4, 1), lam.shape
+    assert torch.allclose(lam, torch.full_like(lam, math.sqrt(0.5) / math.pi), atol=1e-5), lam.flatten()[:4]

@@ -1,0 +1,80 @@
+name: nvdiffrast
+pypi_name: nvdiffrast
+import_name: nvdiffrast.torch
+# pyproject.toml: version = "0.4.0"; the farm publishes nvdiffrast-0.4.0+cu128torch2.8.
+version: "0.4.0"
+
+# LICENSE.txt at the pinned rev: "Nvidia Source Code License (1-Way
+# Commercial)". Not an SPDX identifier; upstream's own pyproject.toml carries
+# the same fact as a commented-out `license = "LicenseRef-NSCL"`.
+license: LicenseRef-NVIDIA-Source-Code-License-1-Way-Commercial
+homepage: https://github.com/NVlabs/nvdiffrast
+summary: Modular primitives for high-performance differentiable rendering, compiled against the conda-torch channel
+
+source_repo: NVlabs/nvdiffrast
+# Tag v0.4.0, resolved to the commit it points at.
+source_rev: 253ac4fcea7de5f396371124af597e6cc957bfae
+
+links_torch: true
+
+# Ported verbatim from cuda-wheels: 15 TUs, five of them .cu, none heavy.
+jobs: 3
+nvcc_threads: 1
+
+# No patch. setup.py neither probes the local GPU for an arch nor hands nvcc
+# any arch flag (extra_compile_args nvcc = ["-DNVDR_TORCH", "-lineinfo"]), so
+# torch's TORCH_CUDA_ARCH_LIST handling is in force unpatched. The three MSVC
+# /wd warning suppressions are already gated on os.name inside setup.py.
+
+# ── no GL / EGL at this rev, stated because it is the obvious question ────
+# nvdiffrast 0.3.x had an OpenGL rasterizer (RasterizeGLContext, glutil.cpp,
+# EGL on Linux) and needed GL/EGL headers to compile. The pinned v0.4.0 does
+# not: csrc/ contains no glutil.*, no #include of GL/EGL headers, and
+# nvdiffrast/torch/ops.py exposes RasterizeCudaContext only. Verified on the
+# source at this rev (grep for GL/EGL over csrc/ finds nothing), and on the
+# farm's published wheel, whose only extension links torch and the CUDA
+# runtime. So there are no mesa/libglvnd/EGL host deps to declare, on either
+# platform, and adding them would be a claim about a different version.
+
+# ── dependencies ──────────────────────────────────────────────────────────
+# pyproject.toml: dependencies = ["numpy"]. torch is a real import
+# (nvdiffrast/torch/ops.py) supplied by the recipe's flavour-locked pytorch
+# dep; nvdiffrast/__init__.py reads its own version via importlib.metadata.
+# The farm's sidecar agrees: numpy only.
+run_deps:
+  - numpy
+
+# csrc/ includes cuda_runtime.h and torch's bundled pybind11 headers; nothing
+# beyond the runtime.
+host_deps:
+  - cuda-cudart-dev
+
+build_deps: []
+
+carry: complete   # not on conda-forge
+
+verify:
+  import: nvdiffrast.torch
+  # The whole CUDA pipeline: rasterize a triangle covering part of a 32x32
+  # image, interpolate vertex colours over it, antialias. Coverage is asserted
+  # to be a real fraction (not 0, not 1), so a kernel that never ran or wrote
+  # zeros fails, and a mis-arch'd build fails with
+  # cudaErrorNoKernelImageForDevice at the first launch.
+  op: |
+    import torch
+    import nvdiffrast.torch as dr
+    dev = "cuda"
+    glctx = dr.RasterizeCudaContext()
+    pos = torch.tensor([[[-0.8, -0.8, 0.0, 1.0], [0.8, -0.8, 0.0, 1.0],
+                         [0.0, 0.8, 0.0, 1.0]]], device=dev)
+    tri = torch.tensor([[0, 1, 2]], dtype=torch.int32, device=dev)
+    rast, _ = dr.rasterize(glctx, pos, tri, resolution=[32, 32])
+    torch.cuda.synchronize()
+    assert rast.shape == (1, 32, 32, 4), rast.shape
+    cov = (rast[..., 3] > 0).float().mean().item()
+    assert 0.1 < cov < 0.9, cov
+    col = torch.tensor([[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]], device=dev)
+    out, _ = dr.interpolate(col, rast, tri)
+    assert torch.isfinite(out).all() and out.max() > 0.5, out.max()
+    aa = dr.antialias(out, rast, pos, tri)
+    assert aa.shape == out.shape and torch.isfinite(aa).all()
