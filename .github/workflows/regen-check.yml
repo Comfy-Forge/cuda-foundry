@@ -11,9 +11,12 @@ on:
     paths:
       - "packages/**"
       - "templates/**"
-      - "scripts/generate_recipes.py"
-      - "scripts/build_snippets/**"
+      - "scripts/**"
+      - "tools/**"
       - "recipes/**"
+      - "known_bad.json"
+      - "meta/**"
+      - ".github/workflows/regen-check.yml"
 
 permissions:
   contents: read
@@ -29,22 +32,53 @@ jobs:
       - run: pip install -q pyyaml jinja2
       - name: Recipes match their sources
         run: python scripts/generate_recipes.py --check
+      - name: Every patch script at least parses
+        # A SyntaxError in packages/<name>/patches/*.py surfaces in the
+        # source job of a build run, after the matrix and before anything is
+        # compiled -- one full dispatch lost to a typo. py_compile costs a
+        # second here.
+        run: |
+          set -euo pipefail
+          shopt -s nullglob globstar
+          files=(packages/*/patches/*.py patches/**/*.py scripts/**/*.py tools/*.py)
+          echo "compiling ${#files[@]} file(s)"
+          python -m py_compile "${files[@]}"
 
-  ledger-and-partition:
-    # The win-64 ledger parser and the win-64 shard partition, both of which
-    # fail SILENTLY when they are wrong: a ledger that maps zero outputs still
-    # writes a file and still passes verify_conda's non-empty check by being
-    # skipped, and a partition that stubs everything still exits 0 having
-    # compiled nothing. Every check in here has a negative control for exactly
-    # that reason. It runs on ubuntu because none of it needs Windows -- it is
-    # parsing and arithmetic over fixtures.
+  tests:
+    # Every scripts/test_*.py and tools/test_*.py, each with its negative
+    # controls: the win-64 ledger parser and shard partition, the nonet
+    # filter, and every gate in verify_conda / verify_wheel / make_wheel /
+    # check_lock. All of those fail SILENTLY when they are wrong -- a ledger
+    # that maps zero outputs still writes a file, a census with no SASS used
+    # to pass, a fixed_by naming a phantom build still prints -- which is
+    # why each test carries a fixture that must FAIL. Runs on ubuntu: it is
+    # parsing, arithmetic and small fixtures, none of it a package build.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-      - run: python scripts/test_ninja_ledger.py
+      - name: Fixture tooling
+        # patchelf/objcopy/readelf/zstd/cc shape the ELF fixtures for the
+        # verifier tests; none of it compiles a package.
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q && sudo apt-get install -y -q zstd binutils build-essential
+          pip install -q pyyaml patchelf
+      - name: Run every test script
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          rc=0
+          for t in scripts/test_*.py tools/test_*.py; do
+            echo "::group::$t"
+            if python "$t"; then echo "PASS $t"; else echo "::error::$t FAILED"; rc=1; fi
+            echo "::endgroup::"
+          done
+          exit $rc
 
   guarantee-lint:
     # The from-source guarantee's silent failure modes: --allow-network

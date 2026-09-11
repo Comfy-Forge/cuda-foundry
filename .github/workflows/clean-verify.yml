@@ -1,0 +1,66 @@
+name: clean-verify
+
+# The GPU half of the clean-environment test: tools/clean_verify.py installs
+# every PUBLISHED artifact into a fresh environment holding only what it
+# declares and runs its verify op on real hardware. GitHub's hosted runners
+# have no GPU, so this workflow is INERT until a self-hosted GPU runner is
+# registered and the repository variable HAS_GPU_RUNNER is set to "true".
+# Until then it is a manual pre-announce step on the developer box:
+#
+#     make clean-verify            # every published cell, both formats
+#     make clean-verify PKG=cumm   # one package
+#
+# Dispatching this workflow without the variable set prints that and exits
+# green, so nothing queues forever waiting for a runner that does not exist.
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'package folder or conda name, or "all"'
+        default: "all"
+      formats:
+        description: "conda, wheel or conda,wheel"
+        default: "conda,wheel"
+  schedule:
+    # Weekly, after the channel has settled; the run is a no-op without a
+    # GPU runner (see above).
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.g.outputs.go }}
+    steps:
+      - id: g
+        env:
+          HAS_GPU: ${{ vars.HAS_GPU_RUNNER }}
+        run: |
+          if [ "$HAS_GPU" = "true" ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no GPU runner registered (repository variable HAS_GPU_RUNNER != true). tools/clean_verify.py is a manual step on a GPU box: make clean-verify"
+          fi
+
+  verify:
+    needs: gate
+    if: needs.gate.outputs.go == 'true'
+    runs-on: [self-hosted, gpu]
+    env:
+      IN_PACKAGE: ${{ inputs.package || 'all' }}
+      IN_FORMATS: ${{ inputs.formats || 'conda,wheel' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Clean-environment verification on hardware
+        run: |
+          set -euo pipefail
+          # pixi, rattler-build and uv are expected on the runner (they are
+          # what a developer box has); nothing here compiles anything.
+          args=(--formats "$IN_FORMATS" --jobs 3 --work "$RUNNER_TEMP/clean-verify")
+          if [ "$IN_PACKAGE" != "all" ]; then args+=(--package "$IN_PACKAGE"); fi
+          python3 tools/clean_verify.py "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"

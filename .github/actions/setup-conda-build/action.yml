@@ -22,6 +22,21 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: rattler-build knobs shared by every step that runs it
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The one version this repo's measurements are about (see the pin
+        # below); exported so the two installer lanes and the callers agree.
+        echo "RATTLER_BUILD_VERSION=0.75.0" >> "$GITHUB_ENV"
+        # rattler-build's own GitHub integration: ::error:: / ::warning::
+        # annotations from its log levels and a build table in the step
+        # summary. Only honoured when GITHUB_ACTIONS=true, i.e. here.
+        echo "RATTLER_BUILD_ENABLE_GITHUB_INTEGRATION=true" >> "$GITHUB_ENV"
+        # The gates read package.yml and policy.yml with pyyaml; the Windows
+        # lane installs it below, and the Linux image is not guaranteed to
+        # carry it for the python the steps use.
+        python -m pip install --quiet --disable-pip-version-check pyyaml
     - name: Install rattler-build, rattler-sandbox and pixi (Linux)
       if: runner.os == 'Linux'
       shell: bash
@@ -45,7 +60,12 @@ runs:
         bash "$RUNNER_TEMP/pixi-install.sh"
         echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
         export PATH="$HOME/.pixi/bin:$PATH"
-        pixi global install rattler-build
+        # PINNED. Every "measured on 0.75.0" note in this repo -- the INSTALLER
+        # newline, the output-dir reindex, --skip-existing's hash-inclusive
+        # match, --test-index semantics, `package extract` -- is one unpinned
+        # release from silently changing under a wave. Bump deliberately,
+        # with the notes re-checked.
+        pixi global install "rattler-build==$RATTLER_BUILD_VERSION"
         # cuobjdump reads the SASS architectures out of a built binary, and the
         # publish gate fails closed without it -- run 34169766672 died with
         # FileNotFoundError: 'cuobjdump' on a linux-64 cell that had built and
@@ -82,7 +102,8 @@ runs:
         $pixiBin = Join-Path $env:USERPROFILE ".pixi\bin"
         Add-Content -Path $env:GITHUB_PATH -Value $pixiBin
         $env:PATH = "$pixiBin;$env:PATH"
-        pixi global install rattler-build
+        # Same pin as the Linux lane, for the same reason.
+        pixi global install "rattler-build==$env:RATTLER_BUILD_VERSION"
         # cuobjdump is how the publish gate reads a binary's SASS architectures,
         # and it is not on the Windows image. Its own package, so this does not
         # drag a toolkit in.

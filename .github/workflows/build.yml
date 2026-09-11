@@ -27,6 +27,9 @@ on:
       build_number:
         description: "build number (bump to republish with fixed metadata)"
         default: "0"
+      exclude_newer:
+        description: "solver cutoff, RFC 3339 (blank = this run's start): every cell of a wave solves against the same frozen channel state"
+        default: ""
 
 permissions:
   # write: the link job uploads each artifact to its subdir release and the
@@ -45,7 +48,12 @@ concurrency:
   # is what happened to run 34169151895 (torchaudio win-64), evicted by a
   # linux-64 dispatch of the same package. `cancel-in-progress: false` does not
   # protect against that: it governs the running job, not the queued one.
-  group: build-${{ inputs.package }}-${{ inputs.cuda }}-${{ inputs.pytorch }}-${{ inputs.python }}-${{ inputs.platform }}
+  #
+  # The build number is part of it too. A bumped rebuild of a cell is a
+  # DIFFERENT artifact (new filename, new fragment), and sharing a group with
+  # the previous number would let the bump evict the earlier run from the
+  # queue mid-upload -- the same silent cancellation, one axis over.
+  group: build-${{ inputs.package }}-${{ inputs.cuda }}-${{ inputs.pytorch }}-${{ inputs.python }}-${{ inputs.platform }}-${{ inputs.build_number }}
   cancel-in-progress: false
 
 # Every run: block in this file is bash -- `set -euo pipefail`, `shopt`, array
@@ -63,6 +71,8 @@ jobs:
       compile: ${{ steps.gen.outputs.compile }}
       link: ${{ steps.gen.outputs.link }}
       versions: ${{ steps.gen.outputs.versions }}
+      noarch: ${{ steps.gen.outputs.noarch }}
+      exclude_newer: ${{ steps.cutoff.outputs.exclude_newer }}
     env:
       IN_PACKAGE: ${{ inputs.package }}
       IN_CUDA: ${{ inputs.cuda }}
@@ -70,6 +80,7 @@ jobs:
       IN_PYTHON: ${{ inputs.python }}
       IN_PLATFORM: ${{ inputs.platform }}
       IN_BUILD_NUMBER: ${{ inputs.build_number }}
+      IN_EXCLUDE_NEWER: ${{ inputs.exclude_newer }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -78,6 +89,23 @@ jobs:
       - run: pip install -q pyyaml jinja2
       - name: Recipes must be in sync with package.yml
         run: python scripts/generate_recipes.py --check
+      - name: Freeze the solver's view of the channels for this wave
+        id: cutoff
+        # One timestamp for the whole wave, computed once here and handed to
+        # every rattler-build as --exclude-newer. A 149-cell wave runs for
+        # hours; without this a cell that solves late sees packages that did
+        # not exist when the first cell solved -- which is how "gcc 16
+        # appeared" mid-wave and half the cells were built against a
+        # different toolchain than the other half.
+        run: |
+          set -euo pipefail
+          if [ -n "$IN_EXCLUDE_NEWER" ]; then
+            cutoff="$IN_EXCLUDE_NEWER"
+          else
+            cutoff="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+          echo "exclude_newer=$cutoff" >> "$GITHUB_OUTPUT"
+          echo "solver cutoff for this wave: $cutoff"
       - name: Generate matrix from the conda-torch channel
         id: gen
         run: |
@@ -112,12 +140,20 @@ jobs:
           def shards_here(c):
               n = int(c.get("shard_count", 0))
               return n > 1 if c["platform"].startswith("win") else n > 0
+          # A `noarch: python` recipe (pccm) is one artifact for every cell,
+          # with no CUDA, torch or python axis: generate_matrix emits it as a
+          # job with platform: noarch, and it gets its own job below rather
+          # than the compile/link pair, which would try to build it as a
+          # CUDA cell.
+          noarch_jobs  = [c for c in m if c.get("noarch")]
+          m            = [c for c in m if not c.get("noarch")]
           compile_jobs = [c for c in m if shards_here(c)]
           link_jobs    = [c for c in m if int(c.get("shard_count", 0)) == 0] + \
                          [dict(c, shard_index=0) for c in m if int(c.get("shard_count", 0)) > 0
                           and int(c.get("shard_index", 0)) == 1]
           print(f"compile={json.dumps(compile_jobs)}")
           print(f"link={json.dumps(link_jobs)}")
+          print(f"noarch={json.dumps(noarch_jobs)}")
           # Only the revisions this wave actually builds. A family package has
           # one revision per torch pairing -- 16 for torchvision -- and
           # fetching all of them for a filtered run is 16 clones and a ~230 MB
@@ -127,6 +163,9 @@ jobs:
 
   source:
     needs: matrix
+    # A noarch-only dispatch has no CUDA cells and no package.yml to fetch
+    # for; rattler-build fetches pccm's git source itself.
+    if: needs.matrix.outputs.link != '[]'
     runs-on: ubuntu-latest
     env:
       IN_PACKAGE: ${{ inputs.package }}
@@ -184,10 +223,15 @@ jobs:
           # driver we are building FOR is the standard override; it affects
           # dependency resolution only, never the compile.
           CONDA_OVERRIDE_CUDA: ${{ matrix.cell.cuda }}
-          CUW_TORCH_BUILD: ${{ matrix.cell.torch_build }}
+          # A torch-free package (links_torch: false) compiled against no
+          # torch, and its provenance must say `none` rather than name the
+          # torch build the matrix happened to iterate over; verify_conda
+          # requires exactly that.
+          CUW_TORCH_BUILD: ${{ matrix.cell.links_torch && matrix.cell.torch_build || 'none' }}
           CUW_ARCH_LIST: ${{ matrix.cell.arch_list }}
           CUW_BUILD_NUMBER: ${{ inputs.build_number }}
           CUW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EXCLUDE_NEWER: ${{ needs.matrix.outputs.exclude_newer }}
           RECIPE: recipes/${{ matrix.cell.package }}/recipe.yaml
         run: |
           set -euo pipefail
@@ -228,6 +272,19 @@ jobs:
           # recipes/pccm -- so the build's host solve has to be able to see
           # them. It holds nothing conda-torch or conda-forge also ship, so
           # putting it first shadows nothing in the build env.
+          # --skip-existing=all: rattler-build matches name-version-BUILD STRING,
+          # hash included, against every -c channel. The matrix's
+          # --skip-published globs the fragment name without the hash, so a
+          # cell whose variant changed (c_compiler_version) is not "published"
+          # to rattler-build even where the matrix would have said so; and
+          # the reverse -- an artifact the channel has and meta/ lost -- is
+          # skipped here rather than rebuilt and refused at upload.
+          # --build-num / --extra-meta: rattler-build's own way to stamp the
+          # build number and the run into the artifact (CUW_* env stays
+          # until the template stops reading it; the values agree).
+          # --exclude-newer: the wave's frozen solver cutoff (matrix job).
+          # --package-format conda:19: these artifacts are mostly fatbin, and
+          # zstd 19 is worth ~10% over the default 15 at compression time only.
           rattler-build build --recipe "$RECIPE" \
             --variant-config "$VARIANT_CONFIG" \
             --variant cuda_compiler_version="${{ matrix.cell.cuda }}" \
@@ -236,6 +293,11 @@ jobs:
             "${COMPILER_ARGS[@]}" \
             --target-platform "${{ matrix.cell.platform }}" \
             --output-dir "$RUNNER_TEMP/out" --test skip --no-build-id \
+            --skip-existing=all \
+            --build-num "$CUW_BUILD_NUMBER" \
+            --extra-meta run_url="$CUW_RUN_URL" --extra-meta run_id="$GITHUB_RUN_ID" \
+            --exclude-newer "$EXCLUDE_NEWER" \
+            --package-format conda:19 --compression-threads "$(nproc)" \
             -c https://comfy-forge.github.io/cuda-foundry \
             -c https://comfy-forge.github.io/conda-torch -c conda-forge
       - name: Package shard cache
@@ -343,6 +405,7 @@ jobs:
           # leaves the merged one exactly as it was.
           CCACHE_DIR="$CUW_CCACHE_DIR" "${CUW_CCACHE_BIN:-ccache}" -z
       - name: Build
+        id: build
         env:
           # `link` asserts a zero-miss ccache replay, which presupposes shards
           # populated one. The predicate is the matrix step's `shards_here`
@@ -362,10 +425,15 @@ jobs:
           # driver we are building FOR is the standard override; it affects
           # dependency resolution only, never the compile.
           CONDA_OVERRIDE_CUDA: ${{ matrix.cell.cuda }}
-          CUW_TORCH_BUILD: ${{ matrix.cell.torch_build }}
+          # A torch-free package (links_torch: false) compiled against no
+          # torch, and its provenance must say `none` rather than name the
+          # torch build the matrix happened to iterate over; verify_conda
+          # requires exactly that.
+          CUW_TORCH_BUILD: ${{ matrix.cell.links_torch && matrix.cell.torch_build || 'none' }}
           CUW_ARCH_LIST: ${{ matrix.cell.arch_list }}
           CUW_BUILD_NUMBER: ${{ inputs.build_number }}
           CUW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EXCLUDE_NEWER: ${{ needs.matrix.outputs.exclude_newer }}
           RECIPE: recipes/${{ matrix.cell.package }}/recipe.yaml
         run: |
           set -euo pipefail
@@ -400,6 +468,10 @@ jobs:
             COMPILER_ARGS=(--variant c_compiler_version="${{ matrix.cell.gcc_version }}"
                            --variant cxx_compiler_version="${{ matrix.cell.gcc_version }}")
           fi
+          # Same flags as the shard job (see there for each), plus
+          # --keep-build for auditwheel. `--test skip` stays: the artifact's
+          # tests need the artifact, and they run in the next step against a
+          # FRESH solve rather than the build's own host env.
           rattler-build build --recipe "$RECIPE" \
             --variant-config "$VARIANT_CONFIG" \
             --variant cuda_compiler_version="${{ matrix.cell.cuda }}" \
@@ -409,35 +481,60 @@ jobs:
             --target-platform "${{ matrix.cell.platform }}" \
             --output-dir "$RUNNER_TEMP/out" --test skip --no-build-id \
             --keep-build \
+            --skip-existing=all \
+            --build-num "$CUW_BUILD_NUMBER" \
+            --extra-meta run_url="$CUW_RUN_URL" --extra-meta run_id="$GITHUB_RUN_ID" \
+            --exclude-newer "$EXCLUDE_NEWER" \
+            --package-format conda:19 --compression-threads "$(nproc)" \
             -c https://comfy-forge.github.io/cuda-foundry \
-            -c https://comfy-forge.github.io/conda-torch -c conda-forge
+            -c https://comfy-forge.github.io/conda-torch -c conda-forge \
+            2>&1 | tee "$RUNNER_TEMP/build.log"
+          # tee hides rattler-build's exit status; PIPESTATUS restores it.
+          [ "${PIPESTATUS[0]}" -eq 0 ] || exit "${PIPESTATUS[0]}"
+          # --skip-existing=all produces nothing when the exact build string is
+          # already on a channel. That is a legitimate end of this job, not a
+          # failure: everything below needs an artifact, so it is skipped.
+          shopt -s nullglob
+          produced=("$RUNNER_TEMP"/out/*/*.conda)
+          if [ ${#produced[@]} -eq 0 ]; then
+            echo "::notice::rattler-build built nothing: this exact build string already exists on a channel (--skip-existing=all). Nothing to verify or publish."
+            echo "built=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "built=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Provenance report
-        # Printed unconditionally, before verification, because this is the
-        # evidence that the artifact was built from source. If verification
-        # later fails the .conda is not uploaded -- but the provenance still
-        # has to be readable in the log, or diagnosing a failure means
-        # re-running the whole build to see what it produced.
+        # Printed before verification, because this is the evidence that the
+        # artifact was built from source. If verification later fails the
+        # .conda is not uploaded -- but the provenance still has to be
+        # readable in the log, or diagnosing a failure means re-running the
+        # whole build to see what it produced. rattler-build's own GitHub
+        # integration (RATTLER_BUILD_ENABLE_GITHUB_INTEGRATION, set by the
+        # action) writes the build table to the step summary; this adds what
+        # that does not carry -- about.extra and the compile ledger.
+        if: steps.build.outputs.built == 'true'
         run: |
           set -euo pipefail
           shopt -s nullglob
           files=("$RUNNER_TEMP"/out/*/*.conda)
           [ ${#files[@]} -gt 0 ] || { echo "::error::no .conda produced"; exit 1; }
-          python - "${files[@]}" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
-          import io, json, subprocess, sys, tarfile, zipfile
-          for path in sys.argv[1:]:
-              z = zipfile.ZipFile(path)
-              name = [n for n in z.namelist() if n.startswith("info-")][0]
-              # zstd CLI rather than a python module: same choice
-              # tools/verify_conda.py makes, so this step adds no new dependency.
-              raw = subprocess.run(["zstd", "-d", "--stdout"], input=z.read(name),
-                                   stdout=subprocess.PIPE, check=True).stdout
-              t = tarfile.open(fileobj=io.BytesIO(raw))
-              about = json.load(t.extractfile("info/about.json"))
-              print(f"## {path.rsplit('/', 1)[-1]}")
-              print("```json")
-              print(json.dumps(about.get("extra", {}), indent=2, sort_keys=True))
-              print("```")
-          PY
+          for f in "${files[@]}"; do
+            echo "## $(basename "$f")"
+            echo '```json'
+            # rattler-build's own reader, so nothing here re-implements the
+            # .conda format (it used to spelunk the zstd tarball by hand).
+            rattler-build package inspect "$f" --about --json \
+              | python -c "import json,sys; print(json.dumps(json.load(sys.stdin).get('about', {}).get('extra', {}), indent=2, sort_keys=True))"
+            echo '```'
+          done | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "## build script report lines"
+          echo '```'
+          # Every `===` line the build script printed (build.sh / build_win.py):
+          # mode, ccache stats, the ledger count, and on win-64 the first
+          # run's diagnostics -- `=== CUDA_HOME=` and `=== /d1trimfile:` -- so
+          # the environment the compile saw is readable without opening the
+          # 30k-line build log.
+          grep -E '===' "$RUNNER_TEMP/build.log" | sed -E 's/^[^=]*(=== )/\1/' || echo "(no === lines in the build log)"
+          echo '```'
           echo "## compile ledger"
           echo '```'
           # This job's own ledger, plus whatever the shards carried in. For a
@@ -447,13 +544,113 @@ jobs:
           cat "$RUNNER_TEMP/cuw-ledger-shards.txt" 2>/dev/null || true
           echo '```'
 
+      - name: Clean-environment test (rattler-build test, the GPU-less entries)
+        # The highest-value gate in the job. Every "works on my machine"
+        # defect of the first audit round -- cumm needing /usr/local/cuda,
+        # sageattention needing cuda.h, mmcv importing torchvision,
+        # torch-sparse importing torch_scatter, detectron2 dying on Pillow 12
+        # -- shipped because nothing ever imported the package from a fresh
+        # install of ONLY its declared dependencies. `rattler-build test`
+        # does exactly that: it solves the artifact plus its run deps into a
+        # fresh prefix from the channels named here, and runs the entries of
+        # info/tests/tests.yaml that the recipe put inside the artifact.
+        #
+        # A GitHub runner has no GPU. Importing an extension module loads
+        # the .so and launches no kernel, so the import test runs here
+        # (measured: cc-torch's import test passes with CUDA_VISIBLE_DEVICES
+        # empty). The op entry launches kernels and cannot; the indices are
+        # read from the artifact so the split follows the recipe rather than
+        # a hard-coded order. A package whose IMPORT needs a GPU (flex-gemm
+        # reads the device name at import) declares verify.import_needs_gpu
+        # in package.yml and is skipped with a warning, never silently.
+        if: steps.build.outputs.built == 'true'
+        env:
+          # The solver sees the virtual package it needs; nothing else reads it.
+          CONDA_OVERRIDE_CUDA: ${{ matrix.cell.cuda }}
+          CELL_PKG: ${{ matrix.cell.package }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=("$RUNNER_TEMP"/out/*/*.conda)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::no .conda produced"; exit 1; }
+          needs_gpu=$(python -c "import yaml,sys; d=yaml.safe_load(open(sys.argv[1])) or {}; print(str((d.get('verify') or {}).get('import_needs_gpu', False)).lower())" "packages/$CELL_PKG/package.yml")
+          if [ "$needs_gpu" = "true" ]; then
+            echo "::warning::$CELL_PKG declares verify.import_needs_gpu: true -- its import test cannot run on a GPU-less runner and is SKIPPED here. tools/clean_verify.py on a GPU box is the only clean-environment check this package gets."
+            exit 0
+          fi
+          LOCAL_CHANNEL="$(python -c "import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())" "$RUNNER_TEMP/out")"
+          for f in "${files[@]}"; do
+            # Indices of the entries that need no GPU (python imports,
+            # package_contents), read from the artifact itself. Exit 3 means
+            # the artifact carries no tests at all, which is a template
+            # regression and fails here rather than passing vacuously.
+            idx="$(python tools/artifact_tests.py "$f" --kind gpu-less --tmp "$RUNNER_TEMP/artifact-tests")" \
+              || { echo "::error::$(basename "$f") carries no info/tests/tests.yaml -- the recipe's tests: block is missing, so nothing would ever import this package in a clean environment"; exit 1; }
+            [ -n "$idx" ] || { echo "::error::$(basename "$f") carries tests but none is GPU-less; the import test is missing from the recipe"; exit 1; }
+            echo "GPU-less test entries in $(basename "$f"): $(echo $idx | tr '\n' ' ')"
+            python tools/artifact_tests.py "$f" --summary --tmp "$RUNNER_TEMP/artifact-tests"
+            for i in $idx; do
+              rattler-build test --package-file "$f" --test-index "$i" \
+                --channel-priority strict \
+                -c "$LOCAL_CHANNEL" \
+                -c https://comfy-forge.github.io/cuda-foundry \
+                -c https://comfy-forge.github.io/conda-torch -c conda-forge
+            done
+          done
+
+      - name: Solve the declared closure into a prefix for the linkage gates
+        # verify_conda resolves every DT_NEEDED / PE import against what the
+        # package DECLARES, and judges overdepending (a declared shared
+        # library nothing links) and underlinking (a linked library only a
+        # transitive dep provides). That needs the declared closure on disk:
+        # a pixi environment of exactly this artifact from the local output
+        # plus the live channels, strict priority, the same channels a user
+        # would solve from. The package cache is shared with rattler-build,
+        # so this is a second solve but not a second download.
+        if: steps.build.outputs.built == 'true'
+        env:
+          CELL_PLATFORM: ${{ matrix.cell.platform }}
+          CELL_CUDA: ${{ matrix.cell.cuda }}
+          CELL_PYTHON: ${{ matrix.cell.python }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=("$RUNNER_TEMP"/out/*/*.conda)
+          f="${files[0]}"
+          read -r NAME VERSION BUILD < <(rattler-build package inspect "$f" --json \
+            | python -c "import json,sys; i=json.load(sys.stdin)['index']; print(i['name'], i['version'], i['build'])")
+          LOCAL_CHANNEL="$(python -c "import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())" "$RUNNER_TEMP/out")"
+          DEPENV="$RUNNER_TEMP/depenv"
+          rm -rf "$DEPENV"; mkdir -p "$DEPENV"
+          cat > "$DEPENV/pixi.toml" <<EOF
+          [workspace]
+          name = "depenv"
+          channels = ["$LOCAL_CHANNEL", "https://comfy-forge.github.io/cuda-foundry", "https://comfy-forge.github.io/conda-torch", "conda-forge"]
+          channel-priority = "strict"
+          platforms = ["$CELL_PLATFORM"]
+
+          [system-requirements]
+          cuda = "$CELL_CUDA"
+
+          [dependencies]
+          python = "$CELL_PYTHON.*"
+          "$NAME" = { version = "==$VERSION", build = "$BUILD" }
+          EOF
+          (cd "$DEPENV" && pixi install)
+          echo "CUW_DEP_PREFIX=$DEPENV/.pixi/envs/default" >> "$GITHUB_ENV"
+          ls "$DEPENV/.pixi/envs/default/conda-meta" | wc -l
+
       - name: Verify artifact
+        if: steps.build.outputs.built == 'true'
         env:
           # Routed through env:, never referenced as ${{ }} inside run:. A raw
           # expression is substituted as TEXT before bash parses the line, so a
           # value containing `"; cmd; x="` would execute (CWE-78) -- the rule
           # this workflow's header sets out, and which the arch list broke.
           CELL_ARCH: ${{ matrix.cell.arch_list }}
+          CELL_PLATFORM: ${{ matrix.cell.platform }}
+          CELL_GCC: ${{ matrix.cell.gcc_version }}
+          CELL_CUDA: ${{ matrix.cell.cuda }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -469,20 +666,47 @@ jobs:
           LEDGER="$RUNNER_TEMP/cuw-ledger-all.txt"
           cat "$CUW_LEDGER" "$RUNNER_TEMP/cuw-ledger-shards.txt" 2>/dev/null \
             | sort -u > "$LEDGER" || true
-          if [ -f tools/verify_conda.py ]; then
-            # --ledger and --expect-arch are passed, so L3 and the SASS census
-            # actually run. Without --ledger the ledger branch is skipped
-            # entirely, which is how a documented publish gate sat dead.
-            python tools/verify_conda.py "${files[@]}" \
-              --ledger "$LEDGER" \
-              --expect-arch "$CELL_ARCH"
+          # L3's "no foreign TU" is anchored on the REAL work directory
+          # (--no-build-id makes it .../bld/rattler-build_<name>/work), not on
+          # the substring "/work/", which every runner path contains.
+          workdirs=("$RUNNER_TEMP"/out/bld/rattler-build_*/work)
+          [ ${#workdirs[@]} -eq 1 ] || { echo "::error::expected exactly one rattler-build work dir under $RUNNER_TEMP/out/bld, found ${#workdirs[@]}: ${workdirs[*]}"; exit 1; }
+          # The compiler the cell was built with, so the .comment / PE linker
+          # gate checks the VERSION and not only the vendor.
+          if [[ "$CELL_PLATFORM" == win-* ]]; then
+            MSVC=$(python -c "import yaml,sys; p=yaml.safe_load(open('defaults/policy.yml'))['host_msvc']; print(p['by_cuda'].get(sys.argv[1], p['default']))" "$CELL_CUDA")
+            TOOLCHAIN=(--expect-msvc "$MSVC")
           else
-            echo "::warning::tools/verify_conda.py not present yet — artifact gate skipped"
+            TOOLCHAIN=(--expect-gcc "$CELL_GCC")
           fi
+          # --ledger, --work-dir, --expect-arch and --dep-prefix are all
+          # passed, so L3, the SASS census and the linkage gates actually
+          # run. Without --ledger the ledger branch used to be skipped
+          # entirely, which is how a documented publish gate sat dead.
+          python tools/verify_conda.py "${files[@]}" \
+            --ledger "$LEDGER" --work-dir "${workdirs[0]}" \
+            --expect-arch "$CELL_ARCH" \
+            --dep-prefix "$CUW_DEP_PREFIX" \
+            "${TOOLCHAIN[@]}" \
+            --tmp "$RUNNER_TEMP/verify-conda"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: steps.build.outputs.built == 'true'
         with:
-          name: conda-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}
+          # The platform is in the name: upload-artifact v4 refuses a second
+          # artifact of one name, and a wave that spans platforms produces a
+          # linux-64 and a win-64 artifact for the same cell.
+          name: conda-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}-${{ matrix.cell.platform }}
           path: ${{ runner.temp }}/out/*/*.conda
+      - name: This cell's .conda is not published
+        # package.yml `conda_platforms` (generate_matrix: publish_conda) --
+        # flex-gemm and its forks on win-64, where triton has no conda build,
+        # so the .conda cannot be solved there while the wheel can. The
+        # artifact was still built and verified above (every gate is worth
+        # having even when nothing ships); only the release upload and the
+        # repodata fragment are withheld. The wheel steps below are
+        # unconditional.
+        if: steps.build.outputs.built == 'true' && matrix.cell.publish_conda == false
+        run: echo "::notice::publish_conda is false for this cell -- the .conda was built and verified but is NOT uploaded to the release and gets no repodata fragment; the wheel publishes as usual"
 
       # ---- the wheel half of the SAME compile -----------------------------
       # No compiler runs here. The build above left its one wheel in
@@ -492,6 +716,7 @@ jobs:
       # libraries it vendors out of the conda HOST prefix, which exists only
       # here and only because the build ran with --keep-build.
       - name: Build the published wheel from the same artifact
+        if: steps.build.outputs.built == 'true'
         env:
           CELL_PLATFORM: ${{ matrix.cell.platform }}
           # The SAME number the .conda's build string carries, so one cell has
@@ -529,23 +754,31 @@ jobs:
             "${EXTRA[@]}"
 
       - name: Verify the wheel against its .conda
+        if: steps.build.outputs.built == 'true'
         env:
           CELL_PKG: ${{ matrix.cell.package }}
           CELL_ARCH: ${{ matrix.cell.arch_list }}
           CELL_VERSION: ${{ matrix.cell.version }}
           CELL_PLATFORM: ${{ matrix.cell.platform }}
+          CELL_CUDA: ${{ matrix.cell.cuda }}
         run: |
           set -euo pipefail
           shopt -s nullglob
           conda_file=("$RUNNER_TEMP"/out/*/*.conda)
+          TOOLCHAIN=()
+          if [[ "$CELL_PLATFORM" == win-* ]]; then
+            MSVC=$(python -c "import yaml,sys; p=yaml.safe_load(open('defaults/policy.yml'))['host_msvc']; print(p['by_cuda'].get(sys.argv[1], p['default']))" "$CELL_CUDA")
+            TOOLCHAIN=(--expect-msvc "$MSVC")
+          fi
           python tools/verify_wheel.py "$RUNNER_TEMP"/wheels/*.whl \
             --conda "${conda_file[0]}" \
-            --platform "$CELL_PLATFORM" \
+            --platform "$CELL_PLATFORM" --cuda "$CELL_CUDA" \
             --expect-arch "$CELL_ARCH" --expect-version "$CELL_VERSION" \
-            --package "$CELL_PKG" \
+            --package "$CELL_PKG" "${TOOLCHAIN[@]}" \
             --tmp "$RUNNER_TEMP/verify-wheel"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: steps.build.outputs.built == 'true'
         with:
           name: wheel-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}-${{ matrix.cell.platform }}
           # The sidecar rides with the wheel: the deps index is built from it,
@@ -561,6 +794,7 @@ jobs:
         # make every existing fragment a lie. Same discipline as conda-torch's
         # storage releases, including the check-then-upload race, which is
         # real here: 149 cells of one package upload concurrently.
+        if: steps.build.outputs.built == 'true' && matrix.cell.publish_conda != false
         env:
           GH_TOKEN: ${{ github.token }}
           SUBDIR: ${{ matrix.cell.platform }}
@@ -593,6 +827,7 @@ jobs:
           done
 
       - name: Ask publish-wheels to put the wheel on the release
+        if: steps.build.outputs.built == 'true'
         # The .conda is uploaded above; the wheel stopped at a GitHub
         # *artifact*, which expires and which no index can link to.
         # tools/generate_index.py builds both PEP 503 trees out of RELEASE
@@ -621,6 +856,7 @@ jobs:
         # fragments job. 149 link jobs each rebasing and pushing to main is a
         # thundering herd that spends most of its time losing races; one
         # commit at the end is the same result with none of that.
+        if: steps.build.outputs.built == 'true' && matrix.cell.publish_conda != false
         env:
           SUBDIR: ${{ matrix.cell.platform }}
         run: |
@@ -631,8 +867,120 @@ jobs:
           done
           ls -la "meta/$SUBDIR"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: steps.build.outputs.built == 'true' && matrix.cell.publish_conda != false
         with:
-          name: fragment-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}
+          name: fragment-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}-${{ matrix.cell.platform }}
+          path: meta/*/*.json
+          retention-days: 3
+
+  noarch:
+    # A pure-python noarch recipe (recipes/pccm: the code generator cumm and
+    # spconv import at build time AND at run time, on PyPI and on no conda
+    # channel). No CUDA, no torch axis, no matrix cell -- one artifact for
+    # every cell -- so it gets its own small job: build on ubuntu, run every
+    # entry of the artifact's own tests in a fresh solve (nothing here needs
+    # a GPU), the packaging subset of verify_conda, then the same immutable
+    # upload and fragment path as a CUDA cell.
+    needs: matrix
+    if: needs.matrix.outputs.noarch != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rec: ${{ fromJson(needs.matrix.outputs.noarch) }}
+    name: "noarch ${{ matrix.rec.package }}"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-conda-build
+        with:
+          swapfile-gb: "0"
+      - name: Build
+        id: build
+        env:
+          RECIPE: ${{ matrix.rec.recipe }}
+          CUW_BUILD_NUMBER: ${{ inputs.build_number }}
+          CUW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EXCLUDE_NEWER: ${{ needs.matrix.outputs.exclude_newer }}
+        run: |
+          set -euo pipefail
+          # Same provenance and skip flags as a CUDA cell (see the link job).
+          # Our own channel first so a noarch recipe may depend on a sibling.
+          rattler-build build --recipe "$RECIPE" \
+            --output-dir "$RUNNER_TEMP/out" --test skip --no-build-id \
+            --skip-existing=all \
+            --build-num "$CUW_BUILD_NUMBER" \
+            --extra-meta run_url="$CUW_RUN_URL" --extra-meta run_id="$GITHUB_RUN_ID" \
+            --exclude-newer "$EXCLUDE_NEWER" \
+            -c https://comfy-forge.github.io/cuda-foundry -c conda-forge
+          shopt -s nullglob
+          produced=("$RUNNER_TEMP"/out/noarch/*.conda)
+          if [ ${#produced[@]} -eq 0 ]; then
+            echo "::notice::rattler-build built nothing: this exact build string already exists on a channel (--skip-existing=all)."
+            echo "built=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "built=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Clean-environment test (every entry; nothing here needs a GPU)
+        if: steps.build.outputs.built == 'true'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          LOCAL_CHANNEL="$(python -c "import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())" "$RUNNER_TEMP/out")"
+          for f in "$RUNNER_TEMP"/out/noarch/*.conda; do
+            python tools/artifact_tests.py "$f" --summary --tmp "$RUNNER_TEMP/artifact-tests" \
+              || { echo "::error::$(basename "$f") carries no tests"; exit 1; }
+            rattler-build test --package-file "$f" --channel-priority strict \
+              -c "$LOCAL_CHANNEL" -c https://comfy-forge.github.io/cuda-foundry -c conda-forge
+          done
+      - name: Verify artifact (packaging gates)
+        if: steps.build.outputs.built == 'true'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          python tools/verify_conda.py "$RUNNER_TEMP"/out/noarch/*.conda --noarch \
+            --tmp "$RUNNER_TEMP/verify-conda"
+      - name: Upload to release (immutable — never overwrite an asset)
+        if: steps.build.outputs.built == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUBDIR: noarch
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          gh release create "$SUBDIR" \
+            --title "$SUBDIR packages" \
+            --notes "Storage release for $SUBDIR subdir packages. Do not delete: repodata base_url points here." \
+            || true
+          existing=$(gh release view "$SUBDIR" --json assets -q '.assets[].name')
+          for f in "$RUNNER_TEMP"/out/noarch/*.conda; do
+            b=$(basename "$f")
+            if echo "$existing" | grep -qxF "$b"; then
+              echo "SKIP already-published $b"
+              gh release download "$SUBDIR" --pattern "$b" --output "$f" --clobber
+            elif ! gh release upload "$SUBDIR" "$f"; then
+              sleep 5
+              if gh release view "$SUBDIR" --json assets -q '.assets[].name' | grep -qxF "$b"; then
+                echo "RACE: $b landed meanwhile; adopting its bytes"
+                gh release download "$SUBDIR" --pattern "$b" --output "$f" --clobber
+              else
+                echo "::error::upload of $b failed and the asset is still absent" >&2
+                exit 1
+              fi
+            fi
+          done
+      - name: Emit repodata fragment
+        if: steps.build.outputs.built == 'true'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in "$RUNNER_TEMP"/out/noarch/*.conda; do
+            python3 tools/fragment.py "$f" noarch
+          done
+          ls -la meta/noarch
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: steps.build.outputs.built == 'true'
+        with:
+          name: fragment-noarch-${{ matrix.rec.package }}
           path: meta/*/*.json
           retention-days: 3
 
@@ -640,8 +988,8 @@ jobs:
     # One commit for the whole wave. `always()` so a wave with some failed
     # cells still publishes the ones that succeeded -- a partial channel is
     # correct, an empty one is a wasted wave.
-    needs: [matrix, link]
-    if: always() && needs.matrix.outputs.link != '[]'
+    needs: [matrix, link, noarch]
+    if: always() && (needs.matrix.outputs.link != '[]' || needs.matrix.outputs.noarch != '[]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
