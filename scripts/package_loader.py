@@ -79,23 +79,93 @@ HOST_RUN_EXPORT_SUBSUMES = {"numpy"}
 # vocabulary, so the template renders them as `- if: <sel>` unchanged.
 PLATFORM_SELECTORS = {"linux", "win", "unix", "osx"}
 
+# The full selector grammar for a conditional run dep: a platform selector,
+# a torch-minor clause, or both joined by `and`. The torch clause is
+# rattler-build's own `match(<variant>, "<spec>")` builtin, evaluated on the
+# `pytorch` variant ("2.8"), so the recipe renders it verbatim and the wheel
+# side (resolve_run_deps) evaluates the same spec in Python. It exists for a
+# dependency that conda-forge builds per torch minor and not for every minor
+# this family grid has a torch for -- torchvision-extra-decoders exists for
+# torch 2.5.1 through 2.13 and not for 2.4.x or 2.14 -- so an unconditional
+# entry would make cells UNSAT and no entry at all loses a real dependency.
+_SELECTOR_RE = re.compile(
+    r"^(?:(?P<plat>linux|win|unix|osx)(?:\s+and\s+(?=match))?)?"
+    r"(?:match\(\s*pytorch\s*,\s*['\"](?P<spec>[^'\"]+)['\"]\s*\))?$")
+_SPEC_CLAUSE_RE = re.compile(r"^(>=|<=|==|!=|>|<)\s*(\d+(?:\.\d+)*)$")
 
-def resolve_run_deps(run_deps, platform: str) -> list:
+# Conda subdirs a package may publish its .conda on (package.yml
+# `conda_platforms`). The wheel is built on every platform the matrix emits
+# regardless; this only gates the .conda. flex-gemm's case: it imports
+# triton unconditionally and triton has no win-64 conda build, so its win-64
+# .conda would be UNSAT-or-unimportable while the win-64 wheel works beside
+# PyPI's triton-windows.
+KNOWN_SUBDIRS = {"linux-64", "linux-aarch64", "win-64"}
+
+
+def parse_selector(sel: str):
+    """(platform-or-None, spec-or-None) for a run_deps `if:` string, else None."""
+    m = _SELECTOR_RE.match(str(sel).strip())
+    if not m or (m.group("plat") is None and m.group("spec") is None):
+        return None
+    return m.group("plat"), m.group("spec")
+
+
+def _version_tuple(v: str) -> tuple:
+    return tuple(int(x) for x in str(v).split("."))
+
+
+def version_matches(version: str, spec: str) -> bool:
+    """Does a dotted version satisfy a comma-joined spec (">=2.7,<2.14")?
+
+    Numeric dotted versions and the six comparison operators only -- the
+    subset a torch-minor clause needs, evaluated the way rattler-build's
+    match() evaluates it on the variant value. Missing trailing components
+    compare as zero (2.8 == 2.8.0), which is how conda compares them too.
+    """
+    have = _version_tuple(version)
+    for clause in str(spec).split(","):
+        m = _SPEC_CLAUSE_RE.match(clause.strip())
+        if not m:
+            raise ValueError(f"unsupported version clause {clause!r} in {spec!r}")
+        op, want = m.group(1), _version_tuple(m.group(2))
+        n = max(len(have), len(want))
+        a, b = have + (0,) * (n - len(have)), want + (0,) * (n - len(want))
+        ok = {">=": a >= b, "<=": a <= b, "==": a == b, "!=": a != b,
+              ">": a > b, "<": a < b}[op]
+        if not ok:
+            return False
+    return True
+
+
+def resolve_run_deps(run_deps, platform: str, pytorch: str | None = None) -> list:
     """Flatten conditional run deps for one target platform (conda subdir).
 
     `{if: linux, then: triton}` contributes "triton" on linux-64/aarch64 and
-    nothing on win-64; plain strings pass through. The wheel side needs this
+    nothing on win-64; `{if: 'linux and match(pytorch, ">=2.7,<2.14")', then:
+    torchvision-extra-decoders}` contributes it on linux for torch minors in
+    that window; plain strings pass through. The wheel side needs this
     because its sidecar is written from package.yml, not from the rendered
-    recipe, and must say the same thing the .conda says for that platform.
+    recipe, and must say the same thing the .conda says for that cell -- so
+    a torch clause needs the cell's torch minor, and refusing to guess is
+    the only honest answer when it is not given.
     """
     fam = "win" if platform.startswith("win") else (
         "osx" if platform.startswith("osx") else "linux")
     out = []
     for d in run_deps or []:
         if isinstance(d, dict):
-            sel = d["if"]
-            if sel == fam or (sel == "unix" and fam != "win"):
-                out.append(d["then"])
+            plat, spec = parse_selector(d["if"])
+            if plat is not None and not (plat == fam or (plat == "unix" and fam != "win")):
+                continue
+            if spec is not None:
+                if pytorch is None:
+                    raise ValueError(
+                        f"run dep {d['then']!r} is conditional on the torch minor "
+                        f"({d['if']!r}) and no pytorch version was given to "
+                        f"resolve it for; pass the cell's torch minor.")
+                if not version_matches(pytorch, spec):
+                    continue
+            out.append(d["then"])
         else:
             out.append(d)
     return out
@@ -272,13 +342,28 @@ def _check_dependencies_declared(cfg: dict, pkg_dir: Path) -> None:
     for d in cfg.get("run_deps") or []:
         if isinstance(d, str):
             continue
-        if (not isinstance(d, dict) or set(d) != {"if", "then"}
-                or d["if"] not in PLATFORM_SELECTORS
+        parsed = parse_selector(d["if"]) if isinstance(d, dict) and "if" in d else None
+        if (not isinstance(d, dict) or set(d) != {"if", "then"} or parsed is None
                 or not isinstance(d["then"], str) or not d["then"].strip()):
             raise SystemExit(
                 f"ERROR: {pkg_dir.name}/package.yml: run_deps entry {d!r} must "
                 f"be a conda spec string or a mapping {{if: <selector>, then: "
-                f"<spec>}} with selector in {sorted(PLATFORM_SELECTORS)}.")
+                f"<spec>}} where the selector is one of {sorted(PLATFORM_SELECTORS)}, "
+                f"a torch-minor clause `match(pytorch, \">=2.7,<2.14\")`, or "
+                f"both joined by ` and `.")
+        _plat, spec = parsed
+        if spec is not None:
+            if not cfg.get("links_torch", True):
+                raise SystemExit(
+                    f"ERROR: {pkg_dir.name}/package.yml: run_deps entry {d!r} "
+                    f"is conditional on the torch minor, but this package is "
+                    f"links_torch: false and has no torch axis.")
+            try:
+                version_matches("2.8", spec)
+            except ValueError as exc:
+                raise SystemExit(
+                    f"ERROR: {pkg_dir.name}/package.yml: run_deps entry {d!r}: "
+                    f"{exc}") from None
 
 
 def _check_constrains(cfg: dict, pkg_dir: Path) -> None:
@@ -630,6 +715,29 @@ def _check_run_exports(cfg: dict, pkg_dir: Path) -> None:
             f"specs, got {cfg.get('run_exports')!r}.")
 
 
+def _check_conda_platforms(cfg: dict, pkg_dir: Path) -> None:
+    """`conda_platforms`: the subdirs the .conda is PUBLISHED on.
+
+    The wheel is still built and published for every platform the matrix
+    emits; this only withholds the .conda where it could not be installed or
+    imported -- flex-gemm imports triton at load and triton has no win-64
+    conda build. generate_matrix.py turns it into the job's `publish_conda`
+    flag, which the workflow's upload and fragment steps gate on.
+    """
+    v = cfg.get("conda_platforms")
+    if v is None:
+        return
+    if not isinstance(v, list) or not v or not all(isinstance(x, str) for x in v):
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: conda_platforms must be a "
+            f"non-empty list of conda subdirs, got {v!r}.")
+    unknown = sorted(set(v) - KNOWN_SUBDIRS)
+    if unknown:
+        raise SystemExit(
+            f"ERROR: {pkg_dir.name}/package.yml: conda_platforms names {unknown}; "
+            f"known subdirs are {sorted(KNOWN_SUBDIRS)}.")
+
+
 def _check_verify(cfg: dict, pkg_dir: Path) -> None:
     """The parts of `verify` the recipe renders (the rest is verify_conda's).
 
@@ -638,12 +746,14 @@ def _check_verify(cfg: dict, pkg_dir: Path) -> None:
     feeds the imports test; `verify.allow_dso` is rattler-build's
     missing_dso_allowlist (a binary that links libcuda.so.1 / nvcuda.dll
     links a driver library no conda package provides); `verify.op_requires`
-    lists packages the op needs beyond the artifact's own run deps.
+    lists packages the op needs beyond the artifact's own run deps;
+    `verify.imports` lists the submodules that must import on a GPU-less
+    runner (the python test renders import_name first, then these).
     """
     v = cfg.get("verify") or {}
     if not isinstance(v, dict):
         raise SystemExit(f"ERROR: {pkg_dir.name}/package.yml: verify must be a mapping.")
-    for key in ("allow_dso", "op_requires"):
+    for key in ("allow_dso", "op_requires", "imports"):
         lst = v.get(key)
         if lst is None:
             continue
@@ -678,6 +788,7 @@ def load_package(pkg_dir: Path) -> dict:
     _check_pypi_project(cfg, pkg_dir)
     _check_distribution_restriction(cfg, pkg_dir)
     _check_run_exports(cfg, pkg_dir)
+    _check_conda_platforms(cfg, pkg_dir)
     _check_verify(cfg, pkg_dir)
 
     for extra in ("arch_override.yml",):

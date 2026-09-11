@@ -206,6 +206,22 @@ def _readme_with_table(packages: list) -> str:
     return f"{head}{README_BEGIN}\n{_readme_table(packages)}{README_END}{tail}"
 
 
+def _dedupe(items: list) -> list:
+    seen, out = set(), []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def _yamlstr(value) -> str:
+    """A YAML double-quoted scalar. jinja's tojson would escape `>` and `'` as
+    \u003e and \u0027, which YAML reads correctly and no human does; a run
+    dep selector like `match(pytorch, ">=2.7,<2.14")` should stay legible."""
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def render(folder: str, cfg: dict, env) -> str:
     tmpl = env.get_template(TEMPLATE.name)
     family = bool(cfg.get("family_versions"))
@@ -245,7 +261,8 @@ def render(folder: str, cfg: dict, env) -> str:
         shard_sources=cfg.get("shard_sources") or [],
         shard_partition=cfg.get("shard_partition") or "",
         build_subdir=cfg.get("build_subdir") or "",
-        verify_import=verify.get("import") or cfg.get("import_name") or cfg["name"],
+        verify_imports=_dedupe([verify.get("import") or cfg.get("import_name") or cfg["name"]]
+                               + list(verify.get("imports") or [])),
         op_requires=verify.get("op_requires") or [],
         allow_dso=verify.get("allow_dso") or [],
         subsumed_run_deps=subsumed,
@@ -284,6 +301,7 @@ def main() -> int:
                       block_start_string="<%", block_end_string="%>",
                       comment_start_string="<#", comment_end_string="#>",
                       undefined=StrictUndefined, keep_trailing_newline=True)
+    env.filters["yamlstr"] = _yamlstr
 
     # Everything the build runs lives beside the recipe, because $RECIPE_DIR
     # is the only path the build can rely on inside the sandbox, and every one

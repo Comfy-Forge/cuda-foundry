@@ -385,7 +385,9 @@ tests:
           - "**/*.dist-info/direct_url.json"
           - bin/nvcc*
           - Library/bin/nvcc*
-  # 1. Import, in a fresh solve of the artifact with its run deps. pip_check
+  # 1. Import -- import_name, then package.yml verify.imports, the submodules
+  #    that must load on a GPU-less runner -- in a fresh solve of the
+  #    artifact with its run deps. pip_check
   #    asks pip whether the wheel's own Requires-Dist are satisfied by what
   #    conda installed -- a second opinion on run_deps from the metadata the
   #    upstream wrote. Needs no GPU: __cuda is a virtual package, so the solve
@@ -393,6 +395,11 @@ tests:
   - python:
       imports:
         - detectron2
+        - detectron2.engine
+        - detectron2.data
+        - detectron2.model_zoo
+        - detectron2.utils.visualizer
+        - detectron2.layers
       pip_check: true
   # 2. The package's own minimal op on real hardware (package.yml verify.op),
   #    shipped INSIDE the artifact as info/tests/ so that

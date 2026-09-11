@@ -257,6 +257,9 @@ it exists; this is the one-line form.
 | `distribution_restriction` | `distribution_restriction: "Licence excludes the EU, UK and South Korea"` | `extra.distribution_restriction`, the README table, the fragment's provenance |
 | `verify.allow_dso` | `allow_dso: [libcuda.so.1, nvcuda.dll]` | `build.dynamic_linking.missing_dso_allowlist` |
 | `verify.op_requires` | `op_requires: [numpy]` | the op test's `requirements.run` |
+| `verify.imports` | `imports: [torchvision.io, torchvision.ops]` | the python test's import list, after `import_name` |
+| `conda_platforms` | `conda_platforms: [linux-64]` | the matrix job's `publish_conda`; the wheel is built everywhere, the .conda published only there (flex-gemm imports triton, which has no win-64 conda build) |
+| run_deps torch clause | `{if: 'linux and match(pytorch, ">=2.7,<2.14")', then: torchvision-extra-decoders}` | rattler-build's `match()` on the `pytorch` variant, verbatim; the wheel sidecar evaluates the same spec (`resolve_run_deps(..., pytorch=)`) |
 
 Not allowed any more: `cuda-cudart-dev` in `host_deps` (see "The CUDA runtime
 dep is declared, not inherited" above).
@@ -420,6 +423,13 @@ above 3.4.24; cumm and spconv pin `gcc_version: "8"`.
 - **`cuda-nvtx` in the torch floor for torch 2.4/2.5** — they link
   `libnvToolsExt.so.1` and nothing else supplied it; it dies on `import torch`,
   before compiling anything.
+- **torchaudio ≥ 2.9.0 cannot be built by the family grid as it stands.**
+  The patch (`packages/torchaudio/patches/torchaudio.py`) hard-requires
+  `third_party/sox/CMakeLists.txt`, which is absent from 2.9.0 on -- audio
+  I/O moved to torchcodec -- so every torchaudio family cell ≥ 2.9 fails at
+  patch time, before any compile. A known limitation of the grid, recorded
+  by S3 (2026-09-11), not a build defect; lifting it means a second patch
+  path for the post-sox tree.
 - **torchvision stats its codec headers under `BUILD_PREFIX`/`CONDA_PREFIX`,
   never rattler-build's `$PREFIX`** — so jpeg/webp/nvjpeg were silently
   disabled while `run_exports` still claimed them, and `decode_jpeg` would have

@@ -352,10 +352,12 @@ requirements:
     - pytorch ${{ pytorch }}.* cuda${{ cuda_short }}_repack_*
     - einops
     - packaging
-    # Platform-conditional (package.yml `{if: <selector>, then: <spec>}`):
-    # the dependency exists on one subdir and nowhere on another. See
-    # package_loader.resolve_run_deps for the wheel-side counterpart.
-    - if: linux
+    # Conditional (package.yml `{if: <selector>, then: <spec>}`): a platform
+    # selector, a torch-minor clause (rattler-build's own match() on the
+    # `pytorch` variant, for a dep conda-forge builds for some torch minors
+    # and not others), or both. See package_loader.resolve_run_deps for the
+    # wheel-side counterpart, which evaluates the same clause in Python.
+    - if: "linux"
       then: triton
   ignore_run_exports:
     # pytorch's weak export `pytorch >=2.8.0,<2.9.0a0` duplicated the glob
@@ -393,7 +395,9 @@ tests:
           - "**/*.dist-info/direct_url.json"
           - bin/nvcc*
           - Library/bin/nvcc*
-  # 1. Import, in a fresh solve of the artifact with its run deps. pip_check
+  # 1. Import -- import_name, then package.yml verify.imports, the submodules
+  #    that must load on a GPU-less runner -- in a fresh solve of the
+  #    artifact with its run deps. pip_check
   #    asks pip whether the wheel's own Requires-Dist are satisfied by what
   #    conda installed -- a second opinion on run_deps from the metadata the
   #    upstream wrote. Needs no GPU: __cuda is a virtual package, so the solve

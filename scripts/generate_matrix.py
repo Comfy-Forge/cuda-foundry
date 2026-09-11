@@ -365,6 +365,14 @@ def main() -> int:
                     "patch_script": cfg.get("patch_script", ""),
                     "force_source_build": cfg.get("force_source_build") or {},
                     "links_torch": cfg["links_torch"],
+                    # package.yml `conda_platforms`: the wheel is built on
+                    # every platform; the .conda is uploaded and its fragment
+                    # committed only where this is true (flex-gemm imports
+                    # triton, which has no win-64 conda build). The workflow
+                    # gates the .conda steps on it; a wheel-only cell still
+                    # runs verify_conda so the build is checked, just not
+                    # published.
+                    "publish_conda": subdir in (cfg.get("conda_platforms") or [subdir]),
                     "clone_recursive": bool(cfg.get("clone_recursive", False)),
                     "free_disk_space": bool(cfg.get("free_disk_space", True)),
                     "nvcc_flags": cfg.get("nvcc_flags", ""),
@@ -479,6 +487,7 @@ def noarch_job(name: str, policy: dict, build_number: int, skip_published: bool)
         "sharding": 1, "shard_index": 1, "shard_count": 1,
         "links_torch": False,
         "family": False,
+        "publish_conda": True,
     }
 
 

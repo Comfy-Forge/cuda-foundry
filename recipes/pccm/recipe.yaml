@@ -71,6 +71,16 @@ requirements:
     - fire
     - lark >=1.0.0
     - portalocker >=2.3.2
+    # Two imports upstream's REQUIRED omits, read from the wheel:
+    # pccm/extension.py:8 `from setuptools import ...` (and the test below
+    # imports pccm.extension), pccm/builder/inliner.py:30 `import numpy`.
+    - setuptools
+    - numpy
+  ignore_run_exports:
+    # host python's noarch run_export is a bare `python`, which duplicated
+    # the `python >=3.10` above on the published artifact. One python spec.
+    by_name:
+      - python
 
 tests:
   - package_contents:

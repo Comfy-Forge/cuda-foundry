@@ -78,20 +78,19 @@ nvcc_threads: 1
 # the two point releases conda's MatchSpec can express.
 #
 # torchvision-extra-decoders (the avif/heic decoders torchvision >= 0.20
-# dlopens on demand; conda-forge, linux only) is NOT declared, and this is
-# a gap to know about rather than an omission: conda-forge builds it per
-# torch minor and has no build for torch 2.4.x or 2.14.0 (checked
-# 2026-09-11 against conda-torch's torch list), so an unconditional linux
-# entry would make those cells UNSAT, and for torch < 2.7 -- where PyPI's
-# libtorch (conda-torch's is the PyPI wheel repacked) still uses the
-# pre-cxx11 ABI conda-forge's build does not -- it would load against the
-# wrong ABI. The run_deps selector vocabulary is platform-only; a
-# torch-version-conditional entry (`{if: "linux and pytorch >= 2.7"}`, say)
-# is what this needs, and until the loader admits one the avif check in the
-# op below runs only where the decoder happens to be installed.
+# dlopens on demand; conda-forge, linux only) is declared where it can be:
+# conda-forge builds it per torch minor, for 2.5.1 through 2.13 and not for
+# 2.4.x or 2.14.0 (checked 2026-09-11 against conda-forge linux-64
+# repodata), so an unconditional linux entry would make those cells UNSAT;
+# and for torch < 2.7 -- where PyPI's libtorch (conda-torch's is the PyPI
+# wheel repacked) still uses the pre-cxx11 ABI conda-forge's build does not
+# -- it would load against the wrong ABI. Hence the torch-minor clause,
+# rattler-build's own match() on the `pytorch` variant, which the wheel
+# sidecar evaluates the same way (package_loader.resolve_run_deps).
 run_deps:
   - numpy
   - pillow >=5.3.0,!=8.3.0,!=8.3.1
+  - { if: 'linux and match(pytorch, ">=2.7,<2.14")', then: torchvision-extra-decoders }
 build_deps:
   # ALSO in build:, while the import library stays in host:. torchvision does
   # not ask the compiler whether nvjpeg exists -- it stats
