@@ -7,9 +7,30 @@ version: "0.5.0"
 
 # MIT, read from the repo's own LICENSE at the pinned rev (LICENSE_radix_sort
 # is the BSD notice for a vendored kernel; the package licence is MIT).
-license: MIT
+license: MIT AND BSD-3-Clause AND Apache-2.0
 homepage: https://github.com/pyg-team/pyg-lib
 summary: Low-level graph neural network operations for PyG, compiled against the conda-torch channel
+repository: https://github.com/pyg-team/pyg-lib
+documentation: https://pyg-lib.readthedocs.io
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# MIT LICENSE; LICENSE_radix_sort (FBGEMM's BSD-3, a kernel compiled into
+# libpyg); and the five submodules: CUTLASS (BSD-3), cccl (Apache-2.0 with
+# LLVM exception / BSD-3, combined file), cuCollections, parallel-hashmap and
+# METIS (Apache-2.0; METIS is compiled into libpyg on non-MSVC).
+license_files:
+  - LICENSE
+  - LICENSE_radix_sort
+  - third_party/cutlass/LICENSE.txt
+  - third_party/cccl/LICENSE
+  - third_party/cuCollections/LICENSE
+  - third_party/parallel-hashmap/LICENSE
+  - third_party/METIS/LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# pypi.org has no pyg_lib project (404, 2026-09-11); upstream serves wheels from its own index.
+pypi_project: null
 
 source_repo: pyg-team/pyg-lib
 # The 0.5.0 tag, dereferenced to its commit so two artifacts of one version
@@ -44,7 +65,6 @@ run_deps: []
 # used -- and nvrtc, which TorchConfig.cmake would otherwise put on the link
 # line, is filtered out by the patch.
 host_deps:
-  - cuda-cudart-dev
   # torch's Caffe2/public/cuda.cmake does get_target_property() on
   # CUDA::nvrtc, a target FindCUDAToolkit creates only when it finds nvrtc's
   # HEADERS and import library -- not from the runtime package alone. The
@@ -52,8 +72,11 @@ host_deps:
   #   get_target_property() called with non-existent target "CUDA::nvrtc"
   # (run 34592208119), exactly torchaudio's finding for the same file. The
   # patch then filters nvrtc back OUT of the link line, so libpyg records no
-  # DT_NEEDED on it; the run_export this adds is the price of torch's cmake
-  # asking for the target at all.
+  # DT_NEEDED on it -- and its run_export does not reach the artifact: the
+  # template ignores cuda-nvrtc-dev's export unless a package opts back in
+  # with `keep_run_exports` (cumm, which links it, does). The published
+  # .conda carried a `cuda-nvrtc >=12.9` run dep for a library it never
+  # loads (audit finding); that is what the ignore closes.
   - cuda-nvrtc-dev
 
 build_deps:
@@ -87,17 +110,29 @@ build_deps:
 #                 compile for the 6.0 row this package carries. With the
 #                 toolkit's headers first, run 34593897238 died in ptxas:
 #                 "atom.cas.b16 with generic state space requires .target
-#                 sm_70". This replaces build.sh's value (build_env is applied
-#                 after it) with the vendored cccl trees, so they come first;
-#                 the cell's own CUDA headers still win, because cmake takes
+#                 sm_70". The vendored cccl trees go FIRST and the variable's
+#                 existing value is kept BEHIND them (build_env is applied
+#                 after build.sh's export): the cell's own CUDA headers still
+#                 win over the host env's because cmake takes
 #                 CUDAToolkit_INCLUDE_DIRS from the CUDA_TOOLKIT_ROOT_DIR the
-#                 patch passes, which is the build env's 12.8. win-64 gets the
-#                 same value (nvcc.exe reads the variable too), where nothing
-#                 set it before.
+#                 patch passes, which is the build env's 12.8.
+#
+#                 Keeping the old value is not cosmetic. An earlier version
+#                 REPLACED it, and the value it replaced carries conda-forge's
+#                 `-ccbin=$CXX` (set by cuda-nvcc's activation script) -- so
+#                 nvcc fell back to /usr/bin/g++ as its host compiler, and the
+#                 shipped libpyg.so's .comment section says
+#                 `GCC: (Ubuntu 13.3.0-6ubuntu2~24.04.1)`, the RUNNER's gcc,
+#                 not the cell's pinned conda compiler (verified on the
+#                 published artifact by the audit). $NVCC_PREPEND_FLAGS is a
+#                 plain $VAR reference, the one form the loader admits in a
+#                 build_env value; on win-64 it renders as
+#                 %NVCC_PREPEND_FLAGS%, which a .bat expands to nothing when
+#                 unset, so the value there is exactly what it was before.
 build_env:
   FORCE_NINJA: "1"
   CMAKE_BUILD_PARALLEL_LEVEL: $MAX_JOBS
-  NVCC_PREPEND_FLAGS: -I$SRC_DIR/third_party/cccl/libcudacxx/include -I$SRC_DIR/third_party/cccl/cub -I$SRC_DIR/third_party/cccl/thrust
+  NVCC_PREPEND_FLAGS: -I$SRC_DIR/third_party/cccl/libcudacxx/include -I$SRC_DIR/third_party/cccl/cub -I$SRC_DIR/third_party/cccl/thrust $NVCC_PREPEND_FLAGS
 
 # conda-forge ships `pyg-lib` (0.6.0: cpu builds on linux-64/win-64/osx and
 # cuda129 builds on linux-64 for torch 2.9/2.10, read from anaconda.org on
