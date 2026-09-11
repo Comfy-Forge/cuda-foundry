@@ -39,9 +39,27 @@ clone_recursive: false
 
 # Read from the repo's own LICENSE file at the pinned rev, not assumed:
 # torchvision is BSD-3-Clause and torchaudio BSD-2-Clause -- they differ.
-license: BSD-2-Clause
+license: BSD-2-Clause AND BSD-3-Clause AND Apache-2.0
 homepage: https://github.com/pytorch/audio
 summary: Audio and signal processing primitives for PyTorch, compiled against the conda-torch channel
+repository: https://github.com/pytorch/audio
+documentation: https://docs.pytorch.org/audio/stable/
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# BSD-2 LICENSE; LICENSES_BUNDLED.txt lists the cuctc decoder that the CUDA
+# build compiles in (BSD-2, one BSD-3 file, and the Apache-2.0 bitonic_topk).
+# All four paths exist at every pinned family revision (checked 2.4.0, 2.8.0,
+# 2.10.0 and 2.11.0 trees).
+license_files:
+  - LICENSE
+  - third_party/LICENSES_BUNDLED.txt
+  - src/libtorchaudio/cuctc/LICENSE
+  - src/libtorchaudio/cuctc/src/bitonic_topk/LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (pytorch/audio).
+pypi_project: torchaudio
 
 links_torch: true
 
@@ -89,7 +107,6 @@ run_deps: []
 #           update` can patch -- the same argument as torchvision's codecs.
 #           rattler-build's run_export carries it to the runtime deps.
 host_deps:
-  - sox
   # <7 is a hard API bound, not caution. torio's sources use AVFilterLink
   # members hw_frames_ctx, channel_layout and frame_rate plus
   # av_get_channel_layout_nb_channels, all REMOVED in ffmpeg 7 -- against
@@ -105,7 +122,26 @@ host_deps:
   #   get_target_property() called with non-existent target "CUDA::nvrtc"
   # because the -dev half was absent. torchaudio is the only CMake-driven
   # package of the five, which is why nothing else needed it.
+  #
+  # Its run_export does NOT reach the artifact: nothing torchaudio builds
+  # links libnvrtc (verified on the published .conda by the audit, which
+  # found a `cuda-nvrtc >=12.9` run dep on a library set that never loads
+  # it), and the template ignores cuda-nvrtc-dev's export unless a package
+  # opts back in with `keep_run_exports` (cumm does; this one does not).
+  # The package stays in host: -- where cmake demonstrably finds it on both
+  # platforms -- rather than moving to build:, so the configure step is
+  # untouched.
   - cuda-nvrtc-dev
+
+# sox is linux-only, and it is a HOST dep only for its header: extension.py
+# defaults BUILD_SOX to True on Linux and nowhere else, so no sox extension
+# is ever built or shipped on win-64 -- yet an unconditional host entry gave
+# the published win-64 .conda a `sox >=14.4.2` run dep through sox's
+# run_export, for a library nothing in it loads (audit finding). The
+# platform-conditional host list keeps the header (and the run_export) where
+# the extension actually exists.
+host_deps_linux:
+  - sox
 
 # gcc 10, below the policy's 13 for CUDA 12.8 (nvcc's ceiling is <15, so this
 # is legal). At 13 the compiler emits
@@ -144,9 +180,7 @@ build_deps:
   # guarantee is supposed to make impossible.
   - cmake
 
-# conda-forge does not ship a `torchaudio` for linux-64 in the flavours we
-# target, but the name exists there, so state the obligation explicitly.
-carry: complete
+carry: complete  # shadows conda-forge's line for this cell; see ARCHITECTURE.md "Shadowing"
 
 # Upstream's escape hatches, used instead of disabling the backends.
 # FFMPEG_ROOT selects third_party/ffmpeg/single ("searching existing FFmpeg
@@ -187,11 +221,20 @@ build_env_win:
 
 verify:
   import: torchaudio
+  # GPU-less import surface: the two backend packages must import, not
+  # merely exist as files.
+  imports:
+    - torchaudio
+    - torchaudio.functional
+    - torchaudio.transforms
+    - torchaudio.io
+    - torio
   # resample exercises the C++ extension's kernel path; lfilter is the other
   # compiled op. Both on CUDA so a mis-arch'd build cannot pass.
   op: |
     import torch, torchaudio
     import torchaudio.functional as F
+    import torchaudio.transforms, torchaudio.io
     x = torch.randn(1, 16000, device="cuda")
     y = F.resample(x, 16000, 8000)
     assert y.shape[-1] == 8000, y.shape
@@ -224,6 +267,15 @@ verify:
     # in a venv that had none. is_available() is the real probe.
     from torio._extension import lazy_import_ffmpeg_ext
     import ctypes.util
+    # Both backends BY NAME through torchaudio's own registry -- upstream's
+    # statement that the extension loaded, not a file existing on disk.
+    # Each is required wherever its library is present: always in the conda
+    # env (ffmpeg and sox are run deps there), and in a venv only if the host
+    # happens to have them, since the wheel vendors neither.
+    backends = set(torchaudio.list_audio_backends())
     if ctypes.util.find_library("avutil"):
         assert lazy_import_ffmpeg_ext().is_available(), \
             "ffmpeg is installed but torio's extension will not load"
+        assert "ffmpeg" in backends, backends
+    if ctypes.util.find_library("sox"):
+        assert "sox" in backends, backends

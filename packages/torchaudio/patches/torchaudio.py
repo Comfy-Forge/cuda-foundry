@@ -101,3 +101,45 @@ leftover = [ln for ln in text.splitlines()
 _require(not leftover,
          f"sox CMakeLists still references a download after patching: {leftover}")
 print("torchaudio: verified no FetchContent/sourceforge reference remains")
+
+# ── $ORIGIN in the installed libraries' RPATH ───────────────────────────────
+# The build installs every library side by side (torchaudio/lib/,
+# torio/lib/) and the Python-facing ones record DT_NEEDED on their siblings:
+# _torchaudio.so -> libtorchaudio.so, _torchaudio_sox.so ->
+# libtorchaudio_sox.so, _torio_ffmpeg.so -> libtorio_ffmpeg.so, and the
+# ffmpeg one on libav*. cmake's install step strips the build RPATH and
+# upstream sets no install RPATH, so the published artifact's four
+# python-facing .so carried NO $ORIGIN entry (audit finding): the sibling
+# resolves only because torchaudio's Python happens to torch.ops.load_library
+# the dependency first, and libav* only through whatever the process already
+# has on its search path. Set the install RPATH here, in the one CMake
+# project, rather than patchelf-ing afterwards: `$ORIGIN` for the sibling,
+# and the link path (the host prefix's lib/, where ffmpeg and sox live) which
+# rattler-build then relocates into its own $ORIGIN-relative form when it
+# packages, and tools/make_wheel.py drops from the wheel as it drops every
+# non-$ORIGIN entry (the wheel vendors neither ffmpeg nor sox, like
+# upstream's). ELF only -- guarded on UNIX AND NOT APPLE so the Windows and
+# macOS configure are byte-identical to before.
+top = Path("CMakeLists.txt")
+_require(top.is_file(), "CMakeLists.txt is missing at the source root")
+text = top.read_text()
+RPATH_BLOCK = """
+# cuda-foundry: installed libraries find their siblings through $ORIGIN and
+# the host prefix's libraries through the link path (see
+# packages/torchaudio/patches/torchaudio.py).
+if(UNIX AND NOT APPLE)
+  set(CMAKE_INSTALL_RPATH "$ORIGIN")
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+endif()
+"""
+if "CMAKE_INSTALL_RPATH" in text:
+    print("torchaudio: install RPATH already set in CMakeLists.txt")
+else:
+    text, n = re.subn(r"^project\(torchaudio\)\n", "project(torchaudio)\n" + RPATH_BLOCK,
+                      text, count=1, flags=re.M)
+    _require(n == 1, "expected exactly one `project(torchaudio)` line at the top of "
+                     "CMakeLists.txt to anchor the RPATH settings on")
+    top.write_text(text)
+    print("torchaudio: CMAKE_INSTALL_RPATH=$ORIGIN (+ link path) set for ELF builds")
+_require('set(CMAKE_INSTALL_RPATH "$ORIGIN")' in top.read_text(),
+         "the RPATH block did not land in CMakeLists.txt")
