@@ -75,7 +75,19 @@ host_deps:
   - cuda-version ${{ cuda_compiler_version }}.*
   - cuda-cudart-dev
 
-build_deps: []
+# spconv compiles cumm's tensorview headers, and tensorview/tensor.h
+# includes <curand.h> (measured: the first local build died on exactly
+# that). cumm takes its include path from the nvcc prefix -- the BUILD env
+# -- and ccimport reads no CPPFLAGS, so the header has to be in the build
+# env itself. Header only: the curand host call sits in a template no TU
+# instantiates and core_cc records no DT_NEEDED on libcurand, so no host
+# copy and no run_export. Same finding, same placement as cumm's own.
+build_deps:
+  - libcurand-dev
+  # tensorview/cuda/nvrtc.h includes <nvrtc.h> (second local build died on
+  # exactly that). The header only, for the same reason as curand: what
+  # core_cc actually records is checked below, not assumed.
+  - cuda-nvrtc-dev
 
 # Upstream's switches, read by setup.py / cumm.common at build time:
 #   SPCONV_DISABLE_JIT=1   build core_cc as a PCCMExtension.

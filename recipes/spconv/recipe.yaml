@@ -592,6 +592,8 @@ requirements:
     # python cannot import from the build prefix -- so anything import-time
     # belongs in host_deps instead. Worth stating because the two read alike
     # in package.yml and only one of them works from here.
+    - libcurand-dev
+    - cuda-nvrtc-dev
   host:
     - python ${{ python }}.*
     # python_abi's run_export is what puts a real interpreter-ABI bound on the
