@@ -169,6 +169,24 @@ def verify(path: Path, args, tmp: Path) -> bool:
         rep.check(not bad,
                   f"sidecar does not advertise torch ({bad}) -- the ABI is "
                   f"pinned in the local version, which pip ignores")
+        # PEP 658 says the sidecar and the wheel's METADATA "MUST be
+        # identical", and pip enforces it: 26.2.1's
+        # _check_sidecar_matches_wheel compares Name, Version, Requires-Dist,
+        # Requires-Python and Provides-Extra and ABORTS the install on a
+        # difference. Measured by tools/clean_verify.py on the live /deps/
+        # index: every wheel whose sidecar carries a dependency fails with
+        # "has inconsistent Requires-Dist between its PEP 658 .metadata file
+        # and the wheel's METADATA"; only wheels with an empty sidecar
+        # (cc-torch) install. So the two-trees-one-file design as documented
+        # cannot be consumed by pip through /deps/. This is a design decision
+        # for the index owner, not something a verifier can fix by itself,
+        # so it is reported loudly here rather than failed silently later.
+        if sreqs and not reqs:
+            print(f"::warning::{path.name}: the sidecar declares {len(sreqs)} Requires-Dist "
+                  f"and the wheel's METADATA declares none. PEP 658 requires the two to be "
+                  f"identical and pip >= 26 refuses to install the wheel from an index that "
+                  f"advertises this sidecar (measured, tools/clean_verify.py). The /deps/ "
+                  f"tree cannot serve this wheel to pip until the design changes.")
 
         # ---- and they are the SAME dependencies as the conda package --------
         if args.conda:

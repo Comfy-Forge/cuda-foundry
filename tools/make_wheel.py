@@ -164,6 +164,7 @@ SAME_ON_PYPI = {
     "setuptools", "psutil", "ninja", "scikit-image", "scikit-learn", "opencv-python",
     "matplotlib", "pandas", "requests", "safetensors", "tokenizers", "timm",
     "wheel", "cython", "pyparsing", "regex", "six", "attrs", "typeguard",
+    "torchvision-extra-decoders",
 }
 
 # conda-only: runtimes and virtual packages a wheel cannot express and never
@@ -854,7 +855,14 @@ def main() -> int:
     links_torch = cfg.get("links_torch", True)
     # Conditional entries (`{if: linux, then: triton}`) resolved for THIS
     # platform, so the sidecar says what the .conda for the same subdir says.
-    run_deps = pl.resolve_run_deps(cfg.get("run_deps") or [], args.platform)
+    # Conditional entries (`{if: linux, then: triton}`, and torch-minor
+    # clauses such as `{if: 'linux and match(pytorch, ">=2.7,<2.14")', then:
+    # torchvision-extra-decoders}`) resolved for THIS cell, so the sidecar
+    # says what the .conda for the same cell says. The torch minor is
+    # required by the loader whenever a torch clause exists: it raises rather
+    # than silently dropping the dependency.
+    run_deps = pl.resolve_run_deps(cfg.get("run_deps") or [], args.platform,
+                                   pytorch=args.pytorch)
     # package.yml `sidecar_omit`: conda run deps with no PyPI counterpart that
     # the wheel does not need (a reviewed list, each entry with a reason).
     sidecar_omit = {str(x).split()[0] for x in (cfg.get("sidecar_omit") or [])}

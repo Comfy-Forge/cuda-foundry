@@ -93,6 +93,26 @@ def main() -> int:
     check(mw.pypi_name_for("frobnicator", "12.8", strict=False) == "frobnicator",
           "verify_wheel's lenient lookup passes unknown names through for comparison")
 
+    # ---- a torch-minor clause lands in the sidecar for the cell it names ----
+    # torchvision declares torchvision-extra-decoders for torch >=2.7,<2.14
+    # on linux; the sidecar written for a 2.8 cell carries it and one for a
+    # 2.4 cell does not, and the loader refuses to resolve without a minor.
+    sys.path.insert(0, str(HERE.parent / "scripts"))
+    import package_loader as pl
+    deps = [{"if": 'linux and match(pytorch, ">=2.7,<2.14")', "then": "torchvision-extra-decoders"},
+            "numpy"]
+    at28 = [mw.conda_spec_to_pep508(d, "12.8") for d in pl.resolve_run_deps(deps, "linux-64", pytorch="2.8")]
+    at24 = [mw.conda_spec_to_pep508(d, "12.8") for d in pl.resolve_run_deps(deps, "linux-64", pytorch="2.4")]
+    atwin = [mw.conda_spec_to_pep508(d, "12.8") for d in pl.resolve_run_deps(deps, "win-64", pytorch="2.8")]
+    check(at28 == ["torchvision-extra-decoders", "numpy"], f"torch 2.8 linux sidecar carries the clause ({at28})")
+    check(at24 == ["numpy"], f"torch 2.4 linux sidecar does not ({at24})")
+    check(atwin == ["numpy"], f"win-64 sidecar does not ({atwin})")
+    try:
+        pl.resolve_run_deps(deps, "linux-64")
+        check(False, "resolving a torch clause without a minor must raise")
+    except ValueError:
+        check(True, "resolving a torch clause without a minor raises rather than dropping the dep")
+
     # ---- abi retag -----------------------------------------------------------
     check(mw.cpython_abi_of_modules(["torchao/_C.abi3.so",
                                      "torchao/prototype/mxfp8_cuda.cpython-312-x86_64-linux-gnu.so"]) == "cp312",
