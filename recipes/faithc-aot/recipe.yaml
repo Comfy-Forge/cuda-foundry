@@ -478,7 +478,14 @@ build:
           fi
           if [ -s "$CUW_RSS_LOG" ]; then
             echo "=== nvcc peak RSS per TU (top 10) ==="
-            sort -t= -k2 -nr "$CUW_RSS_LOG" | head -10
+            # `|| true` is load-bearing. Under `set -o pipefail`, sort takes SIGPIPE
+            # (141) whenever head stops reading before sort has finished writing, and
+            # this is the LAST pipeline in the script -- so its status is the script's.
+            # A package with a handful of translation units never saw it; spconv's
+            # link job (699 entries, run 34592223234) compiled, replayed at zero
+            # misses, installed its wheel and scrubbed its dist-info, and then exited
+            # 141 on this line with nothing wrong.
+            sort -t= -k2 -nr "$CUW_RSS_LOG" | head -10 || true
           fi
       - if: win
         then: |
