@@ -19,6 +19,18 @@ version): every cell's build consumes the same tree.
    the most collidable names there is. The implicitron trainer is added
    separately with its own package_dir and is unaffected.
 
+3. No console scripts. setup.py registers two entry points,
+   pytorch3d_implicitron_runner and pytorch3d_implicitron_visualizer, into
+   projects/implicitron_trainer. On win-64 pip renders each as a .exe
+   launcher with the BUILD machine's interpreter path baked in
+   (D:/a/_temp/.../python.exe, Windows-spelled -- verified on the published artifact), a
+   path no user has; and what they import -- hydra-core, visdom, lpips,
+   accelerate, sqlalchemy, the implicitron extras -- is not declared by this
+   package either. Dropped rather than rendered through the recipe: the
+   library is the artifact, the trainer CLI is upstream's research
+   scaffolding (its package_dir is added separately in setup.py and stays;
+   only the entry points go).
+
 NOT carried from the farm: its CUDA >= 13 branch, which appended
 `-static-global-template-stub=false` to NVCC_FLAGS via $GITHUB_ENV. That is a
 build-time, per-cell decision (cuda_mm() is read from the environment on the
@@ -45,6 +57,25 @@ require(n_std == 2,
 setup_file.write_text(content)
 print(f"pytorch3d patch: dropped {n_std} hardcoded std flag(s); torch's "
       f"cpp_extension now selects the standard")
+
+import re  # noqa: E402
+
+content = setup_file.read_text()
+if "entry_points=" not in content:
+    print("pytorch3d patch: no entry_points block (already removed)")
+else:
+    content, n_ep = re.subn(
+        r"    entry_points=\{\n        \"console_scripts\": \[\n(?:            .*\n)+?        \]\n    \},\n",
+        "    # cuda-foundry: the two implicitron console scripts are not shipped\n"
+        "    # (see packages/pytorch3d/patches/pytorch3d.py, item 3).\n",
+        content)
+    require(n_ep == 1 and "entry_points=" not in content and "console_scripts" not in content,
+            "pytorch3d: expected exactly one entry_points={console_scripts: [...]} block "
+            "in setup.py -- upstream changed; re-read it before dropping the scripts")
+    import ast
+    ast.parse(content)
+    setup_file.write_text(content)
+    print("pytorch3d patch: entry_points (implicitron console scripts) removed")
 
 exclude_top_level_packages(["projects"])
 require('"projects"' in setup_file.read_text(),

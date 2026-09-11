@@ -7,9 +7,22 @@ version: "0.7.9"
 
 # BSD-3-Clause, read from the repo's own LICENSE at the pinned rev ("BSD
 # License ... For PyTorch3D software", three-clause text).
-license: BSD-3-Clause
+license: BSD-3-Clause AND MIT
 homepage: https://github.com/facebookresearch/pytorch3d
 summary: PyTorch3D, 3D deep learning with compiled CUDA ops, built against the conda-torch channel
+repository: https://github.com/facebookresearch/pytorch3d
+documentation: https://pytorch3d.readthedocs.io
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# BSD-3 LICENSE and LICENSE-3RD-PARTY (the MIT SRN code under implicitron).
+license_files:
+  - LICENSE
+  - LICENSE-3RD-PARTY
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (facebookresearch/pytorch3d, FAIR); PyPI stops at 0.7.4.
+pypi_project: pytorch3d
 
 source_repo: facebookresearch/pytorch3d
 # v0.7.9, dereferenced to the commit (git ls-remote --tags, 2026-09-11).
@@ -32,32 +45,50 @@ nvcc_threads: 1
 # non-torch runtime claim upstream makes. Read against the imports:
 #   iopath   pytorch3d/io/utils.py, mtl_io.py -- a real import-time need
 #   numpy    31 modules import it; upstream leaves it implicit via torch
-# omegaconf and PIL are imported only by implicitron and the io/vis
-# subpackages, which are not reached by `import pytorch3d`; they stay extras
-# as upstream has them. The wheel's PEP 658 sidecar on the farm agrees:
-# `Requires-Dist: iopath` and nothing else outside extras.
+#   pillow   pytorch3d/io/obj_io.py:21, io/utils.py:17 and
+#            io/experimental_gltf_io.py:52 -- `from PIL import Image` at
+#            module scope, so `import pytorch3d.io` (load_obj, the entry
+#            point most consumers use) needs it. The published artifact
+#            could not import pytorch3d.io; upstream leaves PIL undeclared.
+# omegaconf is imported only by implicitron, which is not reached by
+# `import pytorch3d`; it stays an extra as upstream has it. The wheel's PEP
+# 658 sidecar on the farm carries `Requires-Dist: iopath` and nothing else
+# outside extras, which was the same omission.
+#
+# No console scripts: the patch drops upstream's two implicitron entry
+# points (pip rendered them as .exe launchers with the build machine's
+# python.exe baked in on win-64, and they import undeclared extras).
 run_deps:
   - iopath
   - numpy
+  - pillow
 
 # csrc includes cuda_runtime, thrust (tuple only) and cub. setup.py looks for
 # CUB under CUB_HOME / $CONDA_PREFIX/include/cub and merely warns if it finds
 # neither; CUDA 12's own <cub/cub.cuh> ships in cuda-cccl, which the recipe
 # already puts in build:, and that is the one the compile uses.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 
-carry: complete   # conda-forge has no pytorch3d; nothing to shadow
+carry: complete  # shadows conda-forge's line for this cell; see ARCHITECTURE.md "Shadowing"
 
 verify:
   import: pytorch3d
+  # GPU-less import surface: the io subpackage is the pillow site above;
+  # ops/structures/renderer load the compiled _C.
+  imports:
+    - pytorch3d
+    - pytorch3d.io
+    - pytorch3d.ops
+    - pytorch3d.structures
+    - pytorch3d.renderer
   # knn_points runs pytorch3d's own KNN kernel (csrc/knn/knn.cu), so a
   # mis-arch'd build fails with cudaErrorNoKernelImageForDevice here and
   # nowhere else. Checked against a brute-force answer, not just for shape.
   op: |
     import torch
+    import pytorch3d.io
     from pytorch3d.ops import knn_points
     p1 = torch.randn(1, 64, 3, device="cuda")
     p2 = torch.randn(1, 128, 3, device="cuda")
