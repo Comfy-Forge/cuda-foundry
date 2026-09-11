@@ -369,15 +369,17 @@ tests:
           - Library/bin/nvcc*
   # 1. Import -- import_name, then package.yml verify.imports, the submodules
   #    that must load on a GPU-less runner -- in a fresh solve of the
-  #    artifact with its run deps. pip_check
-  #    asks pip whether the wheel's own Requires-Dist are satisfied by what
-  #    conda installed -- a second opinion on run_deps from the metadata the
-  #    upstream wrote. Needs no GPU: __cuda is a virtual package, so the solve
-  #    wants CONDA_OVERRIDE_CUDA on a GPU-less machine and nothing more.
+  #    artifact with its run deps. Needs no GPU: __cuda is a virtual package,
+  #    so the solve wants CONDA_OVERRIDE_CUDA on a GPU-less machine and nothing
+  #    more. pip_check stays OFF: conda-torch's pytorch keeps upstream's
+  #    Requires-Dist (nvidia-cublas-cu12 and thirteen siblings) that conda
+  #    satisfies under other names, so `pip check` fails on every torch-linked
+  #    artifact -- measured on 9/9 published ones. The wheel half runs its
+  #    own dependency check against PyPI names in verify_wheel.
   - python:
       imports:
         - custom_rasterizer_kernel
-      pip_check: true
+      pip_check: false
   # 2. The package's own minimal op on real hardware (package.yml verify.op),
   #    shipped INSIDE the artifact as info/tests/ so that
   #    `rattler-build test --package-file <artifact> --test-index 2` runs it on

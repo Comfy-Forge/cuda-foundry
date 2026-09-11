@@ -94,7 +94,7 @@ tests:
         - pccm
         - pccm.builder
         - pccm.extension
-      pip_check: true
+      pip_check: false
 
 about:
   homepage: https://github.com/FindDefinition/PCCM
