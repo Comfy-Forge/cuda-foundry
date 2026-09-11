@@ -22,13 +22,27 @@
 
 ## Windows
 
-Upstream ships no CUDA build for Windows: `setup.py` withholds the CUTLASS
-include directories on `not IS_WINDOWS`, while its Windows source filter drops
-only files with "cutlass" in the name. `activation24/sparsify24.cu` includes
-`<cutlass/bfloat16.h>` and stays, so the first win-64 cell died with C1083
-(run 34586352085). The patch gives Windows the include directories and the
-MSVC host flags CUTLASS documents, decided at build time; whether MSVC then
-compiles these kernels is recorded in the batch report from the run.
+Upstream ships no CUDA build for Windows, and the farm recorded its 0.18.0
+Windows cells as pure-python wheels. Here the win-64 cell builds all four
+CUDA modules (run 34601149667: `_C`, `_C_cutlass_90a`, `_C_cutlass_100a`,
+`mxfp8_cuda`, SASS census identical to Linux's). Three things stood in the
+way, each measured on its own run and fixed in `patches/torchao.py` at
+build time or in the source with no platform branch in the patch:
+
+- `setup.py` withholds the CUTLASS include directories on `not IS_WINDOWS`
+  while its source filter drops only files with "cutlass" in the name;
+  `activation24/*.cu` include `<cutlass/bfloat16.h>` and died with C1083
+  (run 34586352085). Windows now gets the include directories and the MSVC
+  host flags CUTLASS documents (`/Zc:__cplusplus /bigobj /Zc:preprocessor
+  /permissive-`), forwarded through nvcc.
+- `_C`, `_C_cutlass_90a` and `_C_cutlass_100a` are torch-ops libraries with
+  no Python module, and distutils on Windows links every extension with
+  `/EXPORT:PyInit_<name>` (LNK2001, run 34596571344). A stub source
+  (`torchao/cuw_pyinit_stub.cpp`, empty off Windows) exports a PyInit that
+  raises ImportError; the name comes from `TORCH_EXTENSION_NAME`.
+- `mxfp8_quantize.cuh` uses `#warning`, which cl rejects even in a skipped
+  group (C1021, run 34598640540); it is now `#pragma message`, which every
+  host compiler here accepts.
 
 ## Patch
 
