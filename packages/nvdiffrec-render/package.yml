@@ -79,7 +79,7 @@ verify:
     assert out.shape == (1, 64, 4), out.shape
     assert torch.isfinite(out).all() and torch.allclose(out, ref, atol=1e-5), (out - ref).abs().max()
     nrm = torch.tensor([0.0, 0.0, 1.0], device=dev).view(1, 1, 1, 3).expand(1, 4, 4, 3)
-    wi = torch.nn.functional.normalize(torch.tensor([0.0, 1.0, 1.0], device=dev)).view(1, 1, 1, 3).expand(1, 4, 4, 3)
+    wi = torch.nn.functional.normalize(torch.tensor([0.0, 1.0, 1.0], device=dev), dim=0).view(1, 1, 1, 3).expand(1, 4, 4, 3)
     lam = ru.lambert(nrm.contiguous(), wi.contiguous())
     torch.cuda.synchronize()
     assert lam.shape == (1, 4, 4, 1), lam.shape
