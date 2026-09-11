@@ -1,15 +1,31 @@
 name: torchao
 pypi_name: torchao
 import_name: torchao
-# version.txt at v0.13.0, plus VERSION_SUFFIX="" (build_env) so setup.py does
-# not append +git<sha> -- which it does whenever the variable is UNSET, and
-# which would make the wheel 0.13.0+git...+cu128torch2.8, a double local tag.
+# version.txt at v0.13.0. setup.py appends +git<sha> whenever VERSION_SUFFIX
+# is UNSET; the patch pins the suffix to "" in setup.py itself, because the
+# build_env route (VERSION_SUFFIX: "") only worked on Linux -- a .bat's
+# `set "VERSION_SUFFIX="` unsets the variable, and the published win-64
+# artifact reported __version__ '0.13.0+git' inside a .conda saying 0.13.0.
 version: "0.13.0"
 
 # BSD-3-Clause, read from the repo's own LICENSE at the pinned rev.
 license: BSD-3-Clause
 homepage: https://github.com/pytorch/ao
 summary: torchao, PyTorch-native quantization and sparsity kernels, compiled against the conda-torch channel
+repository: https://github.com/pytorch/ao
+documentation: https://docs.pytorch.org/ao/stable/
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+# BSD-3 LICENSE and CUTLASS's BSD-3 (the submodule; the _C_cutlass_* and
+# sparse kernels are instantiated from it).
+license_files:
+  - LICENSE
+  - third_party/cutlass/LICENSE.txt
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (pytorch/ao).
+pypi_project: torchao
 
 source_repo: pytorch/ao
 # ── why 0.13.0 and not the farm's 0.18.0 ─────────────────────────────────
@@ -67,21 +83,16 @@ run_deps: []
 # torchao/csrc/cuda includes the CUDA runtime, cuBLAS (fp6_llm, marlin) and
 # torch's headers; cuBLAS-dev is already in the recipe's torch floor. CUTLASS
 # is the vendored submodule.
-host_deps:
-  - cuda-cudart-dev
+host_deps: []
 
 build_deps: []
 
-# Upstream's own release switch. Unset -> "+git<sha>" is appended (and there
-# is no git in the build, so it would be "+git"). Empty -> exactly
-# version.txt, which is what the cell says this is and what make_wheel.py
-# gates on. USE_CPU_KERNELS is deliberately left at its default "0": the
-# alternative compiles csrc/cpu with -march=native and bakes the runner's
-# CPU into a portable artifact.
-build_env:
-  VERSION_SUFFIX: ""
+# No build_env. VERSION_SUFFIX used to be set to "" here; see the version
+# note above for why that is now done in setup.py by the patch. USE_CPU_KERNELS
+# is deliberately left at its default "0": the alternative compiles csrc/cpu
+# with -march=native and bakes the runner's CPU into a portable artifact.
 
-carry: complete   # conda-forge has no torchao; nothing to shadow
+carry: complete  # shadows conda-forge's line for this cell; see ARCHITECTURE.md "Shadowing"
 
 verify:
   import: torchao

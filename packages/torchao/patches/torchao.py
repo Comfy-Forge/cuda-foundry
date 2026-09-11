@@ -128,3 +128,41 @@ require(_mt.count(_old_warn) == 1, "torchao: the #warning in mxfp8_quantize.cuh 
 _mx.write_text(_mt.replace(_old_warn,
     '#pragma message("MXFP8 quantization requires SM90+ (Hopper) or SM100+ (Blackwell) architecture. Kernel will be disabled for this architecture.")\n', 1))
 print("torchao patch: mxfp8_quantize.cuh #warning -> #pragma message (MSVC C1021)")
+
+
+# ── the version is version.txt, on both platforms ──────────────────────────
+# setup.py v0.13.0:
+#     version_suffix = os.getenv("VERSION_SUFFIX")
+#     if version_suffix is None:
+#         version_suffix = f"+git{get_git_commit_id()}"
+# package.yml used to hand it VERSION_SUFFIX="" through build_env, and on
+# Linux `export VERSION_SUFFIX=""` is an empty string, which is not None, so
+# the suffix stayed empty. On win-64 the same declaration renders as
+# `set "VERSION_SUFFIX="`, and in cmd that UNSETS the variable: os.getenv
+# returned None, the +git branch ran, there is no git in the build, and the
+# published win-64 artifact reports `__version__ == '0.13.0+git'` while the
+# .conda around it says 0.13.0 (audit finding). The release switch is set
+# here in the source instead, where no shell is in the way: the suffix is
+# the empty string, so the wheel carries exactly version.txt on every
+# platform, and the build_env entry is gone.
+_old_suffix = ('version_suffix = os.getenv("VERSION_SUFFIX")\n'
+               'if version_suffix is None:\n'
+               '    version_suffix = f"+git{get_git_commit_id()}"\n')
+_new_suffix = ('# cuda-foundry: a release build on every platform -- the version is\n'
+               '# version.txt, no +git suffix (see packages/torchao/patches/torchao.py).\n'
+               'version_suffix = ""\n')
+_t = _sp.read_text()
+if _new_suffix in _t:
+    print("torchao patch: version suffix already pinned to the empty string")
+else:
+    require(_t.count(_old_suffix) == 1,
+            "torchao: the VERSION_SUFFIX / +git block in setup.py was not found exactly once "
+            "-- upstream changed; re-read it before trusting the artifact's version")
+    _t = _t.replace(_old_suffix, _new_suffix, 1)
+    _sp.write_text(_t)
+    print("torchao patch: version suffix pinned to the empty string (version.txt is the version)")
+require('os.getenv("VERSION_SUFFIX")' not in _sp.read_text(),
+        "torchao: setup.py still reads VERSION_SUFFIX from the environment")
+require(_Path("version.txt").read_text().strip() == "0.13.0",
+        f"torchao: version.txt says {_Path('version.txt').read_text().strip()!r}, "
+        f"package.yml says 0.13.0 -- the two must agree")
