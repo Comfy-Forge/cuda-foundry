@@ -83,8 +83,11 @@ verify:
     assert 0.2 < cov < 0.8, cov
     depth, bary = drtk.render(v, vi, idx)
     torch.cuda.synchronize()
-    assert bary.shape == (1, H, W, 3), bary.shape
+    # [N, 3, H, W] -- what the kernel returns; upstream's docstring says
+    # [N, H, W, 3] and is wrong (measured on the built artifact).
+    assert bary.shape == (1, 3, H, W), bary.shape
     hit = idx >= 0
-    assert torch.isfinite(bary[hit]).all()
-    assert torch.allclose(bary[hit].sum(-1), torch.ones(int(hit.sum()), device=dev), atol=1e-4)
+    b = bary[0].permute(1, 2, 0)[hit[0]]
+    assert torch.isfinite(b).all()
+    assert torch.allclose(b.sum(-1), torch.ones(int(hit.sum()), device=dev), atol=1e-4)
     assert torch.allclose(depth[hit], torch.ones(int(hit.sum()), device=dev), atol=1e-4)
