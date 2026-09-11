@@ -1,0 +1,44 @@
+{
+ "arch": "x86_64",
+ "build": "cuda128_torch28_py312_ha1270f5_0",
+ "build_number": 0,
+ "depends": [
+  "python",
+  "__cuda",
+  "pytorch 2.8.* cuda128_*",
+  "__glibc >=2.28,<3.0.a0",
+  "libgcc >=13",
+  "libstdcxx >=13",
+  "libcufft >=11.4.1.4,<12.0a0",
+  "libcusparse >=12.5.10.65,<13.0a0",
+  "libcusolver >=11.7.5.82,<12.0a0",
+  "cuda-cudart >=12.9.79,<13.0a0",
+  "pytorch >=2.8.0,<2.9.0a0",
+  "libtorch >=2.8.0,<2.9.0a0",
+  "libcublas >=12.9.2.10,<13.0a0",
+  "python_abi 3.12.* *_cp312",
+  "libcurand >=10.3.10.19,<11.0a0"
+ ],
+ "license": "Unlicense",
+ "md5": "f7fe5ce4c4c5e1bf8466fe44dc61f8bb",
+ "name": "pointnet2-ops",
+ "platform": "linux",
+ "provenance": {
+  "arch_list": "7.0 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "12.8",
+  "prebuilt_wheel_used": false,
+  "run_id": "34587877680",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34587877680",
+  "source_rev": "b5ceb6d9ca0467ea34beb81023f96ee82228f626",
+  "torch_build": "cuda128_repack_py312_h2bed46fa_7"
+ },
+ "purls": [
+  "pkg:pypi/pointnet2_ops@3.0.0"
+ ],
+ "sha256": "8bc85408907efbabcd575a941c960710071fc139a491aca7fae7d1d95794af61",
+ "size": 328520,
+ "subdir": "linux-64",
+ "timestamp": 1789121805709,
+ "version": "3.0.0"
+}
