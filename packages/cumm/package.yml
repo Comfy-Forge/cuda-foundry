@@ -5,10 +5,24 @@ import_name: cumm
 # CUMM_VERSION_SUFFIX unset the built wheel carries exactly that.
 version: "0.7.11"
 
-# MIT, read from the repo's own LICENSE at the pinned rev.
-license: MIT
+# Apache-2.0, read from the repo's own LICENSE at the pinned rev (the full
+# Apache text) and from the header of every cumm/*.py and include/ file
+# ("Licensed under the Apache License, Version 2.0"). This said MIT, which
+# nothing in the tree supports -- setup.py's `license="MIT"` classifier is
+# the only place the word appears, and the audit caught the disagreement.
+license: Apache-2.0
 homepage: https://github.com/FindDefinition/cumm
 summary: CUda Matrix Multiply library (tensorview + NVRTC GEMM/conv codegen), compiled against conda-forge's CUDA toolkit
+repository: https://github.com/FindDefinition/cumm
+# Licence texts that ship in info/licenses and the wheel's dist-info, relative
+# to the patched source root: the upstream licence plus that of everything
+# vendored or compiled in.
+license_files:
+  - LICENSE
+# The PyPI project this package genuinely provides -- same repository and
+# author on pypi.org (checked 2026-09-11) -- or null when there is none:
+# the same project (FindDefinition/cumm, Yan Yan) -- PyPI is at 0.8.x, this is 0.7.11.
+pypi_project: cumm
 
 source_repo: FindDefinition/cumm
 # The v0.7.11 tag, dereferenced. 0.7.11 rather than 0.8.x: spconv 2.3.8's
@@ -52,22 +66,46 @@ nvcc_threads: 1
 # this .conda is UNSAT, which is the honest outcome for a package that
 # imports it.
 #
-# The CUDA runtime deps -- cuda-cudart, cuda-nvrtc -- arrive through the
-# host -dev packages' run_exports, not by name here.
+# The CUDA runtime library deps -- cuda-cudart, cuda-nvrtc -- arrive through
+# the template (cudart) and the host cuda-nvrtc-dev's run_export.
+#
+# The three toolkit packages below are RUNTIME deps of this package and of no
+# other here, because cumm's whole point is NVRTC codegen at run time: every
+# kernel pccm generates is compiled by libnvrtc from source, and that compile
+# #includes cuda_runtime.h, cuda_fp16.h, cub/, cuda/std/ (see the patch's
+# limits.h edit) -- headers, which the runtime library packages do not carry.
+#   cuda-cudart-dev   cuda.h, cuda_runtime.h and the libcudart.so link symlink
+#                     (targets/x86_64-linux/include + lib on linux-64,
+#                     Library/include + Library/lib on win-64)
+#   cuda-cccl         cub, thrust, libcu++ -- <cuda/std/limits> is reached
+#                     from every NVRTC kernel through nvrtc_std.h
+#   cuda-nvcc-tools   the nvcc binary cumm's version probe shells out to
+#                     (cumm.common.get_cuda_version_by_nvcc) and the fallback
+#                     its include-path lookup still has (`which nvcc`)
+# The patch makes cumm read $CONDA_PREFIX for the headers FIRST, so with these
+# installed the run-time path needs neither nvcc on PATH nor /usr/local/cuda;
+# the verify op below is exactly that path. tools/make_wheel.py maps them to
+# the nvidia-* PyPI names for the wheel sidecar.
 run_deps:
   - pccm >=0.4.16
   - ccimport >=0.4.4
   - numpy
   - sympy
+  - cuda-cudart-dev
+  - cuda-cccl
+  - cuda-nvcc-tools
 
 # Two kinds of host deps:
 #   * IMPORT-TIME build deps. setup.py imports pccm and ccimport, then
 #     `from cumm.csrc.arrayref import ArrayPtr` imports the cumm package
 #     itself (numpy, pccm, ccimport), and ccimport's pybind build needs
 #     pybind11's headers. All must be importable by the HOST python.
-#   * the CUDA libraries core_cc links: libcudart (tensorview's device
-#     memory) and libnvrtc (run_nvrtc_*). The -dev packages carry the
-#     run_exports that become the run deps.
+#   * the CUDA library core_cc links beyond the runtime: libnvrtc
+#     (run_nvrtc_*). Its -dev package carries the run_export that becomes
+#     the run dep -- kept explicitly below, because the template ignores
+#     cuda-nvrtc-dev's export by default (no other package links it);
+#     libcudart comes from the toolkit in build: and its run dep from the
+#     template.
 #
 # cuda-version pinned to the cell. A torch-linked package inherits its host
 # CUDA window from pytorch's pin; a torch-free one inherits nothing, and an
@@ -82,7 +120,13 @@ host_deps:
   - numpy
   - sympy
   - cuda-version ${{ cuda_compiler_version }}.*
-  - cuda-cudart-dev
+  - cuda-nvrtc-dev
+
+# core_cc records DT_NEEDED on libnvrtc.so.12 (verify.expect_linked below
+# fails closed on it), so cuda-nvrtc-dev's run_export must reach the run
+# deps. The template drops the export of every CUDA -dev package that no
+# artifact in the channel links, and this is the one package that does.
+keep_run_exports:
   - cuda-nvrtc-dev
 
 # cumm finds the toolkit through `which nvcc` and takes BOTH its include
@@ -171,10 +215,9 @@ verify:
     - cudart64
   # On hardware: tensorview device memory through core_cc (cudart), then a
   # kernel compiled by NVRTC and launched through core_cc's module loader --
-  # cumm's actual GPU path. The NVRTC step needs the CUDA headers the way
-  # cumm 0.7.11 looks for them (nvcc on PATH, or /usr/local/cuda): in a conda
-  # env that is cuda-nvcc + cuda-cudart-dev + cuda-cccl, which is a property
-  # of the upstream's runtime and is why this is stated rather than hidden.
+  # cumm's actual GPU path. The NVRTC step needs the CUDA headers: the patch
+  # points cumm at $CONDA_PREFIX for them (cuda-cudart-dev + cuda-cccl in
+  # run_deps), ahead of upstream's `which nvcc` / /usr/local/cuda probes.
   op: |
     import numpy as np
     from cumm import tensorview as tv

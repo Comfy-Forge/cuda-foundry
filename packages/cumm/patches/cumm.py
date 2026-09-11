@@ -1,5 +1,7 @@
 """Patch cumm v0.7.11: Blackwell in the arch table, bf16 GEMM params, three
-runtime fixes, and no exact-minor nvrtc-builtins link.
+runtime fixes, no exact-minor nvrtc-builtins link, the CUDA headers found
+in $CONDA_PREFIX at run time (section 8) and the wheel's License field made
+to match the Apache-2.0 LICENSE file (section 9).
 
 Ported from cuda-wheels' packages/cumm/patches/cumm.py, re-checked against
 v0.7.11 rather than assumed (that file was written for 0.8.2 and half of it
@@ -274,6 +276,66 @@ sub_once(pathlib.Path("cumm/nvrtc/__init__.py"),
         except (FileNotFoundError, subprocess.CalledProcessError):
             return name''',
          "cu++filt demangler")
+
+# ── 8. the toolkit headers from $CONDA_PREFIX first ───────────────────────
+# _get_cuda_include_lib() is what every NVRTC compile at run time uses to find
+# cuda_runtime.h and friends, and at 0.7.11 it knows two places: the prefix
+# `which nvcc` (Get-Command on Windows) resolves into, and /usr/local/cuda
+# (C:\Program Files\...\CUDA on Windows). A conda environment has the headers
+# in $CONDA_PREFIX -- cuda-cudart-dev + cuda-cccl (run_deps) put them at
+# targets/x86_64-linux/include + lib on linux-64 and Library/include +
+# Library/lib on win-64 -- and need not have nvcc on PATH at all. Probe that
+# FIRST, guarded on cuda.h AND the cudart link library actually being there.
+# The guard is what keeps the BUILD honest: under rattler-build $CONDA_PREFIX
+# is the host prefix, which carries no cuda.h (the toolkit lives in
+# $BUILD_PREFIX), so the probe fails and upstream's nvcc lookup finds the
+# cell's toolkit exactly as before.
+sub_once(pathlib.Path("cumm/common.py"),
+         """def _get_cuda_include_lib():
+    global _CACHED_CUDA_INCLUDE_LIB
+    if _CACHED_CUDA_INCLUDE_LIB is None:
+        if compat.InWindows:
+""",
+         """def _cuw_conda_cuda_include_lib():
+    \"\"\"cuda-foundry (packages/cumm/patches): ([include dirs], lib dir) from
+    $CONDA_PREFIX when the CUDA headers and the cudart link library are both
+    there (cuda-cudart-dev in the environment), else None.\"\"\"
+    prefix = os.environ.get("CONDA_PREFIX")
+    if not prefix:
+        return None
+    prefix = Path(prefix)
+    if compat.InWindows:
+        candidates = [(prefix / "Library" / "include", prefix / "Library" / "lib", "cudart.lib")]
+    else:
+        candidates = [(t / "include", prefix / "lib", "libcudart.so")
+                      for t in sorted((prefix / "targets").glob("*-linux"))]
+    for include, lib, cudart in candidates:
+        if (include / "cuda.h").exists() and (lib / cudart).exists():
+            return ([include], lib)
+    return None
+
+
+def _get_cuda_include_lib():
+    global _CACHED_CUDA_INCLUDE_LIB
+    if _CACHED_CUDA_INCLUDE_LIB is None:
+        _CACHED_CUDA_INCLUDE_LIB = _cuw_conda_cuda_include_lib()
+        if _CACHED_CUDA_INCLUDE_LIB is not None:
+            return _CACHED_CUDA_INCLUDE_LIB
+        if compat.InWindows:
+""",
+         "$CONDA_PREFIX header lookup")
+common_py = pathlib.Path("cumm/common.py").read_text(encoding="utf-8")
+require("import os\n" in common_py and "from pathlib import Path" in common_py,
+        "cumm: common.py no longer imports os / Path, which the conda lookup uses")
+ast.parse(common_py)
+
+# ── 9. the wheel's License field matches the LICENSE file ─────────────────
+# setup.py says license='MIT'; the LICENSE file is the Apache-2.0 text and
+# every source header says "Licensed under the Apache License, Version 2.0".
+# The classifier is the one place MIT appears, so the wheel METADATA is what
+# is corrected, to agree with the text it ships and with package.yml.
+sub_once(pathlib.Path("setup.py"), "    license='MIT',", "    license='Apache-2.0',",
+         "License classifier")
 
 # ── 7. no exact-minor nvrtc-builtins link ─────────────────────────────────
 sub_once(pathlib.Path("cumm/common.py"),
