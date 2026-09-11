@@ -472,8 +472,53 @@ environment that follows from the measurements above:
 
 - `build:` — `cuda-nvcc_win-64 12.8.*`, `cuda-version 12.8.*`,
   `vs2022_win-64`, `ninja`; **not** `cuda-nvcc`
-- `build.script.env` — `DISTUTILS_USE_SDK=1`
-- `host:` — as linux-64, against `pytorch 2.8.* cuda128_*` from conda-torch
+- `build.script` — `file: build_win.py` (file-backed, never minijinja-rendered;
+  rattler-build's wrapper runs the activation scripts and then the python it
+  finds in build/host on it; the `.bat` shim is gone). `DISTUTILS_USE_SDK=1`
+  is set by the script itself.
+- `host:` — as linux-64, against `pytorch 2.8.* cuda128_repack_*` from
+  conda-torch, and `cuda-version 12.8.*` (SAT here: no triton on win-64).
+
+## Which torch the win-64 artifacts were compiled against
+
+conda-torch's win-64 carries two pytorch 2.8.0 cu128 py312 builds:
+`cuda128_mkl_py312_hc0cb929_302`, a mirror of conda-forge's own build, and
+`cuda128_repack_py312_h2bed46fa_*`, the PyPI wheel repacked. The host glob was
+`pytorch 2.8.* cuda128_*`, which matches both, and the solver ranks build
+number 302 first. **Every win-64 artifact published before 2026-09-11 was
+compiled against `cuda128_mkl_302`** — `provenance.torch_build` in each
+`meta/win-64/*.json` records it — and its run glob accepted either flavour.
+The decision is that Windows builds against the repack, like Linux, so the
+channel's wheel-equivalence claim holds on both platforms; the glob now
+carries the token (`cuda128_repack_*`) in host and run, and those artifacts
+are superseded by the rebuild wave. See ARCHITECTURE.md, "Lock the flavour
+with a build glob".
+
+## The cell's CUDA on win-64 comes from BUILD_PREFIX, and the script says so
+
+`cuda-cudart-dev` is no longer allowed in `host_deps` (package_loader), so
+`cuda_runtime.h` and `cudart.lib` exist in exactly one prefix:
+`%BUILD_PREFIX%\Library`. Nothing points the compile there by default:
+torch's cpp_extension takes `CUDA_HOME`/`CUDA_PATH` or `where nvcc`, then
+adds `<CUDA_HOME>\lib\x64`, which conda-forge's layout does not have; the
+extension is linked by `link.exe`, which finds `cudart.lib` through `LIB`,
+and conda-forge's MSVC activation points `LIB` and `INCLUDE` at the **host**
+prefix (`%LIBRARY_LIB%`, `%LIBRARY_INC%`). It used to work because host held a
+second cudart-dev. `build_win.py` now sets `CUDA_HOME`/`CUDA_PATH` explicitly
+and prepends `%BUILD_PREFIX%\Library\include` and `...\lib` to `INCLUDE`
+and `LIB` — the counterpart of build.sh's "the cell's headers must come
+FIRST" — and dies before compiling if `nvcc.exe`, `cuda_runtime.h` or
+`cudart.lib` are not where that requires. Design from the package layouts
+(`cuda-cudart-dev_win-64` puts headers straight in `Library/include` and
+`cudart.lib` in `Library/lib`; `nvcc.profile` adds `-I$(TOP)/include` and
+`/LIBPATH:$(TOP)/lib` for nvcc's own compiles), not yet from a run: the first
+win-64 wave after this change is the measurement.
+
+`/d1trimfile:` — the MSVC counterpart of `-ffile-prefix-map` — is an
+undocumented front-end option, so whether this toolchain's `cl.exe` accepts it
+is probed on a one-line file at the start of the build and the option is set
+in `CL` only if the probe compiles clean (exit 0 and no D9002 "ignoring
+unknown option"). Either outcome is logged.
 
 ## A wheel filename cannot express a rebuild
 

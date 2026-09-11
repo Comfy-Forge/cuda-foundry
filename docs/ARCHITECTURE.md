@@ -79,9 +79,22 @@ must be *constrained*, not merely named, and each was learned the hard way:
 - **Never pin an exact torch build.** `run_exports` yields a minor range and
   torch's C++ ABI is minor-stable. An exact build pin would have been
   invalidated by conda-torch's 300-build republish wave.
-- **Lock the flavour with a build glob**: `pytorch 2.11.* cuda128_*`. A minor
-  range alone matches cu126/cu128/cu129/cu130 alike, and `cuda-version`
-  constrains only the CUDA *major*. **Correction worth recording:** this is
+- **Lock the flavour with a build glob, and the glob must carry the flavour
+  TOKEN**: `pytorch 2.8.* cuda128_repack_*`, not `cuda128_*`. A minor range
+  alone matches cu126/cu128/cu129/cu130 alike, and `cuda-version` constrains
+  only the CUDA *major* -- that much was always known. What `cuda128_*` also
+  matched, measured on win-64: conda-torch there carries BOTH
+  `pytorch-2.8.0-cuda128_mkl_py312_hc0cb929_302` (a mirror of conda-forge's
+  own build) and `pytorch-2.8.0-cuda128_repack_py312_*` (the PyPI wheel,
+  repacked), and the solver ranks mkl's build number 302 above the repack's.
+  **Every win-64 artifact published before 2026-09-11 was compiled against
+  `cuda128_mkl_302`** (`provenance.torch_build` in its fragment says so), a
+  torch built with a different toolchain from the wheel this channel claims
+  byte-equivalence with, and its run glob would accept either. Those
+  artifacts are superseded by the rebuild wave that follows the audit fixes;
+  the decision is that Windows builds against the repack like Linux does, so
+  the wheel-equivalence thesis holds on both platforms. The same string works
+  on linux-64, where only the repack exists. **Correction worth recording:** this is
   currently hand-written in every consumer because of a claim that
   `run_exports` cannot express a build — that claim is false. Only
   `pin_subpackage()` is that limited; a run_export is a MatchSpec string and can
@@ -102,7 +115,64 @@ must be *constrained*, not merely named, and each was learned the hard way:
 - **Do not ship the toolchain.** The ccache seat-swap moves the real `nvcc`
   aside, which makes `bin/nvcc.real` a new file in `$PREFIX` — a 27.5 MB CUDA
   compiler was being packaged inside torchvision, declared in `paths.json`.
-  Restore on exit; gate on it.
+  Restore on exit; gate on it; and since the audit, `build.files.exclude` in
+  the recipe removes `bin/nvcc*` at packaging regardless of how the script
+  exited.
+- **dist-info hygiene, and what it costs.** `RECORD`, `direct_url.json` and
+  `REQUESTED` are removed from the installed dist-info — by the build script
+  and again by `build.files.exclude`, and a `package_contents` test asserts
+  their absence. `direct_url.json` names this runner's wheelhouse and makes
+  `pip freeze` print a `file://` URL. `RECORD` goes for conda-forge's reason:
+  with it present `pip uninstall` deletes files conda owns. The consequence
+  is the mirror image and worth knowing before someone files it as a bug:
+  **without `RECORD`, `pip uninstall <pkg>` refuses** ("Cannot uninstall ...
+  no RECORD file was found"), which is the right answer for a package conda
+  installed — remove it with the solver that put it there. `REQUESTED` is
+  pip's "installed by explicit request" marker and says nothing true about
+  the consumer's environment. The shipped `.so` files are also
+  `strip --strip-unneeded`'d (the wheel is taken first and is unaffected;
+  SASS lives in sections, so the census sees the same kernels), and
+  `-ffile-prefix-map` (`/d1trimfile:` on MSVC, where the toolchain accepts
+  it — probed, not assumed) keeps the runner's paths out of `__FILE__`.
+- **The CUDA runtime dep is declared, not inherited; the CUDA library
+  exports nothing links are ignored.** Every artifact in the channel linked
+  `libcudart.so.12` and declared `cuda-cudart >=12.9.79` — a false floor,
+  because host's `cuda-cudart-dev` resolved to 12.9 (host cannot be pinned
+  to the cell's minor on linux-64: pytorch 2.8.0 cu128 pins `triton ==3.4.0`,
+  the only 3.4.0 is a cuda129 build carrying `cuda-version >=12.9,<13`, and
+  `cuda-version 12.8.*` in host is UNSAT, measured with `--render-only
+  --with-solve`). The recipe now declares `cuda-cudart
+  >=<cuda_compiler_version>,<<major+1>.0a0` itself, the loader refuses
+  `cuda-cudart-dev` in `host_deps` (headers come from `build:` through the
+  bridge; the link resolves through the build env's dev symlink), and the
+  run_exports of `libcublas-dev`, `libcufft-dev`, `libcurand-dev`,
+  `libcusolver-dev`, `libcusparse-dev`, `cuda-nvtx-dev` and `cuda-nvrtc-dev`
+  are ignored — no binary in the channel links any of them (measured from
+  DT_NEEDED on the published artifacts; cumm links libnvrtc and keeps that
+  one via `keep_run_exports`). linux-64 artifacts also had NO `cuda-version`
+  run dep at all: `build:` named the `cuda-nvcc` metapackage, whose
+  run_exports are empty, where win-64 named `cuda-nvcc_win-64`, which
+  carries the strong `cuda-version >=12.8,<13`. Both platforms now name
+  `cuda-nvcc_<target_platform>`. win-64 host IS pinned to the cell's minor
+  (no triton there), and so is every torch-free package on both platforms.
+  What still floats on linux-64 is a package-declared host CUDA library
+  that the binary genuinely links (torchvision's `libnvjpeg-dev`): its
+  export carries host's 12.9 floor, which is over-tight but not wrong.
+- **rattler-build's own linking checks stay at `ignore`, on evidence.**
+  `overdepending_behavior: error` would be the torchvision no-codec trap
+  caught at packaging time, and it cannot be enabled on linux-64 under
+  0.75.0: the CI logs for pyg-lib (run 34594865610), cumesh-vb (34592422001)
+  and spconv (34601407550) report "Overdepending against cuda-cudart" AND
+  "Overlinking against targets/x86_64-linux/lib/libcudart.so.12.x" on every
+  artifact that links libcudart — the `lib/` symlink belongs to
+  `cuda-cudart`, the file it resolves to belongs to `cuda-cudart_linux-64`,
+  and the check attributes by resolved file — plus "Overdepending against
+  libtorch/pytorch" on every torch-linked artifact and "Overlinking against
+  lib/libstdc++.so.6" wherever gcc 8's exports are spelled `libstdcxx-ng`.
+  `error` would fail every linux-64 build on attribution. win-64's log
+  attributes correctly and showed only the five math-library warnings, now
+  removed at the source; once a full wave's win-64 logs read clean, flipping
+  win-64 to `error` is one line in the template.
 
 ## What the wheel half costs, measured
 
@@ -171,6 +241,25 @@ imports `yapf` at module scope and `import mmcv` reaches it unconditionally
 (`mmcv/__init__.py` → `from .utils import *`), so a code formatter really is
 a runtime dependency there. "Looks like a build tool" is a prompt to read the
 imports, not a verdict.
+
+## package.yml fields added by the 2026-09 audit
+
+Each is checked by `scripts/package_loader.py`, whose error message says why
+it exists; this is the one-line form.
+
+| field | example | rendered as |
+|---|---|---|
+| `license_files` (required) | `license_files: [LICENSE, third_party/cutlass/LICENSE.txt]` | `about.license_file` → `info/licenses/` |
+| `repository` / `documentation` | `documentation: https://docs.example.org` | `about.repository` (defaults to the GitHub source_repo URL), `about.documentation` |
+| `pypi_project` | `pypi_project: torch_scatter` or `pypi_project: null` | `extra.pypi_project`; the purl, only when set. Must normalise-equal `pypi_name` unless `pypi_project_differs_because:` says why |
+| `keep_run_exports` | `keep_run_exports: [cuda-nvrtc-dev]` | that -dev package is left OUT of `ignore_run_exports.from_package` (cumm links libnvrtc) |
+| `run_exports` | `run_exports: ["cumm >=0.7.11,<0.8.0 cuda${{ cuda_short }}_*"]` (or `{weak: [...], strong: [...]}`) | `requirements.run_exports` |
+| `distribution_restriction` | `distribution_restriction: "Licence excludes the EU, UK and South Korea"` | `extra.distribution_restriction`, the README table, the fragment's provenance |
+| `verify.allow_dso` | `allow_dso: [libcuda.so.1, nvcuda.dll]` | `build.dynamic_linking.missing_dso_allowlist` |
+| `verify.op_requires` | `op_requires: [numpy]` | the op test's `requirements.run` |
+
+Not allowed any more: `cuda-cudart-dev` in `host_deps` (see "The CUDA runtime
+dep is declared, not inherited" above).
 
 ## Sharding
 
@@ -276,16 +365,21 @@ both import `pccm` at build time and at import time. pccm is on PyPI and on
 no conda channel, so it is carried here as a hand-written noarch recipe
 (`recipes/pccm`, the one recipe not generated from a `package.yml`; its
 README says why), and the build's host solve lists this repo's own channel
-first so a package can depend on a sibling. spconv's dep on cumm carries the
+first so a package can depend on a sibling. The published pccm artifact is
+the one thing on the channel built on a developer box (`run_id: "local"`);
+`generate_matrix.py --package pccm` now emits a `noarch` job for it so the
+next build has provenance like everything else. spconv's dep on cumm carries the
 flavour glob, `cumm >=0.7.11,<0.8.0 cuda128_*`, written as recipe jinja in
 `package.yml` so it follows the cell; `make_wheel.py` drops the build field
 when it writes the sidecar, because PEP 508 has nowhere to put it and the
 wheel says the same thing through its local version tag.
 
 A torch-free package's host env inherits **no CUDA window from anywhere** —
-a torch-linked one gets it from pytorch's pin — so `cuda-version
-${{ cuda_compiler_version }}.*` goes in its `host_deps`, or the host resolves
-the newest `cuda-nvrtc-dev` (13.x) against a 12.8 toolkit in `build:`.
+a torch-linked one gets it from pytorch's pin — so without a pin the host
+resolves the newest `cuda-nvrtc-dev` (13.x) against a 12.8 toolkit in
+`build:`. The template now pins `cuda-version ${{ cuda_compiler_version }}.*`
+in host for every `links_torch: false` package (and for win-64 generally);
+the copy cumm and spconv carried in `host_deps` is redundant and can go.
 
 ### Exact-minor sonames, and where the two outputs disagree
 
@@ -338,8 +432,18 @@ above 3.4.24; cumm and spconv pin `gcc_version: "8"`.
   matches payload; no `RECORD`; `INSTALLER` names conda; `$ORIGIN`-relative
   RPATHs with no absolute or empty entries; computed (not pasted) glibc floors;
   SASS architectures match the cell's arch list; no vendored `libtorch`; no
-  `nvcc.real`; `purls`, `__cuda`, `python_abi` and the torch build-glob present;
-  the compile ledger covers every module.
+  `nvcc.real`; `__cuda`, `python_abi` and the torch build-glob present; a
+  `purl` present exactly when `package.yml` sets `pypi_project` (about 20 of
+  the old derived purls named a project that 404s or belongs to someone
+  else, so the purl is now an explicit claim, null by default);
+  `info/licenses/` populated from `license_files`; the compile ledger covers
+  every module.
+- **Inside the artifact**: the recipe's `tests:` travel in `info/tests/`, so
+  `rattler-build test --package-file <artifact>` runs them anywhere:
+  `package_contents` (no RECORD/REQUESTED/direct_url.json, no nvcc),
+  `python` imports plus `pip check`, and — as its own entry, so a GPU-less
+  runner can `--test-index` past it — the package's `verify.op` from
+  `package.yml`, rendered to `verify_op.py` beside the recipe.
 - **Per cell** (solve gate): a live solve from the published channel resolving
   from our own release URL, asserting the resolved `pytorch`'s flavour equals
   the extension's.
@@ -395,8 +499,29 @@ and the reason string reaches the user. Verified live: unpinned, pip reports
 ## Scope
 
 linux-64 first, for the same reason as before: prove the machinery where the
-compiler story is simplest. `target_platform` stays in the build string and the
-templates keep an unwired `win` branch; linux-aarch64 is platform two.
+compiler story is simplest. `target_platform` stays in the build string;
+win-64 builds and publishes (docs/WINDOWS.md); linux-aarch64 is platform two.
+
+## Shadowing: this channel sits above conda-forge only inside the cell
+
+Strict channel priority is name-wide. If a higher-priority channel carries
+ANY build of a name, the solver never sees that name on a lower channel —
+not "prefers ours", never sees. Eleven names carried here are also on
+conda-forge, checked 2026-09-11: torchvision, torchaudio, torchao,
+torch-scatter, torchsparse, gsplat, flash-attn, mmcv, pytorch3d, pyg-lib,
+detectron2. Several `package.yml` files said `carry: complete # conda-forge
+has no X`; for every one of those eleven that is false and the comment is
+being deleted (S3, per the audit).
+
+The decision, stated so it is not re-derived: **this channel serves one cell
+(py3.12 / cu128 / torch2.8 today) and is meant to sit above conda-forge ONLY
+in an environment already pinned to that cell.** comfy-env is such an
+environment and lists this channel first. The concrete consequence anywhere
+else: with strict priority and this channel first, conda-forge's entire
+torchvision line is hidden, and `python=3.11 torchvision` becomes UNSAT —
+there is no torchvision the solver is allowed to see except ours, and ours
+needs py3.12. `carry: complete` means the owner accepted that; it is not a
+claim about conda-forge's inventory.
 
 ## Builds happen in CI, never on a developer box
 
