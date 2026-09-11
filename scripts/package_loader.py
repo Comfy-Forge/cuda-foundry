@@ -204,8 +204,10 @@ def _check_dependencies_declared(cfg: dict, pkg_dir: Path) -> None:
     beyond python and its torch -- not an omission.
 
     Build-only tools do NOT belong here. The wheel farm shipped `ninja` as a
-    runtime dep of gsplat and `yapf` (a code formatter) as one of mmcv; both
-    are setup_requires. Put those in `build_deps`.
+    runtime dep of gsplat, a setup_requires; put those in `build_deps`. Read
+    the imports before deciding, though: mmcv 1.7.2's `yapf` looks like the
+    same mistake and is not -- mmcv/utils/config.py imports it at module
+    scope and `import mmcv` fails without it.
     """
     if "run_deps" not in cfg:
         raise SystemExit(

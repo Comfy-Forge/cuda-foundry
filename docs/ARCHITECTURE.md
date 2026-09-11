@@ -160,10 +160,17 @@ ignores for resolution). So the dependency data **already exists** and is the
 right starting point — deriving beats re-reading 42 `setup.py` files.
 
 It is not clean, though: gsplat's sidecar declares `Requires-Dist: ninja`, a
-build tool as a runtime dependency, and mmcv's declares `yapf`. Conda's
-`build_deps` / `host_deps` / `run_deps` split is what stops that recurring —
-the wheel farm's single `extra_deps` field is how `psutil`, a `setup_requires`,
-came to be declared as a runtime dependency of flash-attn.
+build tool as a runtime dependency. Conda's `build_deps` / `host_deps` /
+`run_deps` split is what stops that recurring — the wheel farm's single
+`extra_deps` field is how `psutil`, a `setup_requires`, came to be declared as
+a runtime dependency of flash-attn.
+
+A correction, because an earlier version of this paragraph used mmcv's `yapf`
+as the second example: it is not one. mmcv 1.7.2's `mmcv/utils/config.py`
+imports `yapf` at module scope and `import mmcv` reaches it unconditionally
+(`mmcv/__init__.py` → `from .utils import *`), so a code formatter really is
+a runtime dependency there. "Looks like a build tool" is a prompt to read the
+imports, not a verdict.
 
 ## Sharding
 
