@@ -110,3 +110,21 @@ _t = _t.replace(_old_ext, '''    # cuda-foundry: the PyInit stub every torch-ops
 _ast.parse(_t)
 _sp.write_text(_t)
 print("torchao patch: PyInit stub attached to the torch-ops libraries")
+
+
+# ── #warning is not a directive MSVC knows at C++17 ─────────────────────────
+# With the stub in place, _C, _C_cutlass_90a and _C_cutlass_100a all compiled
+# AND linked under MSVC (run 34598640540); the fourth extension died on
+# mxfp8_quantize.cuh(29): fatal error C1021: invalid preprocessor command
+# 'warning'. cl rejects an unknown directive even inside a skipped #if group,
+# so the only spelling that survives is one every host compiler accepts:
+# #pragma message, which GCC and clang honour as well (a note, which is what
+# the #warning was). Applied unconditionally -- one tarball, both platforms.
+_mx = _Path("torchao/csrc/cuda/mx_kernels/mxfp8_quantize.cuh")
+_mt = _mx.read_text()
+_old_warn = ('#warning                                                                       \\\n'
+             '    "MXFP8 quantization requires SM90+ (Hopper) or SM100+ (Blackwell) architecture. Kernel will be disabled for this architecture."\n')
+require(_mt.count(_old_warn) == 1, "torchao: the #warning in mxfp8_quantize.cuh was not found once")
+_mx.write_text(_mt.replace(_old_warn,
+    '#pragma message("MXFP8 quantization requires SM90+ (Hopper) or SM100+ (Blackwell) architecture. Kernel will be disabled for this architecture.")\n', 1))
+print("torchao patch: mxfp8_quantize.cuh #warning -> #pragma message (MSVC C1021)")
