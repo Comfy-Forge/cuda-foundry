@@ -79,9 +79,14 @@ nvcc_threads: 1
 #                     Library/include + Library/lib on win-64)
 #   cuda-cccl         cub, thrust, libcu++ -- <cuda/std/limits> is reached
 #                     from every NVRTC kernel through nvrtc_std.h
-#   cuda-nvcc-tools   the nvcc binary cumm's version probe shells out to
-#                     (cumm.common.get_cuda_version_by_nvcc) and the fallback
-#                     its include-path lookup still has (`which nvcc`)
+#   cuda-nvcc-tools   the nvcc binary. Not for compiling: cumm/constants.py
+#                     decides CUMM_CPU_ONLY_BUILD at import by whether
+#                     `nvcc --version` runs, and in CPU-only mode
+#                     TensorViewNVRTC adds NO include directories, so every
+#                     NVRTC compile dies with "no directories in search list"
+#                     (measured on the published artifact with nvcc removed
+#                     from the env). With the env's own nvcc present and the
+#                     system CUDA off PATH, the op below passes.
 # The patch makes cumm read $CONDA_PREFIX for the headers FIRST, so with these
 # installed the run-time path needs neither nvcc on PATH nor /usr/local/cuda;
 # the verify op below is exactly that path. tools/make_wheel.py maps them to
