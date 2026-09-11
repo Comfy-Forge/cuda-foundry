@@ -8,6 +8,10 @@ pypi_name: custom_rasterizer_hy3d2
 # consumers vendor their own copy -- so the extension module is the whole
 # artifact and the thing to import.
 import_name: custom_rasterizer_kernel
+# NOTE: the extension resolves libc10/libtorch from the running process, as
+# every wheel here does, so `import torch` must precede this import; the
+# recipe's import test is not run in CI (--test skip) and the GPU op below,
+# which imports torch first, is the gate.
 # setup.py: version="0.1"; the farm publishes custom_rasterizer_hy3d2-0.1+cu128torch2.8.
 version: "0.1"
 

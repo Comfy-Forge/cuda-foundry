@@ -5,6 +5,10 @@ pypi_name: simple_knn
 # package and the module consumers import is simple_knn._C. Importing that
 # loads the extension, which is the point of the smoke test.
 import_name: simple_knn._C
+# NOTE: the extension resolves libc10/libtorch from the running process, as
+# every wheel here does, so `import torch` must precede this import; the
+# recipe's import test is not run in CI (--test skip) and the GPU op below,
+# which imports torch first, is the gate.
 # setup.py: version='1.0.0'; the farm publishes simple_knn-1.0.0+cu128torch2.8.
 version: "1.0.0"
 
