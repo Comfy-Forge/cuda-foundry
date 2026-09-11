@@ -60,6 +60,22 @@ build_deps: []
 
 carry: complete   # not on conda-forge; nothing to shadow
 
+# ── host compiler: gcc 10, below the policy's 13 for CUDA 12.8 ──────────
+# The wheel half needs it; the .conda does not care (ARCHITECTURE.md, "The
+# conda toolchain cannot always produce a manylinux wheel"). Measured on the
+# first linux-64 CI cell (run 34585904480) and again locally with gcc 13: the
+# C++-only xatlas extension (_xatlas) references
+#   _ZNSt18condition_variable4waitERSt11unique_lockISt5mutexE@GLIBCXX_3.4.30
+# (libstdc++ 12+ re-versioned condition_variable::wait), and manylinux_2_28
+# permits GLIBCXX only to 3.4.25, so auditwheel refused the repair:
+#   "cannot repair ... to manylinux_2_28_x86_64 ABI because of the presence
+#    of too-recent versioned symbols". The two CUDA extensions top out at
+# GLIBCXX_3.4.21 and were fine. Same lever torchaudio pulls, for the same
+# reason; nvcc's ceiling for this CUDA line is <15, so 10 is legal, and the
+# policy value can only ever be lowered here, never raised.
+gcc_version: "10"
+
+
 verify:
   import: cumesh_vb
   op: |
