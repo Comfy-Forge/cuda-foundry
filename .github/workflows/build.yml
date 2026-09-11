@@ -787,12 +787,14 @@ jobs:
         if: steps.build.outputs.built == 'true'
         with:
           name: wheel-${{ matrix.cell.package }}-cu${{ matrix.cell.cuda_short }}-t${{ matrix.cell.pytorch }}-py${{ matrix.cell.python }}-${{ matrix.cell.platform }}
-          # The sidecar rides with the wheel: the deps index is built from it,
-          # and a wheel published without one silently becomes a no-dependency
-          # wheel on both indices.
+          # Both files of the cell ride together: the stripped wheel (root
+          # tree) and, under deps/, its twin with the dependency list inside
+          # plus that twin's PEP 658 sidecar (/deps/ tree). publish-wheels
+          # refuses an artifact missing either half.
           path: |
             ${{ runner.temp }}/wheels/*.whl
-            ${{ runner.temp }}/wheels/*.whl.metadata
+            ${{ runner.temp }}/wheels/deps/*.whl
+            ${{ runner.temp }}/wheels/deps/*.whl.metadata
 
       - name: Upload to release (immutable — never overwrite an asset)
         # Published artifacts are immutable: repodata fragments carry each

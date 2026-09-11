@@ -1,8 +1,13 @@
 name: publish-wheels
 
-# Uploads compiled wheels and their PEP 658 sidecars to the per-subdir
-# release, which is where the index generator looks and where the .conda
-# artifacts for the same cells already live. Then nudges the index.
+# Uploads each cell's TWO wheel files: the dependency-stripped wheel to the
+# per-subdir release (the root index tree's file, beside the .conda for the
+# same cell) and its twin -- same filename, curated Requires-Dist inside,
+# PEP 658 sidecar byte-identical to its METADATA -- to the <subdir>-deps
+# release, which is where the /deps/ tree points. Two releases because pip
+# takes a link's filename from the URL's last path component, so the twin
+# must be reachable under the canonical *.whl name and a flat release cannot
+# hold that name twice. Then nudges the index.
 #
 # Publishing is IMMUTABLE, the same discipline the channel fragments follow:
 # re-uploading a byte-identical asset is a no-op, uploading DIFFERENT bytes
@@ -78,7 +83,7 @@ jobs:
       # expression written inside a run: block is text-substituted before
       # bash ever parses the script, so a crafted input is command injection
       # (CWE-78); an env var is data no matter what it contains.
-      - name: Gate on sidecars, then upload immutably
+      - name: Gate on the twins and their sidecars, then upload immutably
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SUBDIR: ${{ inputs.subdir }}
@@ -91,46 +96,80 @@ jobs:
             echo "::error::artifact contains no .whl files"; exit 1
           fi
 
-          # A wheel with no sidecar is not a publish failure the index can
-          # see: the root tree serves it fine and /deps/ just declines to
-          # advertise metadata for it, so the package silently installs
-          # without its dependencies. Catch it here, where it is still cheap.
+          # Every root wheel must have its twin and the twin its sidecar, and
+          # the sidecar must be the twin's METADATA byte for byte -- the
+          # property pip enforces (PEP 658 "MUST be identical"). A twin that
+          # never lands is not a failure the index can see: /deps/ would
+          # link the root file and the package would silently install
+          # without its dependencies. Catch it here, where it is cheap.
           missing=0
           for whl in "${wheels[@]}"; do
-            if [ ! -f "$whl.metadata" ]; then
-              echo "::error::$(basename "$whl") has no PEP 658 sidecar next to it"
+            b=$(basename "$whl")
+            if [ -f "$whl.metadata" ]; then
+              echo "::error::$b has a sidecar beside the ROOT wheel; the root tree advertises none and pip refuses a sidecar that differs from the wheel"
               missing=1
             fi
+            if [ ! -f "dist/deps/$b" ] || [ ! -f "dist/deps/$b.metadata" ]; then
+              echo "::error::$b has no /deps/ twin (dist/deps/$b + .metadata)"
+              missing=1
+              continue
+            fi
+            python3 - "dist/deps/$b" <<'PY' || missing=1
+          import sys, zipfile
+          from pathlib import Path
+          whl = Path(sys.argv[1])
+          with zipfile.ZipFile(whl) as z:
+              meta = [n for n in z.namelist() if n.endswith(".dist-info/METADATA")]
+              inside = z.read(meta[0]) if len(meta) == 1 else None
+          side = Path(str(whl) + ".metadata").read_bytes()
+          if inside != side:
+              print(f"::error::{whl.name}: sidecar is not byte-identical to the twin's METADATA")
+              sys.exit(1)
+          PY
           done
           [ "$missing" -eq 0 ] || exit 1
 
-          # One listing for the whole run. Other artifacts may be uploading
-          # into this release concurrently, but with different filenames;
-          # only a second dispatch of THIS artifact could race on a name,
-          # and the concurrency group serialises exactly that.
-          gh release view "$SUBDIR" -R "$REPO" \
-            --json assets --jq '.assets[].name' > /tmp/existing.txt
+          DEPS_TAG="$SUBDIR-deps"
+          gh release create "$DEPS_TAG" -R "$REPO" \
+            --title "$DEPS_TAG packages" \
+            --notes "Storage release for the /deps/ index tree: each wheel of the $SUBDIR release, same filename, with its dependency list inside and a PEP 658 sidecar. Do not delete: the index points here." \
+            2>/dev/null || true
 
-          for f in "${wheels[@]}" "${wheels[@]/%/.metadata}"; do
+          # One listing per release for the whole run. Other artifacts may
+          # be uploading into these releases concurrently, but with different
+          # filenames; only a second dispatch of THIS artifact could race on
+          # a name, and the concurrency group serialises exactly that.
+          gh release view "$SUBDIR" -R "$REPO" --json assets --jq '.assets[].name' > /tmp/existing-root.txt
+          gh release view "$DEPS_TAG" -R "$REPO" --json assets --jq '.assets[].name' > /tmp/existing-deps.txt
+
+          upload() {  # <release tag> <existing listing> <file>
+            local tag="$1" listing="$2" f="$3" base
             base=$(basename "$f")
-            if grep -Fxq "$base" /tmp/existing.txt; then
-              url="https://github.com/$REPO/releases/download/$SUBDIR/$base"
+            if grep -Fxq "$base" "$listing"; then
+              local url="https://github.com/$REPO/releases/download/$tag/$base"
+              local published local_sum
               published=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
               local_sum=$(sha256sum "$f" | cut -d' ' -f1)
               if [ "$published" = "$local_sum" ]; then
-                echo "no-op: $base already published with the same bytes"
-                continue
+                echo "no-op: $tag/$base already published with the same bytes"
+                return 0
               fi
-              echo "::error::$base is already published with DIFFERENT bytes"
+              echo "::error::$tag/$base is already published with DIFFERENT bytes"
               echo "published sha256 $published"
               echo "local     sha256 $local_sum"
               echo "Published artifacts are immutable. Bump the build number"
               echo "and publish under a new filename; if the published one is"
               echo "defective, record it in known_bad.json as well."
-              exit 1
+              return 1
             fi
-            gh release upload "$SUBDIR" "$f" -R "$REPO"
-            echo "uploaded $base"
+            gh release upload "$tag" "$f" -R "$REPO"
+            echo "uploaded $tag/$base"
+          }
+          for whl in "${wheels[@]}"; do
+            b=$(basename "$whl")
+            upload "$SUBDIR" /tmp/existing-root.txt "$whl"
+            upload "$DEPS_TAG" /tmp/existing-deps.txt "dist/deps/$b"
+            upload "$DEPS_TAG" /tmp/existing-deps.txt "dist/deps/$b.metadata"
           done
 
       # The index lives in another repo, so this needs a cross-repo token
