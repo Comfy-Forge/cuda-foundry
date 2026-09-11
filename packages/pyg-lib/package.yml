@@ -45,6 +45,16 @@ run_deps: []
 # line, is filtered out by the patch.
 host_deps:
   - cuda-cudart-dev
+  # torch's Caffe2/public/cuda.cmake does get_target_property() on
+  # CUDA::nvrtc, a target FindCUDAToolkit creates only when it finds nvrtc's
+  # HEADERS and import library -- not from the runtime package alone. The
+  # win-64 host env had cuda-nvrtc (runtime) and configure died with
+  #   get_target_property() called with non-existent target "CUDA::nvrtc"
+  # (run 34592208119), exactly torchaudio's finding for the same file. The
+  # patch then filters nvrtc back OUT of the link line, so libpyg records no
+  # DT_NEEDED on it; the run_export this adds is the price of torch's cmake
+  # asking for the target at all.
+  - cuda-nvrtc-dev
 
 build_deps:
   # setup.py shells out to `cmake`; without this the build silently used

@@ -225,10 +225,26 @@ anchor = "        cmake_args = [\n            '-DBUILD_TEST=OFF',\n"
 fixed = ("        import sys\n"
          "        cmake_args = [\n"
          "            f'-DPython3_EXECUTABLE={sys.executable}',  # cuda-foundry: see patches/pyg_lib.py\n"
-         "            '-DBUILD_TEST=OFF',\n")
+         "            '-DBUILD_TEST=OFF',\n"
+         "        ]\n"
+         "        # cuda-foundry: torch's cuda.cmake runs the LEGACY FindCUDA, which takes\n"
+         "        # the first nvcc on PATH. The host env carries cuda-nvcc-tools (12.9,\n"
+         "        # dragged in beside torch) while the cell's toolkit is the build env's\n"
+         "        # 12.8, so it found the wrong one and refused: 'FindCUDA says CUDA\n"
+         "        # version is 12.9 but the headers say 12.8' (run 34592193335). Point it\n"
+         "        # at the toolkit the cell pinned; build.sh exports CUDA_HOME, the\n"
+         "        # win-64 nvcc activation exports CUDA_PATH.\n"
+         "        _cuda_root = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')\n"
+         "        if _cuda_root:\n"
+         "            cmake_args.append(f'-DCUDA_TOOLKIT_ROOT_DIR={_cuda_root}')\n"
+         "        cmake_args += [\n")
 require(s.count(anchor) == 1, "pyg_lib: setup.py cmake_args anchor not found "
                               "-- upstream changed; re-check")
 setup_py.write_text(s.replace(anchor, fixed, 1), encoding="utf-8")
-require("-DPython3_EXECUTABLE=" in setup_py.read_text(encoding="utf-8"),
-        "pyg_lib: Python3_EXECUTABLE hint NOT on disk")
-print("pyg_lib patch: cmake gets -DPython3_EXECUTABLE=<the building python>")
+_final_setup = setup_py.read_text(encoding="utf-8")
+require("-DPython3_EXECUTABLE=" in _final_setup and "-DCUDA_TOOLKIT_ROOT_DIR=" in _final_setup,
+        "pyg_lib: Python3_EXECUTABLE / CUDA_TOOLKIT_ROOT_DIR hints NOT on disk")
+import ast as _ast  # noqa: E402
+_ast.parse(_final_setup)
+print("pyg_lib patch: cmake gets -DPython3_EXECUTABLE=<the building python> and "
+      "-DCUDA_TOOLKIT_ROOT_DIR=<the cell's toolkit>")

@@ -49,6 +49,19 @@ lesson: a whole-file before/after guard passes on a partial match).
 5. `-g` dropped from the cxx flags (patch_lib.strip_debug_flags): a release
    artifact has no use for host DWARF, and it is paid in compile time and
    peak memory. -O3 / -fopenmp / -lgomp are left alone.
+
+6. sparseconfig.h for MSVC. conda-forge's win-64 sparsehash ships the
+   tarball's own Windows config under Library/include/windows/, and it is
+   for a pre-2015 compiler: HASH_NAMESPACE stdext, SPARSEHASH_HASH
+   stdext::hash_compare -- C2039 on VS2022. Nothing else on the include
+   path provides sparsehash/internal/sparseconfig.h there, so run
+   34592178879 died with C1083 on exactly that file. The patch writes a
+   modern config (std::hash from <functional>, stdint types -- the one the
+   farm measured working on VS2022) into third_party/sparsehash_msvc/ and
+   setup.py puts that directory FIRST in include_dirs on Windows only. The
+   condition lives in setup.py, which runs on the build machine, not in this
+   fetch-time script; on Linux the directory is never on the path and
+   conda-forge's own generated config is used.
 """
 import pathlib
 import re
@@ -113,14 +126,14 @@ needle = ("extension_type('torchsparse.backend',\n"
           "                       extra_compile_args=extra_compile_args)")
 repl = ("extension_type('torchsparse.backend',\n"
         "                       sources,\n"
-        "                       include_dirs=[_cuw_sparsehash_include()],\n"
+        "                       include_dirs=_cuw_sparsehash_include_dirs(),\n"
         "                       extra_compile_args=extra_compile_args)")
 require(s.count(needle) == 1, "torchsparse: extension_type call not found in setup.py "
                               "-- upstream changed; update this patch")
 s = s.replace(needle, repl, 1)
 helper = '''
 
-def _cuw_sparsehash_include():
+def _cuw_sparsehash_include_dirs():
     # cuda-foundry (see packages/torchsparse/patches): hashmap_cpu.hpp and
     # query_cpu.cpp include <google/dense_hash_map>, a header-only library
     # supplied by conda-forge's sparsehash in the host prefix. Upstream has no
@@ -132,14 +145,23 @@ def _cuw_sparsehash_include():
             'torchsparse: CUW_SPARSEHASH_INCLUDE must name a directory holding '
             f'google/dense_hash_map (got {inc!r}); package.yml build_env sets it '
             'from $PREFIX and host_deps supplies sparsehash')
-    return inc
+    dirs = [inc]
+    if os.name == 'nt':
+        # conda-forge's win-64 sparsehash carries only the tarball's pre-2015
+        # MSVC config (stdext::hash_compare); the modern one the patch wrote
+        # goes first so <sparsehash/internal/sparseconfig.h> resolves to it.
+        msvc = os.path.abspath(os.path.join('third_party', 'sparsehash_msvc'))
+        if not os.path.isfile(os.path.join(msvc, 'sparsehash', 'internal', 'sparseconfig.h')):
+            raise SystemExit(f'torchsparse: {msvc} is missing the MSVC sparseconfig.h the patch writes')
+        dirs.insert(0, msvc)
+    return dirs
 '''
 anchor2 = "\nextension_type = CUDAExtension if device == 'cuda' else CppExtension\n"
 require(s.count(anchor2) == 1, "torchsparse: extension_type assignment anchor not found")
 s = s.replace(anchor2, helper + anchor2, 1)
 setup_py.write_text(s, encoding="utf-8")
-require("_cuw_sparsehash_include()" in setup_py.read_text(encoding="utf-8")
-        and "def _cuw_sparsehash_include" in setup_py.read_text(encoding="utf-8"),
+require("_cuw_sparsehash_include_dirs()" in setup_py.read_text(encoding="utf-8")
+        and "def _cuw_sparsehash_include_dirs" in setup_py.read_text(encoding="utf-8"),
         "torchsparse: sparsehash include_dirs NOT on disk")
 print("torchsparse patch: sparsehash include_dirs injected (CUW_SPARSEHASH_INCLUDE)")
 
@@ -149,3 +171,28 @@ require(n == 1, f"torchsparse: expected to strip exactly one debug flag (-g) fro
                 f"setup.py, stripped {n}")
 require("'-O3', '-fopenmp', '-lgomp'" in setup_py.read_text(encoding="utf-8"),
         "torchsparse: the cxx flag list was damaged by the debug-flag strip")
+
+# ── 6. a sparseconfig.h VS2022 can compile ─────────────────────────────────
+cfg = pathlib.Path("third_party/sparsehash_msvc/sparsehash/internal/sparseconfig.h")
+require(not cfg.exists(), "torchsparse: the MSVC sparseconfig.h is already there?")
+cfg.parent.mkdir(parents=True, exist_ok=True)
+cfg.write_text(
+    "/* cuda-foundry (packages/torchsparse/patches): sparsehash config for a\n"
+    " * modern MSVC. conda-forge's win-64 package ships only the tarball's\n"
+    " * pre-2015 config (stdext::hash_compare, C2039 on VS2022). Reached only\n"
+    " * on Windows: setup.py puts this directory first in include_dirs there\n"
+    " * and nowhere else. */\n"
+    "#define GOOGLE_NAMESPACE ::google\n"
+    "#define HASH_NAMESPACE std\n"
+    "#define HASH_FUN_H <functional>\n"
+    "#define SPARSEHASH_HASH HASH_NAMESPACE::hash\n"
+    "#define HAVE_STDINT_H 1\n"
+    "#define HAVE_UINT16_T 1\n"
+    "#define HAVE_LONG_LONG 1\n"
+    "#define HAVE_MEMCPY 1\n"
+    "#define STL_NAMESPACE std\n"
+    "#define _START_GOOGLE_NAMESPACE_ namespace google {\n"
+    "#define _END_GOOGLE_NAMESPACE_ }\n", encoding="utf-8")
+require(cfg.is_file() and "#define SPARSEHASH_HASH HASH_NAMESPACE::hash\n" in cfg.read_text(encoding="utf-8"),
+        "torchsparse: MSVC sparseconfig.h NOT on disk")
+print(f"torchsparse patch: wrote {cfg} for win-64 builds")

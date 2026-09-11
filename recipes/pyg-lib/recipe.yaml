@@ -656,6 +656,7 @@ requirements:
     - if: linux
       then: cuda-nvtx
     - cuda-cudart-dev
+    - cuda-nvrtc-dev
   run:
     - python
     # Every package here ships compiled CUDA kernels, so it states that about
