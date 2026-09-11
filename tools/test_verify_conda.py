@@ -602,9 +602,17 @@ def main() -> int:
           "noarch: a compiled module inside a noarch artifact FAILS")
 
     shutil.rmtree(td, ignore_errors=True)
+    # Legacy -ng metapackages (gcc<=12 run_exports) own no files; their
+    # payload packages do. Declaring `libgcc-ng` has declared the provider of
+    # libgcc_s.so.1 -- run 34626966737 flagged cumm (gcc 8) as underlinked.
+    check("libgcc-ng" in vc._credited("libgcc"), "libgcc's files are credited to a declared libgcc-ng")
+    check("libstdcxx-ng" in vc._credited("libstdcxx"), "libstdcxx's files are credited to a declared libstdcxx-ng")
+    check("libgcc-ng" not in vc._credited("libstdcxx"), "libstdcxx does not credit libgcc-ng")
+
     print(f"\n{len(failures)} failure(s)")
     return 1 if failures else 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+

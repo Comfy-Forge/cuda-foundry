@@ -107,6 +107,12 @@ carry: complete   # not on conda-forge; nothing to shadow
 
 verify:
   import: sageattention
+  # cuda-cudart-dev is a run dep for its HEADERS (cuda.h / cuda_runtime.h
+  # consumed by the NVRTC / Triton path at run time); no shipped module links
+  # a library from it, and the overdepending gate must not read that as a
+  # stray dependency. Run 34626966737 (cumm) flagged it.
+  allow_unlinked:
+    - cuda-cudart-dev
   # _qattn_sm90 records a DT_NEEDED on libcuda.so.1 (nvcuda.dll on win-64)
   # for cuTensorMapEncodeTiled -- the driver, not a conda package; see the
   # host_deps_linux note above. The DSO gate would otherwise refuse a

@@ -81,6 +81,12 @@ carry: complete   # not on conda-forge; nothing to shadow
 
 verify:
   import: o_voxel_vb
+  # flex_gemm's kernels/triton/utils.py reads torch.cuda.get_device_name()
+  # at IMPORT time (autotune config keyed on the GPU), and this package
+  # imports flex_gemm at module scope -- so the import itself needs a GPU.
+  # The GPU-less import test in CI skips this package with a warning; the
+  # op still runs on hardware. Run 34627093215 (o-voxel-vb) failed here.
+  import_needs_gpu: true
   op: |
     import torch, o_voxel_vb as o_voxel
     from o_voxel_vb.serialize import encode_seq, decode_seq

@@ -365,6 +365,16 @@ def _credited(pkg: str) -> set[str]:
         out.add(m.group(1))
     if pkg in ("_openmp_mutex", "libgomp"):
         out.add("libgcc")
+    # Older compiler run_exports (gcc <= 12, which cumm/spconv pin for the
+    # manylinux_2_28 GLIBCXX ceiling) say `libgcc-ng` / `libstdcxx-ng`. Those
+    # are metapackages whose payload lives in `libgcc` / `libstdcxx`, so the
+    # payload's files count towards the legacy name a recipe was made to
+    # declare -- run 34626966737 flagged cumm as underlinked against
+    # libgcc_s.so.1 while carrying `libgcc-ng >=8`.
+    if pkg in ("libgcc", "libgcc_s"):
+        out.add("libgcc-ng")
+    if pkg == "libstdcxx":
+        out.add("libstdcxx-ng")
     return out
 
 
