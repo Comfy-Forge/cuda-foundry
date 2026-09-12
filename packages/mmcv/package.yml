@@ -88,6 +88,10 @@ run_deps:
   - yapf
   - py-opencv >=3
   - torchvision
+  # mmcv/utils/config.py:27 does `import regex as re` on Windows only
+  # (platform.system() == 'Windows'), so the clean-environment import
+  # passed on linux-64 and failed on win-64 (run 34695856128).
+  - { if: win, then: regex }
 
 # mmcv/ops/csrc includes only torch headers and the CUDA runtime.
 host_deps: []

@@ -339,6 +339,13 @@ requirements:
     - yapf
     - py-opencv >=3
     - torchvision
+    # Conditional (package.yml `{if: <selector>, then: <spec>}`): a platform
+    # selector, a torch-minor clause (rattler-build's own match() on the
+    # `pytorch` variant, for a dep conda-forge builds for some torch minors
+    # and not others), or both. See package_loader.resolve_run_deps for the
+    # wheel-side counterpart, which evaluates the same clause in Python.
+    - if: "win"
+      then: regex
   ignore_run_exports:
     # pytorch's weak export `pytorch >=2.8.0,<2.9.0a0` duplicated the glob
     # above on every artifact (two pytorch specs, one flavour-blind). Ignored
