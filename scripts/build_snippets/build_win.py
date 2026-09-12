@@ -1095,7 +1095,16 @@ def main() -> int:
     if rc != 0:
         die(f"installing the built wheel failed (exit {rc})")
 
-    site = Path(sysconfig.get_paths()["purelib"])
+    # Ask the interpreter that INSTALLED the wheel where its site-packages is.
+    # sysconfig of the running interpreter is wrong whenever build_win.py
+    # itself runs under a different python: a build dep that depends on
+    # python (cubvh's pybind11) puts one in the build prefix, rattler-build
+    # resolves `interpreter: python` build-first, and the script then looked
+    # in %BUILD_PREFIX%\Lib\site-packages for a wheel pip had put into
+    # %PREFIX% (run 34695804325).
+    site = Path(subprocess.run(
+        [python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+        capture_output=True, text=True, check=True).stdout.strip())
     if not site.is_dir():
         die(f"site-packages not found at {site}")
     dist_info = dist_info_dir(site, wheel)
