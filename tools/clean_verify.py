@@ -570,7 +570,11 @@ def wheel_half(cfg: dict, cell: Cell, work: Path, env: dict, timeout: int,
     if p.returncode == 0 and reqs:
         # The sidecar's own list, resolved from PyPI under the torch pin --
         # what a consumer of /deps/ gets once the index lists this build.
-        p = run(pip + reqs + ["-c", str(constraints), "--index-url", PYPI], venv, env, timeout)
+        # Our index first, PyPI as fallback -- the consumer's configuration.
+        # A sidecar may name a sibling from this channel that is not on
+        # PyPI at all (nvdiffrec-render -> nvdiffrast, 2026-09-12).
+        p = run(pip + reqs + ["-c", str(constraints), "--index-url", DEPS_INDEX, "--extra-index-url", PYPI],
+                venv, env, timeout)
         log += p.stdout
     if p.returncode != 0:
         return Result(cell, "wheel", "FAIL", "install wheel (+deps from PyPI)",
