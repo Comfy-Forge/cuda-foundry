@@ -1,0 +1,39 @@
+{
+ "arch": "x86_64",
+ "build": "cuda128_torch28_py312_h6651153_1",
+ "build_number": 1,
+ "depends": [
+  "python",
+  "__cuda",
+  "cuda-cudart >=12.8,<13.0a0",
+  "pytorch 2.8.* cuda128_repack_*",
+  "vc >=14.3,<15",
+  "vc14_runtime >=14.44.35208",
+  "ucrt >=10.0.20348.0",
+  "cuda-version >=12.8,<13",
+  "libtorch >=2.8.0,<2.9.0a0",
+  "python_abi 3.12.* *_cp312"
+ ],
+ "license": "BSD-3-Clause",
+ "md5": "ef5b903aa10fc0cb4aa6d446191b2cd2",
+ "name": "torchao",
+ "platform": "win",
+ "provenance": {
+  "arch_list": "8.0 8.6 8.9 9.0 10.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "12.8",
+  "prebuilt_wheel_used": false,
+  "run_id": "34695913294",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34695913294",
+  "source_rev": "e318546f9be8c6dd1340157cd14e5cbc6ffa1f65",
+  "torch_build": "cuda128_repack_py312_h2bed46fa_5"
+ },
+ "purls": [
+  "pkg:pypi/torchao@0.13.0"
+ ],
+ "sha256": "4c72faaa247e9bdaf960564a8c3d5132bcf2e868960c50978e83f197c9a172a2",
+ "size": 5302123,
+ "subdir": "win-64",
+ "timestamp": 1789218994376,
+ "version": "0.13.0"
+}
