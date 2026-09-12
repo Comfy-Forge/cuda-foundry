@@ -569,7 +569,13 @@ jobs:
         # a hard-coded order. A package whose IMPORT needs a GPU (flex-gemm
         # reads the device name at import) declares verify.import_needs_gpu
         # in package.yml and is skipped with a warning, never silently.
-        if: steps.build.outputs.built == 'true'
+        # A cell whose .conda is not published on this platform (package.yml
+        # conda_platforms -> publish_conda: false) is not tested as a conda
+        # artifact either: the import-from-own-closure question is moot for
+        # something that never ships, and the wheel keeps its own check.
+        # sageattention / sageattn3 on win-64 import triton at module scope
+        # and no conda triton exists there (runs 34696918311, 34696914976).
+        if: steps.build.outputs.built == 'true' && matrix.cell.publish_conda != false
         env:
           # The solver sees the virtual package it needs; nothing else reads it.
           CONDA_OVERRIDE_CUDA: ${{ matrix.cell.cuda }}
