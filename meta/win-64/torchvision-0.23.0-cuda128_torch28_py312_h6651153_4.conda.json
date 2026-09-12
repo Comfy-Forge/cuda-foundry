@@ -1,0 +1,45 @@
+{
+ "arch": "x86_64",
+ "build": "cuda128_torch28_py312_h6651153_4",
+ "build_number": 4,
+ "depends": [
+  "python",
+  "__cuda",
+  "cuda-cudart >=12.8,<13.0a0",
+  "pytorch 2.8.* cuda128_repack_*",
+  "numpy",
+  "pillow >=5.3.0,!=8.3.0,!=8.3.1",
+  "vc >=14.3,<15",
+  "vc14_runtime >=14.44.35208",
+  "ucrt >=10.0.20348.0",
+  "cuda-version >=12.8,<13",
+  "libwebp-base >=1.6.0,<2.0a0",
+  "libnvjpeg >=12.3.5.92,<13.0a0",
+  "libjpeg-turbo >=3.2.0,<4.0a0",
+  "libpng >=1.6.58,<1.7.0a0",
+  "libtorch >=2.8.0,<2.9.0a0",
+  "python_abi 3.12.* *_cp312"
+ ],
+ "license": "BSD-3-Clause",
+ "md5": "385dd52baacf155a4666d23f8c89c2be",
+ "name": "torchvision",
+ "platform": "win",
+ "provenance": {
+  "arch_list": "7.0 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "12.8",
+  "prebuilt_wheel_used": false,
+  "run_id": "34694923107",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34694923107",
+  "source_rev": "824e8c8726b65fd9d5abdc9702f81c2b0c4c0dc8",
+  "torch_build": "cuda128_mkl_py312_hc0cb929_302"
+ },
+ "purls": [
+  "pkg:pypi/torchvision@0.23.0"
+ ],
+ "sha256": "13ff0f9f8286a8e37556a88043879c37fec017e289e82aa8d00e83bbd9410dc9",
+ "size": 2421221,
+ "subdir": "win-64",
+ "timestamp": 1789218023476,
+ "version": "0.23.0"
+}
