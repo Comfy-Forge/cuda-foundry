@@ -1,0 +1,40 @@
+{
+ "arch": "x86_64",
+ "build": "cuda128_torch28_py312_h6651153_2",
+ "build_number": 2,
+ "depends": [
+  "python",
+  "__cuda",
+  "cuda-cudart >=12.8,<13.0a0",
+  "pytorch 2.8.* cuda128_repack_*",
+  "einops",
+  "cuda-version >=12.8,<13",
+  "vc >=14.3,<15",
+  "vc14_runtime >=14.44.35208",
+  "ucrt >=10.0.20348.0",
+  "libtorch >=2.8.0,<2.9.0a0",
+  "python_abi 3.12.* *_cp312"
+ ],
+ "license": "BSD-3-Clause",
+ "md5": "23735a96c1b81c4bfff665ab5865ee42",
+ "name": "flash-attn",
+ "platform": "win",
+ "provenance": {
+  "arch_list": "8.0 9.0 10.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "12.8",
+  "prebuilt_wheel_used": false,
+  "run_id": "34699054554",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34699054554",
+  "source_rev": "060c9188beec3a8b62b33a3bfa6d5d2d44975fab",
+  "torch_build": "cuda128_repack_py312_h2bed46fa_5"
+ },
+ "purls": [
+  "pkg:pypi/flash_attn@2.8.3"
+ ],
+ "sha256": "5b78372a5565f9cfefb99d31416175bd44963967129850a7afb4ff6d07aa3c34",
+ "size": 184352316,
+ "subdir": "win-64",
+ "timestamp": 1789225857321,
+ "version": "2.8.3"
+}
