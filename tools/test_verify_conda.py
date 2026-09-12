@@ -638,6 +638,7 @@ def main() -> int:
     check("libgcc-ng" in vc._credited("libgcc"), "libgcc's files are credited to a declared libgcc-ng")
     check("libstdcxx-ng" in vc._credited("libstdcxx"), "libstdcxx's files are credited to a declared libstdcxx-ng")
     check("libgcc-ng" not in vc._credited("libstdcxx"), "libstdcxx does not credit libgcc-ng")
+    check("vc14_runtime" in vc._credited("vcomp14"), "vcomp14's VCOMP140.DLL is credited to the declared vc14_runtime (win-64 OpenMP)")
 
     print(f"\n{len(failures)} failure(s)")
     return 1 if failures else 0

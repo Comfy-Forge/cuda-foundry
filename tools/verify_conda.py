@@ -375,6 +375,13 @@ def _credited(pkg: str) -> set[str]:
         out.add("libgcc-ng")
     if pkg == "libstdcxx":
         out.add("libstdcxx-ng")
+    # win-64 twin of the libgomp rule: MSVC's OpenMP runtime VCOMP140.DLL is
+    # delivered by `vcomp14`, a dependency of the declared `vc14_runtime`
+    # (which the `vc` run_export names), so an OpenMP-using .pyd has declared
+    # what conda-forge expects -- runs 34695935151 / 34695920949 (torch-sparse,
+    # torch-cluster) flagged it as underlinked.
+    if pkg == "vcomp14":
+        out.add("vc14_runtime")
     return out
 
 
