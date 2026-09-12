@@ -64,6 +64,11 @@ nvcc_threads: 1
 run_deps:
   - filelock
   - { if: linux, then: triton }
+  # This fork alone: flex_gemm_ap/ops/spconv/submanifold_conv3d.py:4 imports
+  # tqdm (the base flex-gemm does not). import_needs_gpu skips the GPU-less
+  # import test in CI, so the hardware op in clean_verify was the first clean
+  # import and found it (2026-09-12).
+  - tqdm
 
 # Where the .conda is PUBLISHED. The wheel is still built for every platform
 # in the matrix; only the conda artifact is withheld where its run: list

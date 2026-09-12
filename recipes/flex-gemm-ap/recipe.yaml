@@ -339,6 +339,7 @@ requirements:
     # wheel-side counterpart, which evaluates the same clause in Python.
     - if: "linux"
       then: triton
+    - tqdm
   ignore_run_exports:
     # pytorch's weak export `pytorch >=2.8.0,<2.9.0a0` duplicated the glob
     # above on every artifact (two pytorch specs, one flavour-blind). Ignored
