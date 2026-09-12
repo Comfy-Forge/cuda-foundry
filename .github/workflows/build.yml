@@ -636,7 +636,11 @@ jobs:
           LOCAL_CHANNEL="$(python -c "import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())" "$RUNNER_TEMP/out" | tr -d '\r')"
           DEPENV="$RUNNER_TEMP/depenv"
           rm -rf "$DEPENV"; mkdir -p "$DEPENV"
-          cat > "$DEPENV/pixi.toml" <<EOF
+          # The heredoc itself is piped through tr: on the Windows runner the
+          # run: script is written with CRLF, so every heredoc line carries a
+          # \r that pixi rejects (run 34694573985, after the variable
+          # captures were already guarded).
+          cat <<EOF | tr -d '\r' > "$DEPENV/pixi.toml"
           [workspace]
           name = "depenv"
           channels = ["$LOCAL_CHANNEL", "https://comfy-forge.github.io/cuda-foundry", "https://comfy-forge.github.io/conda-torch", "conda-forge"]
