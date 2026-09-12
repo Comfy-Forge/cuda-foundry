@@ -120,8 +120,13 @@ def point_at_build_toolkit(build_prefix: Path) -> None:
     if not (lib_root / "lib" / "cudart.lib").is_file():
         die(f"no cudart.lib under {lib_root / 'lib'}: cuda-cudart-dev_win-64 "
             f"is not in the build environment")
-    os.environ["CUDA_HOME"] = str(lib_root)
-    os.environ["CUDA_PATH"] = str(lib_root)
+    # Forward slashes: the value ends up inside CMake code (pyg-lib's
+    # FindCUDA does find_program(... PATHS ${CUDA_TOOLKIT_ROOT_DIR})), where a
+    # backslash path like D:\a\_temp\... is parsed as escape sequences --
+    # "Invalid character escape '\a'" (run 34696234055). nvcc, cl and torch's
+    # cpp_extension all accept the POSIX form on Windows.
+    os.environ["CUDA_HOME"] = lib_root.as_posix()
+    os.environ["CUDA_PATH"] = lib_root.as_posix()
     for var, sub in (("INCLUDE", "include"), ("LIB", "lib")):
         ours = str(lib_root / sub)
         rest = os.environ.get(var, "")
