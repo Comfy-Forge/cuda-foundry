@@ -1,0 +1,40 @@
+{
+ "arch": "x86_64",
+ "build": "cuda128_torch28_py312_h6651153_5",
+ "build_number": 5,
+ "depends": [
+  "python",
+  "__cuda",
+  "cuda-cudart >=12.8,<13.0a0",
+  "pytorch 2.8.* cuda128_repack_*",
+  "cuda-version >=12.8,<13",
+  "vc >=14.3,<15",
+  "vc14_runtime >=14.44.35208",
+  "ucrt >=10.0.20348.0",
+  "libtorch >=2.8.0,<2.9.0a0",
+  "ffmpeg >=6.1.2,<7.0a0",
+  "python_abi 3.12.* *_cp312"
+ ],
+ "license": "BSD-2-Clause AND BSD-3-Clause AND Apache-2.0",
+ "md5": "e0552718b0c759af26a2d123bf2f332c",
+ "name": "torchaudio",
+ "platform": "win",
+ "provenance": {
+  "arch_list": "7.0 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "12.8",
+  "prebuilt_wheel_used": false,
+  "run_id": "34702046501",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34702046501",
+  "source_rev": "6e1c7fe9ff6d82b8665d0a46d859d3357d2ebaaa",
+  "torch_build": "cuda128_repack_py312_h2bed46fa_5"
+ },
+ "purls": [
+  "pkg:pypi/torchaudio@2.8.0"
+ ],
+ "sha256": "ce8e6fc12940cdd00403603ef795e5d89104ce2ebeb0460c76fd47e89adb2f89",
+ "size": 2661591,
+ "subdir": "win-64",
+ "timestamp": 1789226616543,
+ "version": "2.8.0"
+}
