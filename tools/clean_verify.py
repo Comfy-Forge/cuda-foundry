@@ -632,6 +632,13 @@ def main() -> int:
                 r = wheel_half(cfg, c, args.work, env, args.timeout, not args.no_op)
         except Exception as e:  # a tool crash is a FAIL with a reason, never a hang
             r = Result(c, fmt, "FAIL", "tool", f"{type(e).__name__}: {e}", 0)
+        finally:
+            # Each cell's environment goes the moment the cell is done, not at
+            # the end of the run: with torch in every one they are 5-8 GB
+            # each, and letting ~180 of them accumulate filled a 916 GB disk
+            # mid-sweep (2026-09-12, ENOSPC on simple-knn). --keep keeps them.
+            if not args.keep:
+                shutil.rmtree(args.work / fmt / f"{c.name}-{c.build}-{c.subdir}", ignore_errors=True)
         mark = "ok  " if r.ok else "FAIL"
         print(f"{mark} {r.status:6s} {fmt:5s} {c.label:60s} {r.step}"
               + (f" -- {r.detail}" if r.detail else "") + f"  ({r.seconds:.0f}s)", flush=True)
