@@ -494,6 +494,21 @@ def wheel_half(cfg: dict, cell: Cell, work: Path, env: dict, timeout: int,
         # newer torch must be refused rather than silently swapping the CUDA
         # torch for a CPU one, which is what an unconstrained pip does.
         constraints.write_text(f"torch=={got}\n")
+        # The sidecar omits the whole torch FAMILY on purpose (make_wheel
+        # TORCH_NAMES: their ABI is pinned in the local version and a resolver
+        # could swap in a mismatched build), so installing torchvision /
+        # torchaudio is the consumer's job too, from the same index, beside
+        # the torch just installed -- pip then picks the build that requires
+        # torch==<got>. detectron2's wheel declares torchvision and failed
+        # its op with ModuleNotFoundError until this modelled that contract.
+        family = sorted({str(d).split()[0] for d in (cfg.get("run_deps") or []) if isinstance(d, str)}
+                        & {"torchvision", "torchaudio"})
+        if family:
+            p = run(pip + family + ["--index-url", f"{TORCH_INDEX}/cu{cell.cu}", "-c", str(constraints)],
+                    venv, env, timeout)
+            if p.returncode != 0:
+                return Result(cell, "wheel", "FAIL", f"install {' '.join(family)}", _first_error(p.stdout),
+                              time.time() - t0, p.stdout)
     else:
         constraints.write_text("")
 
