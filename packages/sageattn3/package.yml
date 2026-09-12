@@ -84,6 +84,13 @@ build_env:
 build_env_win:
   LDFLAGS: ""
 
+# No conda triton exists for win-64 and the package imports it at module
+# scope, so a win-64 .conda could not import from its own declared closure
+# (run 34695892754: ModuleNotFoundError: triton). The wheel is still built
+# and published for win-64 -- PyPI's triton-windows satisfies it there --
+# but the .conda is linux-64 only, like flex-gemm.
+conda_platforms: [linux-64]
+
 carry: complete   # not on conda-forge; nothing to shadow
 
 verify:
