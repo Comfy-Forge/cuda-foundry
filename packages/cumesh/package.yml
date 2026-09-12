@@ -59,6 +59,12 @@ nvcc_threads: 3
 # and xatlas.py at module load. The farm's sidecar carries exactly `tqdm`.
 run_deps:
   - tqdm
+  # cumesh/bvh.py:16 (cuBVH.__init__) converts through .numpy(), so numpy
+  # is a runtime dependency. The conda closure masked it -- conda-torch's
+  # pytorch depends on numpy -- and the wheel twin of the clean-environment
+  # test caught it against PyPI torch, which does not (clean_verify,
+  # 2026-09-12: "RuntimeError: Numpy is not available").
+  - numpy
 
 # The farm declared `extra_cuda_components: curand_dev cufft_dev nvtx`. None
 # of the three is included anywhere in this tree: at the pinned rev src/ and

@@ -332,6 +332,7 @@ requirements:
     # spec on the artifact; the glob is strictly narrower than the export.
     - pytorch ${{ pytorch }}.* cuda${{ cuda_short }}_repack_*
     - tqdm
+    - numpy
   ignore_run_exports:
     # pytorch's weak export `pytorch >=2.8.0,<2.9.0a0` duplicated the glob
     # above on every artifact (two pytorch specs, one flavour-blind). Ignored
