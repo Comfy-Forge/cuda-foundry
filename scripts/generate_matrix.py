@@ -33,8 +33,14 @@ import package_loader as pl  # noqa: E402
 
 TORCH_CHANNEL = "https://comfy-forge.github.io/conda-torch"
 # pytorch build strings look like cuda128_repack_py312_h<hash>_2 or, for the
-# mirrored conda-forge builds, cuda129_mkl_py312_h<hash>_302.
-_BUILD_RE = re.compile(r"^cuda(\d+)_[a-z]+_py(\d+)_h[0-9a-f]+_(\d+)$")
+# mirrored conda-forge builds, cuda129_mkl_py312_h<hash>_302. Only the
+# REPACK flavour defines a cell: the recipe pins `cuda<NNN>_repack_*` in host
+# and run (ARCHITECTURE.md "Lock the flavour with a build glob"), so a cell
+# whose only pytorch is the mkl mirror cannot be built, and stamping the
+# mirror's build string as torch_build would record a torch the artifact was
+# never compiled against -- run 34694919758 (fused-ssim win-64) did exactly
+# that, saying cuda128_mkl_302 while the host had solved cuda128_repack_5.
+_BUILD_RE = re.compile(r"^cuda(\d+)_repack_py(\d+)_h[0-9a-f]+_(\d+)$")
 
 
 def fetch_torch_repodata(subdir: str, cache: Path) -> dict:
@@ -52,10 +58,12 @@ def fetch_torch_repodata(subdir: str, cache: Path) -> dict:
 def torch_cells(subdir: str, cache: Path) -> dict:
     """{(cuda, torch_version, python): best pytorch build string}.
 
-    "Best" = highest build number, which is what an unpinned solve would take
-    and what a fresh build should compile against. Both our repacks and the
-    mirrored conda-forge builds are eligible: an extension linking either is
-    equally valid, since the ABI is torch's, not the packaging's.
+    "Best" = highest build number among the REPACK builds, which is what the
+    recipe's `cuda<NNN>_repack_*` pin solves to. The mirrored conda-forge
+    builds are not eligible: the wheel-equivalence guarantee is that the
+    libtorch linked against is the PyPI wheel's, and on win-64 the mirror
+    outranks the repack by build number, so an unfiltered "highest" picked
+    a torch the recipe never uses.
     """
     d = fetch_torch_repodata(subdir, cache)
     out = {}

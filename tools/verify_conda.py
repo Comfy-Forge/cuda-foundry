@@ -461,6 +461,26 @@ def _norm_dir(d: str) -> str:
 # the gate
 # ---------------------------------------------------------------------------
 
+
+def _host_solved_build(root: Path, name: str) -> str | None:
+    """The build string of `name` in the host env rattler-build finalized, from
+    info/recipe/rendered_recipe.yaml; None when the file or entry is absent
+    (a hand-written or pre-migration artifact), so the caller can decide."""
+    f = root / "info" / "recipe" / "rendered_recipe.yaml"
+    if not f.is_file():
+        return None
+    try:
+        import yaml
+        d = yaml.safe_load(f.read_text()) or {}
+    except Exception:
+        return None
+    host = (d.get("finalized_dependencies") or {}).get("host") or {}
+    for e in (host.get("resolved") if isinstance(host, dict) else None) or []:
+        if e.get("name") == name:
+            return str(e.get("build") or "") or None
+    return None
+
+
 def verify(path: Path, args, tmp: Path) -> bool:
     rep = Report(path.name)
     print(f"\n=== {path.name} ===")
@@ -781,10 +801,22 @@ def verify(path: Path, args, tmp: Path) -> bool:
         rep.check(tb == "none",
                   f"torch-free package records torch_build: none (got {tb!r})")
     else:
-        ok_tb = bool(m) and bool(re.match(rf"^cuda{m.group('cu')}_\w+_py{m.group('py')}_h[0-9a-f]+_\d+$", tb))
+        # The flavour token must be `repack`: the recipe pins
+        # cuda<NNN>_repack_* in host and run, and a stamp naming the mkl mirror
+        # records a torch the artifact was never compiled against.
+        ok_tb = bool(m) and bool(re.match(rf"^cuda{m.group('cu')}_repack_py{m.group('py')}_h[0-9a-f]+_\d+$", tb))
         rep.check(ok_tb,
                   f"records the exact torch build it compiled against, of the cell's flavour "
-                  f"and python (got {tb!r})")
+                  f"(repack) and python (got {tb!r})")
+        # ...and it must be the build the host actually solved, read from the
+        # rendered recipe rattler-build embeds. The stamp comes from the matrix
+        # generator; run 34694919758 stamped cuda128_mkl_302 while the host had
+        # solved cuda128_repack_5. A provenance field that can disagree with
+        # the artifact is worse than none.
+        solved = _host_solved_build(root, "pytorch")
+        rep.check(solved is None or solved == tb,
+                  f"torch_build stamp equals the host-solved pytorch build in "
+                  f"info/recipe/rendered_recipe.yaml (stamp {tb!r}, solved {solved!r})")
     rev = str(extra.get("source_rev") or "")
     rep.check(bool(re.fullmatch(r"[0-9a-f]{40}", rev)),
               f"source_rev is a 40-hex commit, not a tag or branch ({rev!r})")

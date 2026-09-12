@@ -139,7 +139,8 @@ def build_pe(dest: Path, imports: list[str], linker=(14, 44)) -> None:
 
 
 def make_conda(out: Path, tree: Path, index: dict, about: dict, corrupt_hash: str | None = None,
-               extra_declared: list[str] | None = None, licence: bool = True) -> Path:
+               extra_declared: list[str] | None = None, licence: bool = True,
+               solved_torch: str | None = None) -> Path:
     """Package `tree` (payload files) as <name>-<version>-<build>.conda."""
     entries = []
     for p in sorted(tree.rglob("*")):
@@ -163,6 +164,12 @@ def make_conda(out: Path, tree: Path, index: dict, about: dict, corrupt_hash: st
     (info / "info" / "index.json").write_text(json.dumps(index))
     (info / "info" / "about.json").write_text(json.dumps(about))
     (info / "info" / "paths.json").write_text(json.dumps({"paths": entries, "paths_version": 1}))
+    if solved_torch:
+        # the shape rattler-build 0.75 writes: finalized_dependencies.host.resolved[]
+        (info / "info" / "recipe").mkdir()
+        (info / "info" / "recipe" / "rendered_recipe.yaml").write_text(
+            "finalized_dependencies:\n  host:\n    resolved:\n"
+            f"      - name: pytorch\n        version: 2.8.0\n        build: {solved_torch}\n")
 
     def tar_zst(src: Path, arcname_root: str | None) -> bytes:
         buf = io.BytesIO()
@@ -366,6 +373,19 @@ def main() -> int:
                                     base_about(torch_build="cuda130_repack_py312_h2bed46fa_7")), tmp, **common)
     check(not ok and fails_on(out, "torch build"),
           "(c) a torch_build of another CUDA flavour than the build string FAILS")
+    ok, out = run_verify(make_conda(td / "out-tb3", good_tree(td / "tb3"), base_index(),
+                                    base_about(torch_build="cuda128_mkl_py312_hc0cb929_302")), tmp, **common)
+    check(not ok and fails_on(out, "torch build"),
+          "(c) a torch_build naming the mkl mirror (not the repack flavour the recipe pins) FAILS")
+    ok, out = run_verify(make_conda(td / "out-tb4", good_tree(td / "tb4"), base_index(),
+                                    base_about(torch_build="cuda128_repack_py312_h2bed46fa_5"),
+                                    solved_torch="cuda128_repack_py312_h2bed46fa_7"), tmp, **common)
+    check(not ok and fails_on(out, "host-solved pytorch"),
+          "(c) a torch_build stamp that disagrees with the host-solved pytorch in rendered_recipe.yaml FAILS")
+    ok, out = run_verify(make_conda(td / "out-tb5", good_tree(td / "tb5"), base_index(),
+                                    base_about(torch_build="cuda128_repack_py312_h2bed46fa_7"),
+                                    solved_torch="cuda128_repack_py312_h2bed46fa_7"), tmp, **common)
+    check(ok, "(c) ...and PASSES when the stamp equals the host-solved build")
     vc.PACKAGE_CFG_OVERRIDE["fx"] = {"links_torch": False}
     tf_index = base_index(build="cuda128_py312_hdeadbeef_0",
                           depends=["python", "__cuda", "python_abi 3.12.* *_cp312",
