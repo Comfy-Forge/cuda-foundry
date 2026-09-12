@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import threading
 import json
 import os
 import re
@@ -431,6 +432,32 @@ def conda_half(cfg: dict, cell: Cell, work: Path, env: dict, timeout: int,
 # wheel half
 # ---------------------------------------------------------------------------
 
+
+_WHEELHOUSE_LOCK = threading.Lock()
+
+
+def torch_wheelhouse(py: Path, specs: list[str], cu: str, work: Path, env: dict, timeout: int,
+                     constraints: Path | None = None):
+    """Download the torch-family wheels ONCE into work/wheelhouse and return
+    the pip flags that install from it.
+
+    PyTorch's index serves multi-GB wheels that pip's HTTP cache does not
+    reuse across venvs, so every cell was re-downloading torch plus its
+    nvidia-* libraries (~4 GB) and the install step timed out at 800-900 s
+    even with one job (2026-09-12). One download per (spec, cu) serialised
+    under a lock; `pip download` skips files it already has.
+    """
+    wh = work / "wheelhouse" / f"cu{cu}"
+    wh.mkdir(parents=True, exist_ok=True)
+    with _WHEELHOUSE_LOCK:
+        p = subprocess.run([str(py), "-m", "pip", "download", "--quiet", "--no-input", "-d", str(wh),
+                            "--index-url", f"{TORCH_INDEX}/cu{cu}"]
+                           + (["-c", str(constraints)] if constraints else []) + specs,
+                           capture_output=True, text=True, env=env, timeout=timeout)
+    if p.returncode != 0:
+        return None, p.stdout + p.stderr
+    return ["--no-index", "--find-links", str(wh)], p.stdout
+
 def wheel_half(cfg: dict, cell: Cell, work: Path, env: dict, timeout: int,
                run_op: bool) -> Result:
     t0 = time.time()
@@ -484,7 +511,10 @@ def wheel_half(cfg: dict, cell: Cell, work: Path, env: dict, timeout: int,
     if links_torch and torch_spec:
         # The consumer's torch, installed FIRST from PyTorch's own index, the
         # way the README says it must be -- the sidecar never advertises it.
-        p = run(pip + [torch_spec, "--index-url", f"{TORCH_INDEX}/cu{cell.cu}"], venv, env, timeout)
+        flags, dl = torch_wheelhouse(py, [torch_spec], cell.cu, work, env, timeout)
+        if flags is None:
+            return Result(cell, "wheel", "FAIL", "download torch", _first_error(dl), time.time() - t0, dl)
+        p = run(pip + [torch_spec] + flags, venv, env, timeout)
         if p.returncode != 0:
             return Result(cell, "wheel", "FAIL", "install torch", _first_error(p.stdout),
                           time.time() - t0, p.stdout)
@@ -504,7 +534,11 @@ def wheel_half(cfg: dict, cell: Cell, work: Path, env: dict, timeout: int,
         family = sorted({str(d).split()[0] for d in (cfg.get("run_deps") or []) if isinstance(d, str)}
                         & {"torchvision", "torchaudio"})
         if family:
-            p = run(pip + family + ["--index-url", f"{TORCH_INDEX}/cu{cell.cu}", "-c", str(constraints)],
+            flags, dl = torch_wheelhouse(py, family, cell.cu, work, env, timeout, constraints)
+            if flags is None:
+                return Result(cell, "wheel", "FAIL", f"download {' '.join(family)}", _first_error(dl),
+                              time.time() - t0, dl)
+            p = run(pip + family + flags + ["-c", str(constraints)],
                     venv, env, timeout)
             if p.returncode != 0:
                 return Result(cell, "wheel", "FAIL", f"install {' '.join(family)}", _first_error(p.stdout),
@@ -512,35 +546,42 @@ def wheel_half(cfg: dict, cell: Cell, work: Path, env: dict, timeout: int,
     else:
         constraints.write_text("")
 
-    p = run(pip + [spec, "-c", str(constraints),
-                   "--index-url", DEPS_INDEX, "--extra-index-url", PYPI],
-            venv, env, timeout)
-    log = p.stdout
+    # The exact published pair for THIS build number, by release URL: the
+    # deps twin from <subdir>-deps and its sidecar beside it. Going through
+    # the /deps/ index instead tests the index's freshness, not the wheel --
+    # with the index six-hourly, a version pin matched the previous build's
+    # twin and its older sidecar, and the cell labelled #2 installed #1
+    # (cumesh, 2026-09-12). The index is checked separately by verify_wheel
+    # and generate_index's own tests.
     index_note = ""
-    if p.returncode != 0 and "inconsistent Requires-Dist between its PEP 658" in p.stdout:
-        # pip enforces PEP 658's "MUST be identical": a sidecar that declares
-        # dependencies beside a wheel whose METADATA declares none is refused
-        # outright (pip 26.2.1, _check_sidecar_matches_wheel). That is a
-        # finding about the INDEX design, recorded as such -- but the wheel
-        # itself still has to be judged, so it is installed the way the index
-        # meant it to be: the wheel with --no-deps, then the sidecar's
-        # dependencies from PyPI, then the op.
-        index_note = ("pip refuses the /deps/ index: sidecar Requires-Dist != wheel METADATA "
-                      "(PEP 658 'MUST be identical', pip >= 26 enforces it)")
-        m = re.search(r"from (https://\S+?\.whl)(#sha256=\w+)?", p.stdout)
-        if not m:
-            return Result(cell, "wheel", "FAIL", "install wheel (+deps from PyPI)",
-                          index_note, time.time() - t0, log)
-        whl_url = m.group(1)
-        side = run(["curl", "-fsSL", whl_url + ".metadata"], venv, env, timeout)
-        log += side.stdout
-        reqs = [ln.split(":", 1)[1].strip() for ln in side.stdout.splitlines()
-                if ln.startswith("Requires-Dist:")]
-        p = run(pip + [whl_url, "--no-deps", "-c", str(constraints)], venv, env, timeout)
+    tag = f"{cell.subdir}-deps"
+    lst = subprocess.run(["gh", "release", "view", tag, "--repo", "Comfy-Forge/cuda-foundry",
+                          "--json", "assets", "-q", ".assets[].name"],
+                         capture_output=True, text=True)
+    want_prefix = f"{pypi_name.replace('-', '_')}-"
+    want_mid = f"-{cell.build_number}-cp{cell.py.replace('.', '')}-"
+    plat_tag = "win_amd64" if cell.subdir == "win-64" else "manylinux"
+    names = [a for a in lst.stdout.split()
+             if a.startswith(want_prefix) and want_mid in a and a.endswith(".whl") and plat_tag in a]
+    if len(names) != 1:
+        return Result(cell, "wheel", "FAIL", "locate deps twin",
+                      f"expected exactly one {want_prefix}*{want_mid}*{plat_tag}*.whl on release {tag}, "
+                      f"found {names}", time.time() - t0, lst.stdout + lst.stderr)
+    whl_url = f"{RELEASE}/{tag}/{names[0]}"
+    side = run(["curl", "-fsSL", whl_url + ".metadata"], venv, env, timeout)
+    log = side.stdout
+    if side.returncode != 0:
+        return Result(cell, "wheel", "FAIL", "fetch sidecar", _first_error(side.stdout),
+                      time.time() - t0, log)
+    reqs = [ln.split(":", 1)[1].strip() for ln in side.stdout.splitlines()
+            if ln.startswith("Requires-Dist:")]
+    p = run(pip + [whl_url, "--no-deps", "-c", str(constraints)], venv, env, timeout)
+    log += p.stdout
+    if p.returncode == 0 and reqs:
+        # The sidecar's own list, resolved from PyPI under the torch pin --
+        # what a consumer of /deps/ gets once the index lists this build.
+        p = run(pip + reqs + ["-c", str(constraints), "--index-url", PYPI], venv, env, timeout)
         log += p.stdout
-        if p.returncode == 0 and reqs:
-            p = run(pip + reqs + ["-c", str(constraints), "--index-url", PYPI], venv, env, timeout)
-            log += p.stdout
     if p.returncode != 0:
         return Result(cell, "wheel", "FAIL", "install wheel (+deps from PyPI)",
                       _first_error(p.stdout), time.time() - t0, log)
