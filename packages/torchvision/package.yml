@@ -91,6 +91,17 @@ run_deps:
   - numpy
   - pillow >=5.3.0,!=8.3.0,!=8.3.1
   - { if: 'linux and match(pytorch, ">=2.7,<2.14")', then: torchvision-extra-decoders }
+
+# The conda dependency above is honest because conda-forge builds
+# torchvision-extra-decoders per torch minor. PyPI's build is not pinned to
+# any torch: installed from the wheel's sidecar beside torch 2.8 it fails
+# to load -- `extra_decoders_lib.so: undefined symbol: _ZN5torch3jit...`
+# (clean_verify, 2026-09-12). So the wheel must not advertise it; a pip
+# user who wants avif/heic installs a matching build themselves, and
+# decode_avif raises its usual "pip install torchvision-extra-decoders"
+# until then. Conda keeps the dependency.
+sidecar_omit:
+  - torchvision-extra-decoders
 build_deps:
   # ALSO in build:, while the import library stays in host:. torchvision does
   # not ask the compiler whether nvjpeg exists -- it stats
