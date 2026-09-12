@@ -1,0 +1,39 @@
+{
+ "arch": "x86_64",
+ "build": "cuda128_torch28_py312_h6651153_1",
+ "build_number": 1,
+ "depends": [
+  "python",
+  "__cuda",
+  "cuda-cudart >=12.8,<13.0a0",
+  "pytorch 2.8.* cuda128_repack_*",
+  "numpy",
+  "nvdiffrast",
+  "imageio",
+  "cuda-version >=12.8,<13",
+  "vc >=14.3,<15",
+  "vc14_runtime >=14.44.35208",
+  "ucrt >=10.0.20348.0",
+  "python_abi 3.12.* *_cp312",
+  "libtorch >=2.8.0,<2.9.0a0"
+ ],
+ "license": "LicenseRef-NVIDIA-Source-Code-License-nvdiffrec",
+ "md5": "d8162295b5367aeafcd9b4e5d2c94ba9",
+ "name": "nvdiffrec-render",
+ "platform": "win",
+ "provenance": {
+  "arch_list": "7.0 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "12.8",
+  "prebuilt_wheel_used": false,
+  "run_id": "34695870335",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34695870335",
+  "source_rev": "a3e73909a01887c8a135235ff860dd23a045cc1b",
+  "torch_build": "cuda128_repack_py312_h2bed46fa_5"
+ },
+ "sha256": "800c9c32795ca6e54d4f56bf55c70a2d5c05e2d190acf5ac6755abf850008738",
+ "size": 941436,
+ "subdir": "win-64",
+ "timestamp": 1789218924774,
+ "version": "0.0.1"
+}
