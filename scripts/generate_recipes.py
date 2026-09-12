@@ -261,7 +261,13 @@ def render(folder: str, cfg: dict, env) -> str:
         shard_sources=cfg.get("shard_sources") or [],
         shard_partition=cfg.get("shard_partition") or "",
         build_subdir=cfg.get("build_subdir") or "",
-        verify_imports=_dedupe([verify.get("import") or cfg.get("import_name") or cfg["name"]]
+        # torch first for a torch-linked package: on win-64 a .pyd linking
+        # c10.dll / torch_cpu.dll can only be loaded after `import torch` has
+        # registered torch/lib as a DLL directory, so an import test naming
+        # the raw extension module (custom-rasterizer-hy3d2: run 34695817962)
+        # fails with "DLL load failed" in an env where torch itself imports.
+        verify_imports=_dedupe((["torch"] if cfg.get("links_torch", True) else [])
+                               + [verify.get("import") or cfg.get("import_name") or cfg["name"]]
                                + list(verify.get("imports") or [])),
         op_requires=verify.get("op_requires") or [],
         allow_dso=verify.get("allow_dso") or [],

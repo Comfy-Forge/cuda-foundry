@@ -380,6 +380,7 @@ tests:
   #    own dependency check against PyPI names in verify_wheel.
   - python:
       imports:
+        - torch
         - torch_sparse
       pip_check: false
   # 2. The package's own minimal op on real hardware (package.yml verify.op),

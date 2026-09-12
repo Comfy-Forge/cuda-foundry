@@ -386,6 +386,7 @@ tests:
   #    own dependency check against PyPI names in verify_wheel.
   - python:
       imports:
+        - torch
         - mmcv
         - mmcv.ops
         - mmcv.runner

@@ -396,6 +396,7 @@ tests:
   #    own dependency check against PyPI names in verify_wheel.
   - python:
       imports:
+        - torch
         - detectron2
         - detectron2.engine
         - detectron2.data

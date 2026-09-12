@@ -381,6 +381,7 @@ tests:
   #    own dependency check against PyPI names in verify_wheel.
   - python:
       imports:
+        - torch
         - pytorch3d
         - pytorch3d.io
         - pytorch3d.ops

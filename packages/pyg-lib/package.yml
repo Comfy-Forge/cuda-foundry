@@ -133,6 +133,12 @@ build_env:
   FORCE_NINJA: "1"
   CMAKE_BUILD_PARALLEL_LEVEL: $MAX_JOBS
   NVCC_PREPEND_FLAGS: -I$SRC_DIR/third_party/cccl/libcudacxx/include -I$SRC_DIR/third_party/cccl/cub -I$SRC_DIR/third_party/cccl/thrust $NVCC_PREPEND_FLAGS
+# win-64: there is no -ccbin to preserve (MSVC is found through vcvars, and
+# conda-forge's cuda-nvcc activation sets no NVCC_PREPEND_FLAGS there), and
+# the file-backed build_win.py refuses a value that still holds an unexpanded
+# `$` -- run 34695884856. Same include dirs, no self-reference.
+build_env_win:
+  NVCC_PREPEND_FLAGS: -I$SRC_DIR/third_party/cccl/libcudacxx/include -I$SRC_DIR/third_party/cccl/cub -I$SRC_DIR/third_party/cccl/thrust
 
 # conda-forge ships `pyg-lib` (0.6.0: cpu builds on linux-64/win-64/osx and
 # cuda129 builds on linux-64 for torch 2.9/2.10, read from anaconda.org on

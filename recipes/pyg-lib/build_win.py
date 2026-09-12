@@ -64,7 +64,7 @@ def env(name: str, default: str | None = None) -> str:
 # is needed. The recipe's own build.script.env cannot carry these: rattler-build
 # sets those values literally, with no expansion, and "$PREFIX/include" would
 # reach setup.py as those exact 15 characters.
-CUW_BUILD_ENV = {"CMAKE_BUILD_PARALLEL_LEVEL": "$MAX_JOBS", "FORCE_NINJA": "1", "NVCC_PREPEND_FLAGS": "-I$SRC_DIR/third_party/cccl/libcudacxx/include -I$SRC_DIR/third_party/cccl/cub -I$SRC_DIR/third_party/cccl/thrust $NVCC_PREPEND_FLAGS"}  # from package.yml build_env
+CUW_BUILD_ENV = {"CMAKE_BUILD_PARALLEL_LEVEL": "$MAX_JOBS", "FORCE_NINJA": "1", "NVCC_PREPEND_FLAGS": "-I$SRC_DIR/third_party/cccl/libcudacxx/include -I$SRC_DIR/third_party/cccl/cub -I$SRC_DIR/third_party/cccl/thrust"}  # from package.yml build_env
 
 
 def apply_build_env() -> None:
