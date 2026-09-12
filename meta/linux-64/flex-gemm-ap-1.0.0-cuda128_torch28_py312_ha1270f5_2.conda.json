@@ -1,0 +1,39 @@
+{
+ "arch": "x86_64",
+ "build": "cuda128_torch28_py312_ha1270f5_2",
+ "build_number": 2,
+ "depends": [
+  "python",
+  "__cuda",
+  "cuda-cudart >=12.8,<13.0a0",
+  "pytorch 2.8.* cuda128_repack_*",
+  "filelock",
+  "triton",
+  "tqdm",
+  "libstdcxx >=13",
+  "libgcc >=13",
+  "cuda-version >=12.8,<13",
+  "__glibc >=2.28,<3.0.a0",
+  "libtorch >=2.8.0,<2.9.0a0",
+  "python_abi 3.12.* *_cp312"
+ ],
+ "license": "MIT",
+ "md5": "ce4e682d9af8dd827a5e9b1256fbc07f",
+ "name": "flex-gemm-ap",
+ "platform": "linux",
+ "provenance": {
+  "arch_list": "7.0 7.5 8.0 8.6 9.0+PTX 10.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "12.8",
+  "prebuilt_wheel_used": false,
+  "run_id": "34706214538",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34706214538",
+  "source_rev": "3432bc7ce157b0f668ecf0d856d69353816f5c47",
+  "torch_build": "cuda128_repack_py312_h2bed46fa_7"
+ },
+ "sha256": "d1a417ca9a63e1078fe993453622906559347807c8c079d12d27a322c5a1e54c",
+ "size": 420757,
+ "subdir": "linux-64",
+ "timestamp": 1789232021871,
+ "version": "1.0.0"
+}
