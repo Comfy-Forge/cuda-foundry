@@ -264,7 +264,7 @@ jobs:
           # the cell so the policy file stays the single source of truth.
           if [[ "${{ matrix.cell.platform }}" == win-* ]]; then
             VARIANT_CONFIG=defaults/variants-win.yaml
-            MSVC=$(python -c "import yaml,sys; p=yaml.safe_load(open('defaults/policy.yml'))['host_msvc']; print(p['by_cuda'].get('${{ matrix.cell.cuda }}', p['default']))")
+            MSVC=$(python -c "import yaml,sys; p=yaml.safe_load(open('defaults/policy.yml'))['host_msvc']; print(p['by_cuda'].get('${{ matrix.cell.cuda }}', p['default']))" | tr -d '\r')
             echo "win-64: MSVC package $MSVC for CUDA ${{ matrix.cell.cuda }}"
             COMPILER_ARGS=(--variant c_compiler="$MSVC" --variant cxx_compiler="$MSVC")
           else
@@ -466,7 +466,7 @@ jobs:
           # the cell so the policy file stays the single source of truth.
           if [[ "${{ matrix.cell.platform }}" == win-* ]]; then
             VARIANT_CONFIG=defaults/variants-win.yaml
-            MSVC=$(python -c "import yaml,sys; p=yaml.safe_load(open('defaults/policy.yml'))['host_msvc']; print(p['by_cuda'].get('${{ matrix.cell.cuda }}', p['default']))")
+            MSVC=$(python -c "import yaml,sys; p=yaml.safe_load(open('defaults/policy.yml'))['host_msvc']; print(p['by_cuda'].get('${{ matrix.cell.cuda }}', p['default']))" | tr -d '\r')
             echo "win-64: MSVC package $MSVC for CUDA ${{ matrix.cell.cuda }}"
             COMPILER_ARGS=(--variant c_compiler="$MSVC" --variant cxx_compiler="$MSVC")
           else
@@ -579,18 +579,21 @@ jobs:
           shopt -s nullglob
           files=("$RUNNER_TEMP"/out/*/*.conda)
           [ ${#files[@]} -gt 0 ] || { echo "::error::no .conda produced"; exit 1; }
-          needs_gpu=$(python -c "import yaml,sys; d=yaml.safe_load(open(sys.argv[1])) or {}; print(str((d.get('verify') or {}).get('import_needs_gpu', False)).lower())" "packages/$CELL_PKG/package.yml")
+          needs_gpu=$(python -c "import yaml,sys; d=yaml.safe_load(open(sys.argv[1])) or {}; print(str((d.get('verify') or {}).get('import_needs_gpu', False)).lower())" "packages/$CELL_PKG/package.yml" | tr -d '\r')
           if [ "$needs_gpu" = "true" ]; then
             echo "::warning::$CELL_PKG declares verify.import_needs_gpu: true -- its import test cannot run on a GPU-less runner and is SKIPPED here. tools/clean_verify.py on a GPU box is the only clean-environment check this package gets."
             exit 0
           fi
-          LOCAL_CHANNEL="$(python -c "import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())" "$RUNNER_TEMP/out")"
+          # tr -d: on the Windows runner python prints CRLF and $(...) strips
+          # only the LF; the URL ended in \r and pixi refused the manifest
+          # with "invalid character in string" (run 34694176558).
+          LOCAL_CHANNEL="$(python -c "import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())" "$RUNNER_TEMP/out" | tr -d '\r')"
           for f in "${files[@]}"; do
             # Indices of the entries that need no GPU (python imports,
             # package_contents), read from the artifact itself. Exit 3 means
             # the artifact carries no tests at all, which is a template
             # regression and fails here rather than passing vacuously.
-            idx="$(python tools/artifact_tests.py "$f" --kind gpu-less --tmp "$RUNNER_TEMP/artifact-tests")" \
+            idx="$(python tools/artifact_tests.py "$f" --kind gpu-less --tmp "$RUNNER_TEMP/artifact-tests" | tr -d '\r')" \
               || { echo "::error::$(basename "$f") carries no info/tests/tests.yaml -- the recipe's tests: block is missing, so nothing would ever import this package in a clean environment"; exit 1; }
             [ -n "$idx" ] || { echo "::error::$(basename "$f") carries tests but none is GPU-less; the import test is missing from the recipe"; exit 1; }
             echo "GPU-less test entries in $(basename "$f"): $(echo $idx | tr '\n' ' ')"
@@ -630,7 +633,7 @@ jobs:
           f="${files[0]}"
           read -r NAME VERSION BUILD < <(rattler-build package inspect "$f" --json \
             | python -c "import json,sys; i=json.load(sys.stdin)['index']; print(i['name'], i['version'], i['build'])")
-          LOCAL_CHANNEL="$(python -c "import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())" "$RUNNER_TEMP/out")"
+          LOCAL_CHANNEL="$(python -c "import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())" "$RUNNER_TEMP/out" | tr -d '\r')"
           DEPENV="$RUNNER_TEMP/depenv"
           rm -rf "$DEPENV"; mkdir -p "$DEPENV"
           cat > "$DEPENV/pixi.toml" <<EOF
@@ -685,7 +688,7 @@ jobs:
           # The compiler the cell was built with, so the .comment / PE linker
           # gate checks the VERSION and not only the vendor.
           if [[ "$CELL_PLATFORM" == win-* ]]; then
-            MSVC=$(python -c "import yaml,sys; p=yaml.safe_load(open('defaults/policy.yml'))['host_msvc']; print(p['by_cuda'].get(sys.argv[1], p['default']))" "$CELL_CUDA")
+            MSVC=$(python -c "import yaml,sys; p=yaml.safe_load(open('defaults/policy.yml'))['host_msvc']; print(p['by_cuda'].get(sys.argv[1], p['default']))" "$CELL_CUDA" | tr -d '\r')
             TOOLCHAIN=(--expect-msvc "$MSVC")
           else
             TOOLCHAIN=(--expect-gcc "$CELL_GCC")
@@ -778,7 +781,7 @@ jobs:
           conda_file=("$RUNNER_TEMP"/out/*/*.conda)
           TOOLCHAIN=()
           if [[ "$CELL_PLATFORM" == win-* ]]; then
-            MSVC=$(python -c "import yaml,sys; p=yaml.safe_load(open('defaults/policy.yml'))['host_msvc']; print(p['by_cuda'].get(sys.argv[1], p['default']))" "$CELL_CUDA")
+            MSVC=$(python -c "import yaml,sys; p=yaml.safe_load(open('defaults/policy.yml'))['host_msvc']; print(p['by_cuda'].get(sys.argv[1], p['default']))" "$CELL_CUDA" | tr -d '\r')
             TOOLCHAIN=(--expect-msvc "$MSVC")
           fi
           python tools/verify_wheel.py "$RUNNER_TEMP"/wheels/*.whl \
@@ -938,7 +941,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          LOCAL_CHANNEL="$(python -c "import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())" "$RUNNER_TEMP/out")"
+          LOCAL_CHANNEL="$(python -c "import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())" "$RUNNER_TEMP/out" | tr -d '\r')"
           for f in "$RUNNER_TEMP"/out/noarch/*.conda; do
             python tools/artifact_tests.py "$f" --summary --tmp "$RUNNER_TEMP/artifact-tests" \
               || { echo "::error::$(basename "$f") carries no tests"; exit 1; }
