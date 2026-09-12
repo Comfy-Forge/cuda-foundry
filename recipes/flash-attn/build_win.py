@@ -896,6 +896,16 @@ def main() -> int:
     mode = env("CUW_MODE", "full")
     if mode not in ("full", "shard", "link"):
         die(f"CUW_MODE={mode!r} is not a mode; expected full, shard or link")
+    if mode == "full":
+        # A full build has no shard cache to replay, so ccache buys nothing
+        # here -- and a CMake-driven package finds ccache.exe on PATH by
+        # itself (torchaudio's CMakeLists sets CMAKE_CXX_COMPILER_LAUNCHER
+        # whenever it is found). With MSVC that produced a "successful"
+        # compile of ffmpeg.cpp whose .obj was not on disk at link time
+        # (run 34695917406). The design already says full mode uses no
+        # ccache; make it true for the paths that auto-detect it too.
+        os.environ["CCACHE_DISABLE"] = "1"
+        log("=== CUW_MODE=full: CCACHE_DISABLE=1 (no shard cache to replay)")
 
     prefix = Path(env("PREFIX"))
     build_prefix = Path(env("BUILD_PREFIX"))
