@@ -510,7 +510,12 @@ def wheel_half(cfg: dict, cell: Cell, work: Path, env: dict, timeout: int,
         return Result(cell, "wheel", "FAIL", "conda-torch base env (pixi install)", _first_error(p.stdout),
                       time.time() - t0, log)
     py = venv / ".pixi" / "envs" / "default" / "bin" / "python"
-    pip = [str(py), "-m", "pip", "install", "--quiet", "--no-input"]
+    # --only-binary :all: on EVERY install here: a sidecar dependency that
+    # PyPI has only as an sdist must be refused, never compiled -- pip picked
+    # torch_scatter's sdist and started a build on this box (2026-09-12,
+    # torch-sparse). Local compilation is forbidden, and the wheel check must
+    # not be the thing that does it.
+    pip = [str(py), "-m", "pip", "install", "--quiet", "--no-input", "--only-binary", ":all:"]
     constraints = venv / "constraints.txt"
     if links_torch and torch_spec:
         got = subprocess.run([str(py), "-c", "import torch;print(torch.__version__)"],
