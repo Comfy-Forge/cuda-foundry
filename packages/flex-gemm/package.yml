@@ -67,7 +67,7 @@ run_deps:
 # in the matrix; only the conda artifact is withheld where its run: list
 # cannot be honest (see triton above). New field: the loader/matrix wiring is
 # S1's (scripts/), recorded here as the package's own statement.
-conda_platforms: [linux-64]
+conda_platforms: [linux-64, linux-aarch64]
 
 # hilbert.h includes <cuda.h> and <cuda_runtime.h>; nothing else from the
 # toolkit. The farm's `extra_cuda_components: cufft_dev nvtx` was copied from
