@@ -1,0 +1,43 @@
+{
+ "arch": "aarch64",
+ "build": "cuda130_torch211_py312_h0ef1a56_0",
+ "build_number": 0,
+ "depends": [
+  "python",
+  "__cuda",
+  "cuda-cudart >=13.0,<14.0a0",
+  "pytorch 2.11.* cuda130_repack_*",
+  "iopath",
+  "numpy",
+  "pillow",
+  "libstdcxx >=13",
+  "libgcc >=13",
+  "__glibc >=2.28,<3.0.a0",
+  "cuda-version >=13.0,<14",
+  "arm-variant * sbsa",
+  "python_abi 3.12.* *_cp312",
+  "libtorch >=2.11.0,<2.12.0a0"
+ ],
+ "license": "BSD-3-Clause AND MIT",
+ "md5": "413766c68d72af6313067253d54aa530",
+ "name": "pytorch3d",
+ "platform": "linux",
+ "provenance": {
+  "arch_list": "8.0 8.7 9.0+PTX 10.0 11.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "13.0",
+  "prebuilt_wheel_used": false,
+  "run_id": "34749333123",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34749333123",
+  "source_rev": "33824be3cbc87a7dd1db0f6a9a9de9ac81b2d0ba",
+  "torch_build": "cuda130_repack_py312_hc97f5829_0"
+ },
+ "purls": [
+  "pkg:pypi/pytorch3d@0.7.9"
+ ],
+ "sha256": "7894580111834e0e710e9a5f71d1581613a8cd8d24e96c4d98f6575e666e9265",
+ "size": 11303313,
+ "subdir": "linux-aarch64",
+ "timestamp": 1789292130599,
+ "version": "0.7.9"
+}
