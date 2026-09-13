@@ -75,7 +75,7 @@ python_min: "3.10"
 #   gh workflow run build.yml -f platform=win-64 -f package=fused-ssim ...
 # which generate_matrix.py honours because an explicit --platform overrides
 # this list. Promote it here once win-64 cells pass on their own.
-platforms: ["linux-64"]
+platforms: ["linux-64", "linux-aarch64"]
 
 # Subdir <-> the conda-torch subdir whose torch builds we compile against.
 # Identical today; kept explicit so a cross-compiled lane (aarch64 built on
