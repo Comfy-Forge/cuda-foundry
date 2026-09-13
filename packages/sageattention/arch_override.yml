@@ -29,3 +29,22 @@ arch_list_by_cuda:
   '12.9': 8.0 8.6 8.9 9.0 12.0+PTX
   '13.0': 8.0 8.6 8.9 9.0 12.0+PTX
   '13.2': 8.0 8.6 8.9 9.0 12.0+PTX
+
+# aarch64 rows: identical to the x86 rows above, and declared explicitly rather
+# than left to fall through. This package's arch set is fixed by UPSTREAM's own
+# build logic (a hardcoded target list / a SUPPORTED_ARCHS filter / arch-
+# conditional object libraries), not by the shared policy, and that derivation
+# is platform-independent -- so the same cubins are produced on ARM and the SASS
+# census matches exactly. generate_matrix resolves the linux-aarch64 branch
+# BEFORE the generic arch_list_by_cuda, so without this the package would fall
+# through to arch_policy_aarch64 (which carries the Jetson 8.7 and Thor 11.0
+# arches this source does NOT build) and every ARM artifact would fail the
+# census. Extending Jetson/Thor coverage for this package is a follow-up gated
+# on upstream support and an ARM GPU to verify on; today it mirrors x86.
+arch_list_by_cuda_aarch64:
+  '12.4': 8.0 8.6 8.9 9.0
+  '12.6': 8.0 8.6 8.9 9.0
+  '12.8': 8.0 8.6 8.9 9.0 12.0+PTX
+  '12.9': 8.0 8.6 8.9 9.0 12.0+PTX
+  '13.0': 8.0 8.6 8.9 9.0 12.0+PTX
+  '13.2': 8.0 8.6 8.9 9.0 12.0+PTX
