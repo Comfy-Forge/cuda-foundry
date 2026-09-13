@@ -1,0 +1,38 @@
+{
+ "arch": "aarch64",
+ "build": "cuda130_torch211_py312_h0ef1a56_0",
+ "build_number": 0,
+ "depends": [
+  "python",
+  "__cuda",
+  "cuda-cudart >=13.0,<14.0a0",
+  "pytorch 2.11.* cuda130_repack_*",
+  "numpy",
+  "__glibc >=2.28,<3.0.a0",
+  "cuda-version >=13.0,<14",
+  "arm-variant * sbsa",
+  "libgcc >=13",
+  "libstdcxx >=13",
+  "libtorch >=2.11.0,<2.12.0a0",
+  "python_abi 3.12.* *_cp312"
+ ],
+ "license": "LicenseRef-NVIDIA-Source-Code-License-1-Way-Commercial",
+ "md5": "1ac462984b2fd50ad9d0d8fa33a09a44",
+ "name": "nvdiffrast",
+ "platform": "linux",
+ "provenance": {
+  "arch_list": "8.0 8.7 9.0+PTX 10.0 11.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "13.0",
+  "prebuilt_wheel_used": false,
+  "run_id": "34729939855",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34729939855",
+  "source_rev": "253ac4fcea7de5f396371124af597e6cc957bfae",
+  "torch_build": "cuda130_repack_py312_hc97f5829_0"
+ },
+ "sha256": "2277afbec552e9056b2d2d3ece0a8788dc71fd5656203a2851c081fd538779dc",
+ "size": 2131482,
+ "subdir": "linux-aarch64",
+ "timestamp": 1789262130764,
+ "version": "0.4.0"
+}
