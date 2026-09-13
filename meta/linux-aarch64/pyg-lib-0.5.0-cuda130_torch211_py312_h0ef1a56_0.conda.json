@@ -1,0 +1,37 @@
+{
+ "arch": "aarch64",
+ "build": "cuda130_torch211_py312_h0ef1a56_0",
+ "build_number": 0,
+ "depends": [
+  "python",
+  "__cuda",
+  "cuda-cudart >=13.0,<14.0a0",
+  "pytorch 2.11.* cuda130_repack_*",
+  "cuda-version >=13.0,<14",
+  "arm-variant * sbsa",
+  "libgcc >=13",
+  "libstdcxx >=13",
+  "__glibc >=2.28,<3.0.a0",
+  "libtorch >=2.11.0,<2.12.0a0",
+  "python_abi 3.12.* *_cp312"
+ ],
+ "license": "MIT AND BSD-3-Clause AND Apache-2.0",
+ "md5": "45f8d7bbca0638bedcc6d0f7c20a2d42",
+ "name": "pyg-lib",
+ "platform": "linux",
+ "provenance": {
+  "arch_list": "8.0 8.7 9.0+PTX 10.0 11.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "13.0",
+  "prebuilt_wheel_used": false,
+  "run_id": "34730194205",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34730194205",
+  "source_rev": "ff87d1bb043fdce072ebba1d87d06c59188affcc",
+  "torch_build": "cuda130_repack_py312_hc97f5829_0"
+ },
+ "sha256": "67e3a6fafb7661e2a9e0070e5fa63a86df00382c4f8957d4a057fd4d900164c3",
+ "size": 2513114,
+ "subdir": "linux-aarch64",
+ "timestamp": 1789262729551,
+ "version": "0.5.0"
+}
