@@ -74,7 +74,15 @@ run_deps:
 # in the matrix; only the conda artifact is withheld where its run: list
 # cannot be honest (see triton above). New field: the loader/matrix wiring is
 # S1's (scripts/), recorded here as the package's own statement.
-conda_platforms: [linux-64]
+#
+# linux-aarch64 ADDED 2026-09-13: the win-64 exclusion is specifically that no
+# conda channel ships triton for Windows. That reasoning does NOT apply to
+# aarch64 -- conda-torch's pytorch 2.11 cu130 depends on triton 3.6.0, which
+# exists on the linux-aarch64 subdir (conda-forge builds triton for linux
+# aarch64, not only linux-64), so the `{if: linux, then: triton}` run dep is
+# satisfiable there and the .conda's run list is honest. Without this the
+# aarch64 wheel would ship but the .conda would be withheld like win-64's.
+conda_platforms: [linux-64, linux-aarch64]
 
 # The kernels include torch headers and cuda_runtime only; the farm's
 # `extra_cuda_components: cufft_dev nvtx` matched no include at the pinned
