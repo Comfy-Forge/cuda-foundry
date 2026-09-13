@@ -26,6 +26,13 @@ pypi_project: null
 
 source_repo: ronghanghu/cc_torch
 source_rev: 446e9360ed10d3c8d03925ccb5f220ccb62009de
+# Drops setup.py's `-ccbin={CC}` nvcc append: on linux-aarch64 CC is
+# "aarch64-conda-linux-gnu-cc", whose "aarch64" contains the substring "arch",
+# and torch's _get_cuda_arch_flags emits no -gencode once any nvcc flag
+# contains "arch" -- so nvcc built sm_75 alone and failed the SASS census. The
+# conda env already passes -ccbin=$CXX via NVCC_PREPEND_FLAGS, so the append
+# was redundant on every platform.
+patch_script: packages/cc-torch/patches/cc_torch.py
 
 links_torch: true   # compiled against libtorch: one build per (cuda x torch)
 
