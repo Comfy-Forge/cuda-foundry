@@ -1,0 +1,39 @@
+{
+ "arch": "aarch64",
+ "build": "cuda130_torch211_py312_h0ef1a56_0",
+ "build_number": 0,
+ "depends": [
+  "python",
+  "__cuda",
+  "cuda-cudart >=13.0,<14.0a0",
+  "pytorch 2.11.* cuda130_repack_*",
+  "tqdm",
+  "numpy",
+  "libstdcxx >=13",
+  "libgcc >=13",
+  "cuda-version >=13.0,<14",
+  "arm-variant * sbsa",
+  "__glibc >=2.28,<3.0.a0",
+  "libtorch >=2.11.0,<2.12.0a0",
+  "python_abi 3.12.* *_cp312"
+ ],
+ "license": "MIT AND LicenseRef-NVIDIA-Source-Code-License-instant-ngp AND MPL-2.0",
+ "md5": "4a967ffc44d49ca881c903a723ebf256",
+ "name": "cumesh-vb",
+ "platform": "linux",
+ "provenance": {
+  "arch_list": "8.0 8.7 9.0+PTX 10.0 11.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "13.0",
+  "prebuilt_wheel_used": false,
+  "run_id": "34730085617",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34730085617",
+  "source_rev": "d10e54c30ddd03d11472c1431693f985501c7966",
+  "torch_build": "cuda130_repack_py312_hc97f5829_0"
+ },
+ "sha256": "c27de2c8b0e518386b820ec0db4a320259cab9ac2c48c1a0e3f2c542e3201705",
+ "size": 4279598,
+ "subdir": "linux-aarch64",
+ "timestamp": 1789263154858,
+ "version": "1.0"
+}
