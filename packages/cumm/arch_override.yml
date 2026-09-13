@@ -22,6 +22,13 @@
 # only has to parse. Kept per-CUDA anyway, because it is the same table
 # spconv reads through cumm's get_cuda_arch_flags(), and a narrowed list
 # that nothing checks is how spconv once lost its Blackwell SASS.
+#
+# linux-aarch64 does NOT read these rows: they are x86 (sm_75/8.9, and no
+# Jetson 8.7 / Thor 11.0). generate_matrix.arch_list_for resolves the ARM
+# subdir from arch_policy_aarch64 BEFORE this generic arch_list_by_cuda, so
+# the ARM build gets 8.0 8.7 9.0+PTX 10.0 11.0 12.0+PTX on cu13.0. cumm's
+# supported_arches was extended with 8.7 for exactly that (packages/cumm/
+# patches/cumm.py). To pin ARM rows explicitly, add arch_list_by_cuda_aarch64.
 arch_list_by_cuda:
   "12.4": 7.5 8.0 8.6 8.9 9.0+PTX
   "12.6": 7.5 8.0 8.6 8.9 9.0+PTX

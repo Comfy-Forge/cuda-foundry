@@ -176,13 +176,25 @@ def arch_list_for(cfg: dict, arch_policy: dict, cuda: str, torch_version: str,
         by_cuda_win = cfg.get("arch_list_by_cuda_win") or {}
         if cuda in by_cuda_win:
             return str(by_cuda_win[cuda])
-    by_cuda = cfg.get("arch_list_by_cuda") or {}
-    if cuda in by_cuda:
-        return str(by_cuda[cuda])
+    # aarch64 is a separate arch world (arch_policy_aarch64), and a package's
+    # generic arch_list_by_cuda / arch_list carries x86 rows: sm_75 and 8.9,
+    # which no server/Jetson ARM part has, and it OMITS the Jetson (8.7) and
+    # Thor (11.0) archs arch_policy_aarch64 exists to guarantee. So the ARM
+    # branch is resolved BEFORE the generic rows, exactly as win-64 is -- a
+    # package with an x86 override no longer silently leaks it onto ARM. A
+    # package that genuinely needs per-CUDA ARM rows spells them in
+    # arch_list_by_cuda_aarch64; pyg-lib's own arch_override.yml already
+    # documents that ARM is meant to be governed by arch_policy_aarch64.
     if subdir == "linux-aarch64":
+        by_cuda_arm = cfg.get("arch_list_by_cuda_aarch64") or {}
+        if cuda in by_cuda_arm:
+            return str(by_cuda_arm[cuda])
         if cfg.get("arch_list_aarch64"):
             return str(cfg["arch_list_aarch64"])
         return str(arch_policy.get("arch_policy_aarch64", {}).get(cuda, "")).replace(";", " ")
+    by_cuda = cfg.get("arch_list_by_cuda") or {}
+    if cuda in by_cuda:
+        return str(by_cuda[cuda])
     if cfg.get("arch_list"):
         return str(cfg["arch_list"])
     minor = ".".join(torch_version.split(".")[:2])

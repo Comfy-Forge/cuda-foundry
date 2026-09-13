@@ -91,10 +91,18 @@ def sub_once(path: pathlib.Path, old: str, new: str, what: str) -> None:
     print(f"cumm patch: {what} -> {path}")
 
 
-# ── 1. Blackwell / Thor in the arch table ─────────────────────────────────
+# ── 1. Blackwell / Thor / Jetson in the arch table ────────────────────────
+# 0.7.11's table stops at 9.0 and get_cuda_arch_flags() raises "Unknown CUDA
+# arch" on anything else. 0.8.2 added 10.0/11.0/12.0 (Blackwell + Thor).
+# 8.7 (Jetson Orin) is added on top of that: it is absent from every x86 row
+# but present in arch_policy_aarch64 for every cu line, so a linux-aarch64
+# build -- which is governed by that policy, not by this package's x86
+# arch_list_by_cuda -- passes "8.7" through cumm's table (and spconv reads
+# the same table through cumm.get_cuda_arch_flags). nvcc has accepted sm_87
+# since CUDA 11.4; it is inert on x86, where no row ever requests it.
 sub_once(pathlib.Path("cumm/common.py"),
          "        '8.6', '8.9', '9.0'\n    ]",
-         "        '8.6', '8.9', '9.0', '10.0', '11.0', '12.0'\n    ]",
+         "        '8.6', '8.7', '8.9', '9.0', '10.0', '11.0', '12.0'\n    ]",
          "supported_arches table")
 
 # ── 2. bf16 GEMM params ───────────────────────────────────────────────────
