@@ -1,0 +1,48 @@
+{
+ "arch": "aarch64",
+ "build": "cuda130_torch211_py312_h0ef1a56_0",
+ "build_number": 0,
+ "constrains": [
+  "gsplat-maskgaussian <0.0a0"
+ ],
+ "depends": [
+  "python",
+  "__cuda",
+  "cuda-cudart >=13.0,<14.0a0",
+  "pytorch 2.11.* cuda130_repack_*",
+  "numpy",
+  "jaxtyping",
+  "rich >=12",
+  "packaging",
+  "typing_extensions",
+  "libgcc >=13",
+  "libstdcxx >=13",
+  "cuda-version >=13.0,<14",
+  "arm-variant * sbsa",
+  "__glibc >=2.28,<3.0.a0",
+  "libtorch >=2.11.0,<2.12.0a0",
+  "python_abi 3.12.* *_cp312"
+ ],
+ "license": "Apache-2.0 AND MIT",
+ "md5": "7c07382ecf5ce28d718c8e436a212930",
+ "name": "gsplat",
+ "platform": "linux",
+ "provenance": {
+  "arch_list": "8.0 8.7 9.0+PTX 10.0 11.0 12.0+PTX",
+  "built_from_source": true,
+  "cuda_compiler_version": "13.0",
+  "prebuilt_wheel_used": false,
+  "run_id": "34729928317",
+  "run_url": "https://github.com/Comfy-Forge/cuda-foundry/actions/runs/34729928317",
+  "source_rev": "937e29912570c372bed6747a5c9bf85fed877bae",
+  "torch_build": "cuda130_repack_py312_hc97f5829_0"
+ },
+ "purls": [
+  "pkg:pypi/gsplat@1.5.3"
+ ],
+ "sha256": "a0f76cdfce0e50bff4003393597cf2ef8e6234c85b2940c0d4d9025fc4f30b5e",
+ "size": 14922320,
+ "subdir": "linux-aarch64",
+ "timestamp": 1789262604107,
+ "version": "1.5.3"
+}
