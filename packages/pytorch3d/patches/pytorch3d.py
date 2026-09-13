@@ -31,15 +31,31 @@ version): every cell's build consumes the same tree.
    scaffolding (its package_dir is added separately in setup.py and stays;
    only the entry points go).
 
-NOT carried from the farm: its CUDA >= 13 branch, which appended
-`-static-global-template-stub=false` to NVCC_FLAGS via $GITHUB_ENV. That is a
-build-time, per-cell decision (cuda_mm() is read from the environment on the
-build machine there); here the patch runs once at fetch time with no cell in
-view, and $GITHUB_ENV is not a channel into rattler-build's build script. The
-flag only matters for CUDA 13.x (pulsar's explicitly-instantiated __global__
-templates lose external linkage under 13's new default); this repo's first
-cell is CUDA 12.8. When a 13.x cell is added, express it as a per-CUDA
-package.yml knob, not as fetch-time code that cannot know the cell.
+4. CUDA >= 13: pulsar's explicitly-instantiated __global__ templates
+   (`calc_signature<true>`, `calc_gradients<true>`, `render<true>`, ... --
+   the device instantiations, ISONDEVICE=true, defined in separate .gpu.cu
+   TUs) lose external linkage under CUDA 13's new default, so every TU that
+   references them fails to LINK with "undefined reference"
+   (measured, run 34730072697, linux-aarch64 cu130). The farm fixed this by
+   appending `-static-global-template-stub=false` to NVCC_FLAGS via
+   $GITHUB_ENV -- a build-time, per-cell decision that a fetch-time patch
+   cannot make directly. So the patch does not decide it at fetch time; it
+   WRITES a build-time gate into setup.py that reads torch.version.cuda (the
+   cell's own CUDA flavour) and appends the flag only when the major is >= 13.
+   The flag exists only from CUDA 12.5, so an unconditional append would break
+   the cu12.4 cell; the >= 13 gate matches exactly where the linkage default
+   changed. Inert on cu12.8 (this repo's linux-64 cell), active on cu13.x.
+
+5. The -ccbin={CC} nvcc append. setup.py appends "-ccbin={}".format(CC) to
+   nvcc_args. On linux-aarch64 CC is "aarch64-conda-linux-gnu-cc", whose
+   "aarch64" contains the substring "arch", and torch's
+   _get_cuda_arch_flags returns [] (emits NO -gencode) as soon as any nvcc
+   flag contains "arch" -- so the cell's TORCH_CUDA_ARCH_LIST is dropped and
+   nvcc builds for its default arch alone, which fails verify_conda's SASS
+   census. linux-64 is unaffected (x86_64-... has no "arch" substring). The
+   conda build env already passes -ccbin=$CXX through NVCC_PREPEND_FLAGS, so
+   the append is redundant on every platform; it is dropped (same fix as
+   cc_torch / torch-generic-nms).
 """
 import pathlib
 import sys
@@ -76,6 +92,65 @@ else:
     ast.parse(content)
     setup_file.write_text(content)
     print("pytorch3d patch: entry_points (implicitron console scripts) removed")
+
+# ── 4/5. CUDA-13 template-stub linkage + drop the -ccbin arch-discard ──────
+content = setup_file.read_text()
+
+CCBIN_OLD = (
+    "                if existing_CC is None:\n"
+    '                    CC_arg = "-ccbin={}".format(CC)\n'
+    "                    nvcc_args.append(CC_arg)\n"
+)
+CCBIN_NEW = (
+    "                if existing_CC is None:\n"
+    "                    # cuda-foundry: -ccbin={CC} append dropped. On\n"
+    '                    # linux-aarch64 CC is "aarch64-conda-linux-gnu-cc",\n'
+    '                    # whose "aarch64" contains "arch", and torch\'s\n'
+    "                    # _get_cuda_arch_flags returns [] (no -gencode) once any\n"
+    '                    # nvcc flag contains "arch", dropping the cell\'s\n'
+    "                    # TORCH_CUDA_ARCH_LIST. The conda env already passes\n"
+    "                    # -ccbin=$CXX via NVCC_PREPEND_FLAGS. See cc_torch.\n"
+    "                    pass\n"
+)
+require(
+    content.count(CCBIN_OLD) == 1,
+    f"pytorch3d: the -ccbin={{CC}} append block matched {content.count(CCBIN_OLD)} "
+    "time(s) in setup.py, expected exactly 1 -- upstream changed; re-read it",
+)
+content = content.replace(CCBIN_OLD, CCBIN_NEW, 1)
+
+STUB_OLD = '        extra_compile_args["nvcc"] = nvcc_args\n'
+STUB_NEW = (
+    "        # cuda-foundry: CUDA 13 made the default for explicitly-instantiated\n"
+    "        # __global__ templates a stub with internal linkage, so pulsar's\n"
+    "        # calc_signature<true> / calc_gradients<true> / render<true> / ...\n"
+    "        # (device instantiations in separate .gpu.cu TUs) become undefined\n"
+    "        # references at link (run 34730072697, linux-aarch64 cu130).\n"
+    "        # -static-global-template-stub=false restores the old behaviour; it\n"
+    "        # exists only from CUDA 12.5, so gate on the toolkit MAJOR >= 13\n"
+    "        # (read from torch's own CUDA, i.e. the cell's flavour).\n"
+    "        if torch.version.cuda and int(torch.version.cuda.split('.')[0]) >= 13:\n"
+    '            nvcc_args.append("-static-global-template-stub=false")\n'
+    '        extra_compile_args["nvcc"] = nvcc_args\n'
+)
+require(
+    content.count(STUB_OLD) == 1,
+    f"pytorch3d: `extra_compile_args[\"nvcc\"] = nvcc_args` matched "
+    f"{content.count(STUB_OLD)} time(s) in setup.py, expected exactly 1 -- "
+    "upstream changed; re-read it",
+)
+content = content.replace(STUB_OLD, STUB_NEW, 1)
+
+import ast as _ast  # noqa: E402
+_ast.parse(content)
+setup_file.write_text(content)
+require(
+    '.append(CC_arg)' not in setup_file.read_text()
+    and "-static-global-template-stub=false" in setup_file.read_text(),
+    "pytorch3d: the ccbin drop or the CUDA-13 stub flag did not land in setup.py",
+)
+print("pytorch3d patch: dropped -ccbin arch-discard; CUDA-13 static template "
+      "stub flag gated on torch.version.cuda >= 13")
 
 exclude_top_level_packages(["projects"])
 require('"projects"' in setup_file.read_text(),
